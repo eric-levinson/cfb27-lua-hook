@@ -437,6 +437,28 @@ table {
   table-layout: fixed;
 }
 
+#dynastyView table {
+  min-width: 5400px;
+  table-layout: auto;
+}
+
+#dynastyView th,
+#dynastyView td {
+  min-width: 72px;
+}
+
+#dynastyView th:nth-child(4),
+#dynastyView th:nth-child(5),
+#dynastyView td:nth-child(4),
+#dynastyView td:nth-child(5) {
+  min-width: 120px;
+}
+
+#dynastyView th:nth-child(10),
+#dynastyView td:nth-child(10) {
+  min-width: 230px;
+}
+
 th,
 td {
   padding: 8px 10px;

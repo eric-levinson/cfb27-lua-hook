@@ -19,7 +19,10 @@ The app runs on a Python stdlib HTTP server with a vanilla HTML/CSS/JS frontend.
   - height in inches
   - weight in pounds
   - head asset
+  - verified player ratings: OVR, SPD, ACC, STR, AGI, AWR, JMP, INJ, STA, TGH, CAR, BTK, TRK, COD, BCV, SFA, SPM, JKM, BSK, RBK, PBK, IBL, RBP, RBF, PBP, PBF, LBK, THP, TUP, SAC, MAC, DAC, TOR, PAC, TAK, PMV, FMV, BSH, PUR, PRC, MCV, ZCV, POW, PRS, CTH, SPC, CIT, SRR, MRR, DRR, KPW, KAC, KRT
 - Skin tone and hair hints are decoded from the head asset name when present, but remain read-only until the `CharacterVisuals.RawData` offsets are verified.
+
+Rating mappings were checked against EA's launch ratings pages for Jelani McDonald and Charlie Becker, then matched to local `Player` table schema fields.
 
 ## Local Requirements
 

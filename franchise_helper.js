@@ -36,6 +36,62 @@ const POSITIONS = [
   "PR",
 ];
 
+const RATING_FIELDS = [
+  ["overall", "OVR", "Overall", "OverallRating", "General", 0, 100],
+  ["speed", "SPD", "Speed", "SpeedRating", "General", 0, 99],
+  ["acceleration", "ACC", "Acceleration", "AccelerationRating", "General", 0, 99],
+  ["strength", "STR", "Strength", "StrengthRating", "General", 0, 99],
+  ["agility", "AGI", "Agility", "AgilityRating", "General", 0, 99],
+  ["awareness", "AWR", "Awareness", "AwarenessRating", "General", 0, 99],
+  ["jumping", "JMP", "Jumping", "JumpingRating", "General", 0, 99],
+  ["injury", "INJ", "Injury", "InjuryRating", "General", 0, 99],
+  ["stamina", "STA", "Stamina", "StaminaRating", "General", 0, 99],
+  ["toughness", "TGH", "Toughness", "ToughnessRating", "General", 0, 99],
+  ["carrying", "CAR", "Carrying", "CarryingRating", "Ballcarrier", 0, 99],
+  ["break_tackle", "BTK", "Break Tackle", "BreakTackleRating", "Ballcarrier", 0, 99],
+  ["trucking", "TRK", "Trucking", "TruckingRating", "Ballcarrier", 0, 99],
+  ["change_of_direction", "COD", "Change Of Direction", "ChangeOfDirectionRating", "Ballcarrier", 0, 99],
+  ["bc_vision", "BCV", "BC Vision", "BCVisionRating", "Ballcarrier", 0, 99],
+  ["stiff_arm", "SFA", "Stiff Arm", "StiffArmRating", "Ballcarrier", 0, 99],
+  ["spin_move", "SPM", "Spin Move", "SpinMoveRating", "Ballcarrier", 0, 99],
+  ["juke_move", "JKM", "Juke Move", "JukeMoveRating", "Ballcarrier", 0, 99],
+  ["break_sack", "BSK", "Break Sack", "BreakSackRating", "Ballcarrier", 0, 99],
+  ["run_block", "RBK", "Run Block", "RunBlockRating", "Blocking", 0, 99],
+  ["pass_block", "PBK", "Pass Block", "PassBlockRating", "Blocking", 0, 99],
+  ["impact_blocking", "IBL", "Impact Blocking", "ImpactBlockingRating", "Blocking", 0, 99],
+  ["run_block_power", "RBP", "Run Block Power", "RunBlockPowerRating", "Blocking", 0, 99],
+  ["run_block_finesse", "RBF", "Run Block Finesse", "RunBlockFinesseRating", "Blocking", 0, 99],
+  ["pass_block_power", "PBP", "Pass Block Power", "PassBlockPowerRating", "Blocking", 0, 99],
+  ["pass_block_finesse", "PBF", "Pass Block Finesse", "PassBlockFinesseRating", "Blocking", 0, 99],
+  ["lead_block", "LBK", "Lead Block", "LeadBlockRating", "Blocking", 0, 99],
+  ["throw_power", "THP", "Throw Power", "ThrowPowerRating", "Passing", 0, 99],
+  ["throw_under_pressure", "TUP", "Throw Under Pressure", "ThrowUnderPressureRating", "Passing", 0, 99],
+  ["throw_accuracy_short", "SAC", "Throw Accuracy Short", "ThrowAccuracyShortRating", "Passing", 0, 99],
+  ["throw_accuracy_mid", "MAC", "Throw Accuracy Mid", "ThrowAccuracyMidRating", "Passing", 0, 99],
+  ["throw_accuracy_deep", "DAC", "Throw Accuracy Deep", "ThrowAccuracyDeepRating", "Passing", 0, 99],
+  ["throw_on_the_run", "TOR", "Throw On The Run", "ThrowOnTheRunRating", "Passing", 0, 99],
+  ["play_action", "PAC", "Play Action", "PlayActionRating", "Passing", 0, 99],
+  ["tackle", "TAK", "Tackle", "TackleRating", "Defense", 0, 99],
+  ["power_moves", "PMV", "Power Moves", "PowerMovesRating", "Defense", 0, 99],
+  ["finesse_moves", "FMV", "Finesse Moves", "FinesseMovesRating", "Defense", 0, 99],
+  ["block_shedding", "BSH", "Block Shedding", "BlockSheddingRating", "Defense", 0, 99],
+  ["pursuit", "PUR", "Pursuit", "PursuitRating", "Defense", 0, 99],
+  ["play_recognition", "PRC", "Play Recognition", "PlayRecognitionRating", "Defense", 0, 99],
+  ["man_coverage", "MCV", "Man Coverage", "ManCoverageRating", "Defense", 0, 99],
+  ["zone_coverage", "ZCV", "Zone Coverage", "ZoneCoverageRating", "Defense", 0, 99],
+  ["hit_power", "POW", "Hit Power", "HitPowerRating", "Defense", 0, 99],
+  ["press", "PRS", "Press", "PressRating", "Defense", 0, 99],
+  ["catching", "CTH", "Catching", "CatchingRating", "Receiving", 0, 99],
+  ["spectacular_catch", "SPC", "Spectacular Catch", "SpectacularCatchRating", "Receiving", 0, 99],
+  ["catch_in_traffic", "CIT", "Catch In Traffic", "CatchInTrafficRating", "Receiving", 0, 99],
+  ["short_route_running", "SRR", "Short Route Running", "ShortRouteRunningRating", "Receiving", 0, 99],
+  ["medium_route_running", "MRR", "Medium Route Running", "MediumRouteRunningRating", "Receiving", 0, 99],
+  ["deep_route_running", "DRR", "Deep Route Running", "DeepRouteRunningRating", "Receiving", 0, 99],
+  ["kick_power", "KPW", "Kick Power", "KickPowerRating", "Kicking", 0, 99],
+  ["kick_accuracy", "KAC", "Kick Accuracy", "KickAccuracyRating", "Kicking", 0, 99],
+  ["kick_return", "KRT", "Kick Return", "KickReturnRating", "Kicking", 0, 99],
+];
+
 function fail(message) {
   console.error(JSON.stringify({ error: message }));
   process.exit(1);
@@ -126,6 +182,7 @@ async function readRecruitTables(franchise) {
     "GenericHeadAssetName",
     "PLYR_GENERICHEAD",
     "CharacterVisuals",
+    ...RATING_FIELDS.map((field) => field[3]),
   ]);
 
   return { recruitTable, playerTable };
@@ -155,7 +212,7 @@ function rowFromPair(pair) {
   const genericHead = playerRecord.PLYR_GENERICHEAD || "";
   const headAsset = playerRecord.GenericHeadAssetName || "";
   const visualHints = visualHintsFromHeadAsset(headAsset);
-  return {
+  const row = {
     id: String(recruitIndex),
     recruit_index: recruitIndex,
     player_index: playerIndex,
@@ -175,6 +232,10 @@ function rowFromPair(pair) {
     hair: visualHints.hair,
     character_visuals_ref: playerRecord.CharacterVisuals || "",
   };
+  for (const [key, , , schemaField] of RATING_FIELDS) {
+    row[key] = Number(playerRecord[schemaField] || 0);
+  }
+  return row;
 }
 
 function sortRecruitRows(a, b) {
@@ -215,6 +276,7 @@ function applyPatch(pair, changes) {
     "position_rank",
     "state_rank",
     "generic_head_asset_name",
+    ...RATING_FIELDS.map((field) => field[0]),
   ]);
   for (const key of Object.keys(changes)) {
     if (!allowed.has(key)) {
@@ -257,6 +319,11 @@ function applyPatch(pair, changes) {
       "Head asset",
       33,
     );
+  }
+  for (const [key, shortLabel, displayLabel, schemaField, , min, max] of RATING_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(changes, key)) {
+      playerRecord[schemaField] = cleanInt(changes[key], `${displayLabel} (${shortLabel})`, min, max);
+    }
   }
 }
 

@@ -294,12 +294,15 @@ function renderDynastyPlayers() {
   const rows = filter
     ? state.dynastyPlayers.filter((row) => JSON.stringify(row).toLowerCase().includes(filter))
     : state.dynastyPlayers;
+  const visibleRows = rows.slice(0, 300);
   els.dynastyHead.innerHTML = `<tr>${state.dynastyColumns
-    .map((column) => `<th title="${escapeHtml(column.key)}">${escapeHtml(column.label)}${column.writable ? " *" : ""}</th>`)
+    .map((column) => {
+      const title = [column.group, column.title || column.key].filter(Boolean).join(" / ");
+      return `<th title="${escapeHtml(title)}">${escapeHtml(column.label)}${column.writable ? " *" : ""}</th>`;
+    })
     .join("")}</tr>`;
-  els.dynastyBody.innerHTML = rows.length
-    ? rows
-        .slice(0, 1000)
+  els.dynastyBody.innerHTML = visibleRows.length
+    ? visibleRows
         .map(
           (row) => `<tr data-row-id="${row.id}">${state.dynastyColumns
             .map((column) => {

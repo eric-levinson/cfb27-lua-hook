@@ -149,21 +149,25 @@ class EditorTests(unittest.TestCase):
             self.assertGreaterEqual(recruits["recordCount"], 1000)
             target = recruits["players"][0]
             new_weight = target["weight_lbs"] + 1 if target["weight_lbs"] < 415 else target["weight_lbs"] - 1
+            new_speed = target["speed"] + 1 if target["speed"] < 99 else target["speed"] - 1
 
             result = store.patch_recruit(
                 file_name,
                 target["id"],
                 {
                     "weight_lbs": new_weight,
+                    "speed": new_speed,
                     "position": target["position"],
                     "national_rank": target["national_rank"],
                 },
             )
             self.assertTrue(Path(result["backup"]["backup"]).is_file())
             self.assertEqual(result["player"]["weight_lbs"], new_weight)
+            self.assertEqual(result["player"]["speed"], new_speed)
             updated = store.get_recruits(file_name, limit=5)
             updated_target = next(row for row in updated["players"] if row["id"] == target["id"])
             self.assertEqual(updated_target["weight_lbs"], new_weight)
+            self.assertEqual(updated_target["speed"], new_speed)
 
 
 if __name__ == "__main__":

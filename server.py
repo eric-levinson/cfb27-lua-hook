@@ -124,6 +124,62 @@ RECRUIT_POSITION_OPTIONS = [
     "PR",
 ]
 
+RECRUIT_RATING_COLUMNS = [
+    ("overall", "OVR", "Overall", "General", 0, 100),
+    ("speed", "SPD", "Speed", "General", 0, 99),
+    ("acceleration", "ACC", "Acceleration", "General", 0, 99),
+    ("strength", "STR", "Strength", "General", 0, 99),
+    ("agility", "AGI", "Agility", "General", 0, 99),
+    ("awareness", "AWR", "Awareness", "General", 0, 99),
+    ("jumping", "JMP", "Jumping", "General", 0, 99),
+    ("injury", "INJ", "Injury", "General", 0, 99),
+    ("stamina", "STA", "Stamina", "General", 0, 99),
+    ("toughness", "TGH", "Toughness", "General", 0, 99),
+    ("carrying", "CAR", "Carrying", "Ballcarrier", 0, 99),
+    ("break_tackle", "BTK", "Break Tackle", "Ballcarrier", 0, 99),
+    ("trucking", "TRK", "Trucking", "Ballcarrier", 0, 99),
+    ("change_of_direction", "COD", "Change Of Direction", "Ballcarrier", 0, 99),
+    ("bc_vision", "BCV", "BC Vision", "Ballcarrier", 0, 99),
+    ("stiff_arm", "SFA", "Stiff Arm", "Ballcarrier", 0, 99),
+    ("spin_move", "SPM", "Spin Move", "Ballcarrier", 0, 99),
+    ("juke_move", "JKM", "Juke Move", "Ballcarrier", 0, 99),
+    ("break_sack", "BSK", "Break Sack", "Ballcarrier", 0, 99),
+    ("run_block", "RBK", "Run Block", "Blocking", 0, 99),
+    ("pass_block", "PBK", "Pass Block", "Blocking", 0, 99),
+    ("impact_blocking", "IBL", "Impact Blocking", "Blocking", 0, 99),
+    ("run_block_power", "RBP", "Run Block Power", "Blocking", 0, 99),
+    ("run_block_finesse", "RBF", "Run Block Finesse", "Blocking", 0, 99),
+    ("pass_block_power", "PBP", "Pass Block Power", "Blocking", 0, 99),
+    ("pass_block_finesse", "PBF", "Pass Block Finesse", "Blocking", 0, 99),
+    ("lead_block", "LBK", "Lead Block", "Blocking", 0, 99),
+    ("throw_power", "THP", "Throw Power", "Passing", 0, 99),
+    ("throw_under_pressure", "TUP", "Throw Under Pressure", "Passing", 0, 99),
+    ("throw_accuracy_short", "SAC", "Throw Accuracy Short", "Passing", 0, 99),
+    ("throw_accuracy_mid", "MAC", "Throw Accuracy Mid", "Passing", 0, 99),
+    ("throw_accuracy_deep", "DAC", "Throw Accuracy Deep", "Passing", 0, 99),
+    ("throw_on_the_run", "TOR", "Throw On The Run", "Passing", 0, 99),
+    ("play_action", "PAC", "Play Action", "Passing", 0, 99),
+    ("tackle", "TAK", "Tackle", "Defense", 0, 99),
+    ("power_moves", "PMV", "Power Moves", "Defense", 0, 99),
+    ("finesse_moves", "FMV", "Finesse Moves", "Defense", 0, 99),
+    ("block_shedding", "BSH", "Block Shedding", "Defense", 0, 99),
+    ("pursuit", "PUR", "Pursuit", "Defense", 0, 99),
+    ("play_recognition", "PRC", "Play Recognition", "Defense", 0, 99),
+    ("man_coverage", "MCV", "Man Coverage", "Defense", 0, 99),
+    ("zone_coverage", "ZCV", "Zone Coverage", "Defense", 0, 99),
+    ("hit_power", "POW", "Hit Power", "Defense", 0, 99),
+    ("press", "PRS", "Press", "Defense", 0, 99),
+    ("catching", "CTH", "Catching", "Receiving", 0, 99),
+    ("spectacular_catch", "SPC", "Spectacular Catch", "Receiving", 0, 99),
+    ("catch_in_traffic", "CIT", "Catch In Traffic", "Receiving", 0, 99),
+    ("short_route_running", "SRR", "Short Route Running", "Receiving", 0, 99),
+    ("medium_route_running", "MRR", "Medium Route Running", "Receiving", 0, 99),
+    ("deep_route_running", "DRR", "Deep Route Running", "Receiving", 0, 99),
+    ("kick_power", "KPW", "Kick Power", "Kicking", 0, 99),
+    ("kick_accuracy", "KAC", "Kick Accuracy", "Kicking", 0, 99),
+    ("kick_return", "KRT", "Kick Return", "Kicking", 0, 99),
+]
+
 KEY_LABELS = {
     PLAYER_INTERNAL_KEY: "Internal ID",
     PLAYER_FIRST_KEY: "First Name",
@@ -933,7 +989,7 @@ def patch_player_payload(payload: bytes, row_id: str, changes: dict) -> tuple[by
 
 
 def recruit_columns() -> list[dict]:
-    return [
+    columns = [
         {"key": "national_rank", "label": "Nat Rank", "writable": True, "type": "number", "min": 0, "max": 4500},
         {"key": "position_rank", "label": "Pos Rank", "writable": True, "type": "number", "min": 0, "max": 4000},
         {"key": "state_rank", "label": "State Rank", "writable": True, "type": "number", "min": 0, "max": 4000},
@@ -949,6 +1005,20 @@ def recruit_columns() -> list[dict]:
         {"key": "recruit_index", "label": "Recruit Row", "writable": False},
         {"key": "player_index", "label": "Player Row", "writable": False},
     ]
+    columns.extend(
+        {
+            "key": key,
+            "label": short_label,
+            "title": display_label,
+            "group": group,
+            "writable": True,
+            "type": "number",
+            "min": min_value,
+            "max": max_value,
+        }
+        for key, short_label, display_label, group, min_value, max_value in RECRUIT_RATING_COLUMNS
+    )
+    return columns
 
 
 def parse_helper_json(stdout: str, stderr: str) -> dict:
@@ -1004,8 +1074,9 @@ def list_recruits_from_payload(payload: bytes, limit: int = 1000, offset: int = 
         "columns": recruit_columns(),
         "notes": (
             "Structured Recruit + Player tables. Editable now: recruit ranks, first/last name, "
-            "position, height in inches, weight in pounds, and head asset. Skin tone and hair hints "
-            "are decoded from head asset names but stay read-only until the CharacterVisuals offsets are verified."
+            "position, height in inches, weight in pounds, head asset, and verified EA ratings. "
+            "Skin tone and hair hints are decoded from head asset names but stay read-only until "
+            "the CharacterVisuals offsets are verified."
         ),
     }
 
