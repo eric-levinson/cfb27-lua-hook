@@ -124,6 +124,56 @@ RECRUIT_POSITION_OPTIONS = [
     "PR",
 ]
 
+ABILITY_RANK_OPTIONS = ["None", "Bronze", "Silver", "Gold", "Platinum"]
+
+DEVELOPMENT_TRAIT_OPTIONS = [
+    {"value": "Normal", "label": "Normal"},
+    {"value": "College_Impact", "label": "Impact"},
+    {"value": "College_Star", "label": "Star"},
+    {"value": "College_Elite", "label": "Elite"},
+]
+
+MENTAL_ABILITY_OPTIONS = [
+    {"value": "None", "label": "None"},
+    {"value": "RoadFanFavorite", "label": "Road Dog"},
+    {"value": "Toughness", "label": "Toughness"},
+    {"value": "FieldGeneral", "label": "Field General"},
+    {"value": "ClutchKicker", "label": "Clutch Kicker"},
+    {"value": "Captain", "label": "Captain"},
+    {"value": "TeamPlayer", "label": "Team Player"},
+    {"value": "ClearHeaded", "label": "Clear Headed"},
+    {"value": "Headstrong", "label": "Headstrong"},
+    {"value": "Adrenaline", "label": "Adrenaline"},
+    {"value": "HomeFanFavorite", "label": "Home Field Advantage"},
+    {"value": "WinningTime", "label": "Winning Time"},
+    {"value": "TheNatural", "label": "The Natural"},
+    {"value": "Rhythm", "label": "Rhythm"},
+    {"value": "BestFriend", "label": "Best Friend"},
+    {"value": "OLRally", "label": "O-Line Rally"},
+    {"value": "DLRally", "label": "D-Line Rally"},
+    {"value": "DBRally", "label": "Legion"},
+    {"value": "BellCow", "label": "Bell Cow"},
+    {"value": "HotHead", "label": "Hot Head"},
+]
+
+DEALBREAKER_OPTIONS = [
+    {"value": "AcademicPrestige", "label": "Academic Prestige"},
+    {"value": "AthleticFacilities", "label": "Athletic Facilities"},
+    {"value": "BrandExposure", "label": "Brand Exposure"},
+    {"value": "CampusLifestyle", "label": "Campus Lifestyle"},
+    {"value": "ChampionshipContender", "label": "Championship Contender"},
+    {"value": "CoachPrestige", "label": "Coach Prestige"},
+    {"value": "CoachStability", "label": "Coach Stability"},
+    {"value": "ConferencePrestige", "label": "Conference Prestige"},
+    {"value": "PlayingStyle", "label": "Playing Style"},
+    {"value": "PlayingTime", "label": "Playing Time"},
+    {"value": "ProPotential", "label": "Pro Potential"},
+    {"value": "ProgramTradition", "label": "Program Tradition"},
+    {"value": "ProximityToHome", "label": "Proximity To Home"},
+    {"value": "StadiumAtmosphere", "label": "Stadium Atmosphere"},
+    {"value": "Invalid", "label": "Invalid"},
+]
+
 RECRUIT_RATING_COLUMNS = [
     ("overall", "OVR", "Overall", "General", 0, 100),
     ("speed", "SPD", "Speed", "General", 0, 99),
@@ -996,6 +1046,11 @@ def recruit_columns() -> list[dict]:
         {"key": "first_name", "label": "First", "writable": True, "maxLength": 17},
         {"key": "last_name", "label": "Last", "writable": True, "maxLength": 21},
         {"key": "position", "label": "Pos", "writable": True, "type": "select", "options": RECRUIT_POSITION_OPTIONS},
+        {"key": "archetype", "label": "Archetype", "title": "Archetype", "writable": False},
+        {"key": "dev_trait", "label": "Dev", "title": "Development Trait", "writable": True, "type": "select", "options": DEVELOPMENT_TRAIT_OPTIONS},
+        {"key": "dealbreaker", "label": "Deal", "title": "Deal Breaker", "writable": True, "type": "select", "options": DEALBREAKER_OPTIONS},
+        {"key": "physical_traits", "label": "Physical", "title": "Physical Traits", "writable": False},
+        {"key": "mental_traits", "label": "Mental", "title": "Mental Traits", "writable": False},
         {"key": "jersey_number", "label": "#", "title": "Jersey Number", "writable": True, "type": "number", "min": 0, "max": 99},
         {"key": "height_inches", "label": "Height In", "writable": True, "type": "number", "min": 48, "max": 96},
         {"key": "height_display", "label": "Height", "writable": False},
@@ -1003,6 +1058,24 @@ def recruit_columns() -> list[dict]:
         {"key": "generic_head_asset_name", "label": "Head Asset", "writable": True, "maxLength": 33},
         {"key": "skin_tone", "label": "Skin", "writable": False},
         {"key": "hair", "label": "Hair", "writable": False},
+        {"key": "mental_ability_1", "label": "Mental 1", "writable": True, "type": "select", "options": MENTAL_ABILITY_OPTIONS},
+        {"key": "mental_rank_1", "label": "M1 Rank", "writable": True, "type": "select", "options": ABILITY_RANK_OPTIONS},
+        {"key": "mental_ability_2", "label": "Mental 2", "writable": True, "type": "select", "options": MENTAL_ABILITY_OPTIONS},
+        {"key": "mental_rank_2", "label": "M2 Rank", "writable": True, "type": "select", "options": ABILITY_RANK_OPTIONS},
+        {"key": "mental_ability_3", "label": "Mental 3", "writable": True, "type": "select", "options": MENTAL_ABILITY_OPTIONS},
+        {"key": "mental_rank_3", "label": "M3 Rank", "writable": True, "type": "select", "options": ABILITY_RANK_OPTIONS},
+        {"key": "physical_ability_1", "label": "Phys 1", "writable": False},
+        {"key": "physical_rank_1", "label": "P1 Rank", "writable": True, "type": "select", "options": ABILITY_RANK_OPTIONS},
+        {"key": "physical_ability_2", "label": "Phys 2", "writable": False},
+        {"key": "physical_rank_2", "label": "P2 Rank", "writable": True, "type": "select", "options": ABILITY_RANK_OPTIONS},
+        {"key": "physical_ability_3", "label": "Phys 3", "writable": False},
+        {"key": "physical_rank_3", "label": "P3 Rank", "writable": True, "type": "select", "options": ABILITY_RANK_OPTIONS},
+        {"key": "physical_ability_4", "label": "Phys 4", "writable": False},
+        {"key": "physical_rank_4", "label": "P4 Rank", "writable": True, "type": "select", "options": ABILITY_RANK_OPTIONS},
+        {"key": "physical_ability_5", "label": "Phys 5", "writable": False},
+        {"key": "physical_rank_5", "label": "P5 Rank", "writable": True, "type": "select", "options": ABILITY_RANK_OPTIONS},
+        {"key": "player_type", "label": "Player Type", "writable": False},
+        {"key": "dealbreaker_raw", "label": "Deal Raw", "writable": False},
         {"key": "recruit_index", "label": "Recruit Row", "writable": False},
         {"key": "player_index", "label": "Player Row", "writable": False},
     ]
@@ -1075,9 +1148,10 @@ def list_recruits_from_payload(payload: bytes, limit: int = 1000, offset: int = 
         "columns": recruit_columns(),
         "notes": (
             "Structured Recruit + Player tables. Editable now: recruit ranks, first/last name, "
-            "position, jersey number, height in inches, weight in pounds, head asset, and verified EA ratings. "
-            "Skin tone and hair hints are decoded from head asset names but stay read-only until "
-            "the CharacterVisuals offsets are verified."
+            "position, archetype display, dev trait, deal breaker, mental traits, physical trait ranks, "
+            "jersey number, height in inches, weight in pounds, head asset, and verified EA ratings. "
+            "Physical trait names are resolved for verified archetypes; skin tone and hair hints are "
+            "decoded from head asset names but stay read-only until the CharacterVisuals offsets are verified."
         ),
     }
 

@@ -36,6 +36,105 @@ const POSITIONS = [
   "PR",
 ];
 
+const ABILITY_RANKS = ["None", "Bronze", "Silver", "Gold", "Platinum"];
+
+const DEVELOPMENT_TRAITS = ["Normal", "College_Impact", "College_Star", "College_Elite"];
+
+const MENTAL_ABILITIES = [
+  "None",
+  "RoadFanFavorite",
+  "Toughness",
+  "FieldGeneral",
+  "ClutchKicker",
+  "Captain",
+  "TeamPlayer",
+  "ClearHeaded",
+  "Headstrong",
+  "Adrenaline",
+  "HomeFanFavorite",
+  "WinningTime",
+  "TheNatural",
+  "Rhythm",
+  "BestFriend",
+  "OLRally",
+  "DLRally",
+  "DBRally",
+  "BellCow",
+  "HotHead",
+];
+
+const DEALBREAKER_OPTIONS = [
+  ["AcademicPrestige", "Academic Prestige", 0],
+  ["AthleticFacilities", "Athletic Facilities", 1],
+  ["BrandExposure", "Brand Exposure", 2],
+  ["CampusLifestyle", "Campus Lifestyle", 3],
+  ["ChampionshipContender", "Championship Contender", 4],
+  ["CoachPrestige", "Coach Prestige", 5],
+  ["CoachStability", "Coach Stability", 6],
+  ["ConferencePrestige", "Conference Prestige", 7],
+  ["PlayingStyle", "Playing Style", 8],
+  ["PlayingTime", "Playing Time", 9],
+  ["ProPotential", "Pro Potential", 10],
+  ["ProgramTradition", "Program Tradition", 11],
+  ["ProximityToHome", "Proximity To Home", 12],
+  ["StadiumAtmosphere", "Stadium Atmosphere", 13],
+  ["Invalid", "Invalid", 15],
+];
+
+const DEALBREAKER_BY_KEY = new Map(DEALBREAKER_OPTIONS.map(([key, label, value]) => [key, { key, label, value }]));
+const DEALBREAKER_BY_VALUE = new Map(DEALBREAKER_OPTIONS.map(([key, label, value]) => [value, { key, label, value }]));
+
+const PLAYER_TYPE_LABELS = {
+  QB_FieldGeneral: "Pocket Passer",
+  S_Zone: "Coverage Specialist",
+  WR_Physical: "Physical",
+  WR_DeepThreat: "Deep Threat",
+  WR_Playmaker: "Playmaker",
+  WR_Slot: "Slot",
+  HB_PowerBack: "Power Back",
+  HB_ElusiveBack: "Elusive Back",
+  HB_ReceivingBack: "Receiving Back",
+  TE_Blocking: "Blocking",
+  TE_VerticalThreat: "Vertical Threat",
+  TE_Possession: "Possession",
+  CB_MantoMan: "Man To Man",
+  CB_Zone: "Zone",
+  S_RunSupport: "Run Support",
+  S_Hybrid: "Hybrid",
+};
+
+const PHYSICAL_ABILITIES_BY_PLAYER_TYPE = {
+  QB_FieldGeneral: ["Resistance", "Step Up", "Sleight of Hand", "Dot!", "On Time"],
+  S_Zone: ["Ballhawk", "Lay Out", "House Call", "Robber", "Knockout"],
+};
+
+const MENTAL_ABILITY_LABELS = {
+  RoadFanFavorite: "Road Dog",
+  HomeFanFavorite: "Home Field Advantage",
+  FieldGeneral: "Field General",
+  TheNatural: "The Natural",
+  DBRally: "Legion",
+  OLRally: "O-Line Rally",
+  DLRally: "D-Line Rally",
+  BellCow: "Bell Cow",
+  BestFriend: "Best Friend",
+  ClutchKicker: "Clutch Kicker",
+  ClearHeaded: "Clear Headed",
+  TeamPlayer: "Team Player",
+  WinningTime: "Winning Time",
+};
+
+const DEVELOPMENT_LABELS = {
+  Normal: "Normal",
+  College_Impact: "Impact",
+  College_Star: "Star",
+  College_Elite: "Elite",
+  Star: "Star",
+  Superstar: "Superstar",
+  XFactor: "X-Factor",
+  Hidden: "Hidden",
+};
+
 const RATING_FIELDS = [
   ["overall", "OVR", "Overall", "OverallRating", "General", 0, 100],
   ["speed", "SPD", "Speed", "SpeedRating", "General", 0, 99],
@@ -142,6 +241,67 @@ function visualHintsFromHeadAsset(headAsset) {
   };
 }
 
+function splitTypeName(value) {
+  return String(value || "")
+    .replace(/^[A-Z]+_/, "")
+    .replace(/_/g, " ")
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/\b\w/g, (char) => char.toUpperCase())
+    .trim();
+}
+
+function displayPlayerType(playerType) {
+  return PLAYER_TYPE_LABELS[playerType] || splitTypeName(playerType);
+}
+
+function displayMentalAbility(value) {
+  if (!value || value === "None") return "None";
+  return MENTAL_ABILITY_LABELS[value] || splitTypeName(value);
+}
+
+function displayDevelopmentTrait(value) {
+  return DEVELOPMENT_LABELS[value] || splitTypeName(value);
+}
+
+function decodeDealbreaker(rawValue) {
+  const bits = String(rawValue || "");
+  if (!/^[01]{4,}/.test(bits)) {
+    return { key: "", label: "", raw: bits };
+  }
+  const value = Number.parseInt(bits.slice(0, 4), 2);
+  const mapped = DEALBREAKER_BY_VALUE.get(value);
+  return {
+    key: mapped ? mapped.key : `Unknown_${value}`,
+    label: mapped ? mapped.label : `Unknown ${value}`,
+    raw: bits,
+  };
+}
+
+function encodeDealbreaker(currentRawValue, key) {
+  const mapped = DEALBREAKER_BY_KEY.get(key);
+  if (!mapped) {
+    throw new Error(`Deal breaker must be one of: ${DEALBREAKER_OPTIONS.map(([item]) => item).join(", ")}`);
+  }
+  const suffix = /^[01]{4,}$/.test(String(currentRawValue || ""))
+    ? String(currentRawValue).slice(4)
+    : "0".repeat(28);
+  return mapped.value.toString(2).padStart(4, "0") + suffix;
+}
+
+function physicalAbilityNames(playerType) {
+  return PHYSICAL_ABILITIES_BY_PLAYER_TYPE[playerType] || ["Physical 1", "Physical 2", "Physical 3", "Physical 4", "Physical 5"];
+}
+
+function formatAbilityList(names, ranks) {
+  return names
+    .map((name, index) => {
+      const rank = ranks[index] || "None";
+      return rank === "None" ? "" : `${name} (${rank})`;
+    })
+    .filter(Boolean)
+    .join(", ");
+}
+
 function getReference(value) {
   if (!value || typeof value !== "string" || !/^[01]+$/.test(value)) {
     return null;
@@ -180,6 +340,20 @@ async function readRecruitTables(franchise) {
     "Weight",
     "Position",
     "JerseyNum",
+    "PlayerType",
+    "TraitDevelopment",
+    "RecruitingDealbreaker",
+    "MentalAbility1",
+    "MentalAbility2",
+    "MentalAbility3",
+    "MentalAbilityRank1",
+    "MentalAbilityRank2",
+    "MentalAbilityRank3",
+    "PhysicalAbility1",
+    "PhysicalAbility2",
+    "PhysicalAbility3",
+    "PhysicalAbility4",
+    "PhysicalAbility5",
     "GenericHeadAssetName",
     "PLYR_GENERICHEAD",
     "CharacterVisuals",
@@ -213,6 +387,26 @@ function rowFromPair(pair) {
   const genericHead = playerRecord.PLYR_GENERICHEAD || "";
   const headAsset = playerRecord.GenericHeadAssetName || "";
   const visualHints = visualHintsFromHeadAsset(headAsset);
+  const playerType = playerRecord.PlayerType || "";
+  const physicalNames = physicalAbilityNames(playerType);
+  const physicalRanks = [
+    playerRecord.PhysicalAbility1 || "None",
+    playerRecord.PhysicalAbility2 || "None",
+    playerRecord.PhysicalAbility3 || "None",
+    playerRecord.PhysicalAbility4 || "None",
+    playerRecord.PhysicalAbility5 || "None",
+  ];
+  const mentalAbilities = [
+    playerRecord.MentalAbility1 || "None",
+    playerRecord.MentalAbility2 || "None",
+    playerRecord.MentalAbility3 || "None",
+  ];
+  const mentalRanks = [
+    playerRecord.MentalAbilityRank1 || "None",
+    playerRecord.MentalAbilityRank2 || "None",
+    playerRecord.MentalAbilityRank3 || "None",
+  ];
+  const dealbreaker = decodeDealbreaker(playerRecord.RecruitingDealbreaker);
   const row = {
     id: String(recruitIndex),
     recruit_index: recruitIndex,
@@ -223,6 +417,31 @@ function rowFromPair(pair) {
     first_name: playerRecord.FirstName || "",
     last_name: playerRecord.LastName || "",
     position: playerRecord.Position || "",
+    archetype: displayPlayerType(playerType),
+    player_type: playerType,
+    dev_trait: playerRecord.TraitDevelopment || "",
+    dev_trait_display: displayDevelopmentTrait(playerRecord.TraitDevelopment),
+    dealbreaker: dealbreaker.key,
+    dealbreaker_display: dealbreaker.label,
+    dealbreaker_raw: dealbreaker.raw,
+    physical_traits: formatAbilityList(physicalNames, physicalRanks),
+    physical_ability_1: physicalNames[0],
+    physical_rank_1: physicalRanks[0],
+    physical_ability_2: physicalNames[1],
+    physical_rank_2: physicalRanks[1],
+    physical_ability_3: physicalNames[2],
+    physical_rank_3: physicalRanks[2],
+    physical_ability_4: physicalNames[3],
+    physical_rank_4: physicalRanks[3],
+    physical_ability_5: physicalNames[4],
+    physical_rank_5: physicalRanks[4],
+    mental_traits: formatAbilityList(mentalAbilities.map(displayMentalAbility), mentalRanks),
+    mental_ability_1: mentalAbilities[0],
+    mental_rank_1: mentalRanks[0],
+    mental_ability_2: mentalAbilities[1],
+    mental_rank_2: mentalRanks[1],
+    mental_ability_3: mentalAbilities[2],
+    mental_rank_3: mentalRanks[2],
     jersey_number: Number(playerRecord.JerseyNum || 0),
     height_inches: height,
     height_display: heightDisplay(height),
@@ -279,6 +498,19 @@ function applyPatch(pair, changes) {
     "position_rank",
     "state_rank",
     "generic_head_asset_name",
+    "dev_trait",
+    "dealbreaker",
+    "mental_ability_1",
+    "mental_ability_2",
+    "mental_ability_3",
+    "mental_rank_1",
+    "mental_rank_2",
+    "mental_rank_3",
+    "physical_rank_1",
+    "physical_rank_2",
+    "physical_rank_3",
+    "physical_rank_4",
+    "physical_rank_5",
     ...RATING_FIELDS.map((field) => field[0]),
   ]);
   for (const key of Object.keys(changes)) {
@@ -325,6 +557,43 @@ function applyPatch(pair, changes) {
       "Head asset",
       33,
     );
+  }
+  if (Object.prototype.hasOwnProperty.call(changes, "dev_trait")) {
+    if (!DEVELOPMENT_TRAITS.includes(changes.dev_trait)) {
+      throw new Error(`Dev trait must be one of: ${DEVELOPMENT_TRAITS.join(", ")}`);
+    }
+    playerRecord.TraitDevelopment = changes.dev_trait;
+  }
+  if (Object.prototype.hasOwnProperty.call(changes, "dealbreaker")) {
+    playerRecord.RecruitingDealbreaker = encodeDealbreaker(
+      playerRecord.RecruitingDealbreaker,
+      changes.dealbreaker,
+    );
+  }
+  for (const index of [1, 2, 3]) {
+    const abilityKey = `mental_ability_${index}`;
+    const rankKey = `mental_rank_${index}`;
+    if (Object.prototype.hasOwnProperty.call(changes, abilityKey)) {
+      if (!MENTAL_ABILITIES.includes(changes[abilityKey])) {
+        throw new Error(`${abilityKey} must be a known mental ability`);
+      }
+      playerRecord[`MentalAbility${index}`] = changes[abilityKey];
+    }
+    if (Object.prototype.hasOwnProperty.call(changes, rankKey)) {
+      if (!ABILITY_RANKS.includes(changes[rankKey])) {
+        throw new Error(`${rankKey} must be one of: ${ABILITY_RANKS.join(", ")}`);
+      }
+      playerRecord[`MentalAbilityRank${index}`] = changes[rankKey];
+    }
+  }
+  for (const index of [1, 2, 3, 4, 5]) {
+    const rankKey = `physical_rank_${index}`;
+    if (Object.prototype.hasOwnProperty.call(changes, rankKey)) {
+      if (!ABILITY_RANKS.includes(changes[rankKey])) {
+        throw new Error(`${rankKey} must be one of: ${ABILITY_RANKS.join(", ")}`);
+      }
+      playerRecord[`PhysicalAbility${index}`] = changes[rankKey];
+    }
   }
   for (const [key, shortLabel, displayLabel, schemaField, , min, max] of RATING_FIELDS) {
     if (Object.prototype.hasOwnProperty.call(changes, key)) {

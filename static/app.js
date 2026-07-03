@@ -312,8 +312,10 @@ function renderDynastyPlayers() {
                 if (column.type === "select") {
                   const options = (column.options || [])
                     .map((option) => {
-                      const selected = String(option) === String(value) ? " selected" : "";
-                      return `<option value="${escapeHtml(String(option))}"${selected}>${escapeHtml(String(option))}</option>`;
+                      const optionValue = typeof option === "object" ? option.value : option;
+                      const optionLabel = typeof option === "object" ? option.label : option;
+                      const selected = String(optionValue) === String(value) ? " selected" : "";
+                      return `<option value="${escapeHtml(String(optionValue))}"${selected}>${escapeHtml(String(optionLabel))}</option>`;
                     })
                     .join("");
                   return `<td title="${escapeHtml(String(value))}"><select class="dynasty-input" data-column="${column.key}">${options}</select></td>`;

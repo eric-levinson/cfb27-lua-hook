@@ -151,11 +151,17 @@ class EditorTests(unittest.TestCase):
             new_weight = target["weight_lbs"] + 1 if target["weight_lbs"] < 415 else target["weight_lbs"] - 1
             new_speed = target["speed"] + 1 if target["speed"] < 99 else target["speed"] - 1
             new_jersey = 99 if target["jersey_number"] != 99 else 98
+            new_physical_rank = "Gold" if target["physical_rank_1"] != "Gold" else "Silver"
 
             result = store.patch_recruit(
                 file_name,
                 target["id"],
                 {
+                    "dev_trait": "College_Star",
+                    "dealbreaker": "PlayingTime",
+                    "physical_rank_1": new_physical_rank,
+                    "mental_ability_1": "TheNatural",
+                    "mental_rank_1": "Gold",
                     "jersey_number": new_jersey,
                     "weight_lbs": new_weight,
                     "speed": new_speed,
@@ -164,11 +170,21 @@ class EditorTests(unittest.TestCase):
                 },
             )
             self.assertTrue(Path(result["backup"]["backup"]).is_file())
+            self.assertEqual(result["player"]["dev_trait"], "College_Star")
+            self.assertEqual(result["player"]["dealbreaker"], "PlayingTime")
+            self.assertEqual(result["player"]["physical_rank_1"], new_physical_rank)
+            self.assertEqual(result["player"]["mental_ability_1"], "TheNatural")
+            self.assertEqual(result["player"]["mental_rank_1"], "Gold")
             self.assertEqual(result["player"]["jersey_number"], new_jersey)
             self.assertEqual(result["player"]["weight_lbs"], new_weight)
             self.assertEqual(result["player"]["speed"], new_speed)
             updated = store.get_recruits(file_name, limit=5)
             updated_target = next(row for row in updated["players"] if row["id"] == target["id"])
+            self.assertEqual(updated_target["dev_trait"], "College_Star")
+            self.assertEqual(updated_target["dealbreaker"], "PlayingTime")
+            self.assertEqual(updated_target["physical_rank_1"], new_physical_rank)
+            self.assertEqual(updated_target["mental_ability_1"], "TheNatural")
+            self.assertEqual(updated_target["mental_rank_1"], "Gold")
             self.assertEqual(updated_target["jersey_number"], new_jersey)
             self.assertEqual(updated_target["weight_lbs"], new_weight)
             self.assertEqual(updated_target["speed"], new_speed)
