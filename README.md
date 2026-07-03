@@ -14,7 +14,7 @@ Supported files discovered so far:
 - `ROSTER-Official`: roster save, using the older TLV-style player scanner.
 - `PROFILE-COLLEGE`: parsed as an `FBCHUNKS` file, but not currently a main player-edit target.
 
-Every write creates a timestamped backup in `cfb27-save-editor/backups/` before overwriting the original save.
+Manual editor writes create a timestamped backup in `cfb27-save-editor/backups/` before overwriting the original save. Generator apply is safer by default: it creates the backup, then writes a new top-level `*-MODDED-*` dynasty save copy and leaves the selected source save unchanged.
 
 ## Current Editing Support
 
@@ -180,7 +180,8 @@ The Python backend:
 5. Recompresses it into the original `FBCHUNKS` container.
 6. Verifies the rebuilt file can be parsed again.
 7. Creates a timestamped backup.
-8. Writes the edited save.
+8. Writes the edited save atomically.
+9. For generator apply, writes a new modded save copy by default, reloads that target, and compares intended generated writes against read-back joined profiles.
 
 The Node helper intentionally does not write the outer save container. It only rebuilds the decompressed FrTk payload after `madden-franchise` updates table records. Python owns the outer container rebuild so the app avoids double-wrapping or corrupting the save.
 
@@ -308,7 +309,10 @@ The app follows these rules before writing a save:
 - Validate numeric ranges for ranks, body fields, jersey number, and ratings.
 - Rebuild the save in memory first.
 - Re-parse the rebuilt `FBCHUNKS` output before writing.
-- Create a timestamped backup before overwrite.
+- Create a timestamped backup before writing.
+- Write bytes through a same-directory temporary file and atomic replace.
+- For generator apply, write a new `*-MODDED-*` save copy by default so the selected save remains unchanged.
+- Treat local parser/read-back success as necessary but not proof that the game will load the save; use disposable modded copies for game-load verification.
 
 ## Current Limitations
 

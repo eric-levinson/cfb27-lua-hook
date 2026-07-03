@@ -1,0 +1,625 @@
+Progress on 001 - Field Research And Safety Gates
+
+Status as of 2026-07-03
+
+Done
+
+- Read `.requirements/README.md` and `.requirements/001-field-research-and-safety-gates.md`.
+- Marked 001 as In Progress.
+- Added machine-readable field capability metadata in `server.py`.
+- Exposed `GET /api/generator/field-capabilities`.
+- Added generator-mode gating for recruit patch writes, so future generator apply paths cannot write fields marked research, preserve, or unsafe.
+- Kept existing manual recruit editing behavior intact by making strict capability gating opt-in with `mode: "generator"`.
+- Added future generator field aliases for currently research-gated fields such as star rating, player type, body type, quality modifier, and home state so they fail with useful gate-aware errors.
+- Added `franchise_helper.js research <frk-payload> [sampleLimit]`.
+- The research helper currently scans RG-1 recruit-to-player link integrity and observed values for early fields including star rating, player type, body type, quality modifier, production grade, caps, and ability slots.
+- Added optional durable JSON output: `franchise_helper.js research <frk-payload> [sampleLimit] [outputJson]`.
+- Added research helper field readability metadata and a `missingFields` list so unsupported schema fields are called out directly.
+- Documented the research helper in `README.md`.
+- Added unit coverage for field capability normalization, generator-mode rejection of research-gated fields, the field capability API, and RG-1 research artifact output.
+
+Verification Completed
+
+- `python -m unittest -v test_editor.py` passed with 13 tests.
+- `node franchise_helper.js research schema\DYNASTY-decompressed-FrTk.bin 25` ran successfully.
+- `node franchise_helper.js research schema\DYNASTY-decompressed-FrTk.bin 1000 .requirements\research\rg1-local-dynasty.json` wrote a durable local research artifact.
+- RG-1 passed on the local decompressed dynasty fixture:
+  - active recruit rows: 4101
+  - valid Recruit.Player links: 4101
+  - unresolved links: 0
+  - shared player links: 0
+- Field availability scan found 28 observed early-gate fields and no missing fields in the local decompressed dynasty fixture.
+
+Remaining Work For 001
+
+- Run and keep representative research JSON artifacts under `.requirements\research\` when using real save fixtures.
+- Add a first-class research notes location or convention for mapping tables, gate evidence, and limitations.
+- Run RG-1 across every representative dynasty save fixture, not just the current decompressed fixture.
+- Expand RG-2 read-back coverage into explicit per-field capability evidence for every V1 writable field.
+- Add generated batch edit tests on copied saves for currently writable recruit/player fields.
+- Add a generator-mode patch test against a copied save to prove research-gated fields are rejected before writing.
+- RG-3: decode `Player.ProspectStarRating` into one-star through five-star mapping, then add read-back tests before promotion.
+- RG-4: build position-to-`PlayerType` archetype maps and invalid-combination notes.
+- RG-5: map `CharacterBodyType` labels/values to visual presets and decide whether in-game confirmation is required.
+- RG-6: verify `Recruit.QualityModifier` behavior for normal, gem, bust, and hidden values.
+- RG-7: define safe appearance tokens by pairing `GenericHeadAssetName`, `PLYR_PORTRAIT`, and related head fields; keep generator writes blocked until paired-token reuse is proven.
+- RG-8: identify which home-state field drives `StateRank` and verify state-rank recalculation behavior.
+- Keep RG-9, RG-10, and RG-11 preserved until their later research work is complete.
+- Add UI support so generator previews can show writable, preview-only, skipped because unverified, and blocked because unsafe states.
+- Make future generator apply code call the capability gate in `mode: "generator"` by default.
+
+Known Caveats
+
+- Existing manual editor writes for mental ability slots, physical rank slots, and head asset remain available for continuity, but generator writes for those fields are blocked by capability metadata.
+- `Player.GenericHeadAssetName` is intentionally manual-writable but generator-gated until RG-7 proves paired appearance-token safety.
+- `.gitignore` had pre-existing uncommitted changes and was not touched during this work.
+
+
+Progress on 002 - Joined Recruit Profile Model
+
+Status as of 2026-07-03
+
+Done
+
+- Read `.requirements/README.md` and `.requirements/002-joined-recruit-profile-model.md`.
+- Marked 002 as In Progress.
+- Added `franchise_helper.js joined <frk-payload> [limit] [offset]`.
+- The joined helper reads full `Recruit` and `Player` tables, validates every active recruit has one linked player row, and rejects unresolved or duplicate player links before returning profiles.
+- Added normalized read-only joined profile records with:
+  - stable `Recruit:<row>` and `Player:<row>` ids.
+  - source row ids and save fingerprint placeholder.
+  - identity fields.
+  - football profile fields for rank, position, archetype, profile type, readiness, physical, technical, mental, ceiling, confidence, and body composition.
+  - game fields for ratings, development trait, quality modifier, star/body fields, dealbreaker, size, jersey number, appearance token, and empty `generatedWrites`.
+  - empty row/field locks.
+  - sidecar-ready generation intent stub.
+  - original Recruit and Player field snapshots for future diffs and rollback reports.
+- Added `joined_recruit_profiles_from_payload()` in `server.py`.
+- Added `SaveStore.get_joined_recruits()`.
+- Exposed `GET /api/generator/recruits/{file}` with optional `limit` and `offset`.
+- The API injects a decompressed-payload SHA-256 save fingerprint into the response and each profile source.
+- The API returns the existing field capability matrix beside the joined profiles so preview/apply code can distinguish writable, skipped, preview-only, and blocked fields.
+- Added tests for normalized profile shape, fingerprint propagation, empty generated writes, locks, raw field preservation, validation state, and store-level API output.
+- Reworked the frontend into a single-page recruit generator workbench centered on joined profiles.
+- Removed the frontend tabs and UI paths for roster players, inferred tables, schema browsing, and manual recruit cell editing.
+- The SPA now loads dynasty saves, joined recruit profiles, field capability counts, profile score indicators, preserved/generated field state, row tracing, appearance token fields, and sidecar intent.
+- Added sidecar identity metadata to joined profile API responses.
+- Decided sidecar storage contract: `cfb27-save-editor/sidecars/{saveName}.{saveFingerprint}.json`.
+- Decided sidecar record key strategy: `<fingerprint12>:R<recruitRow>:P<playerRow>`.
+- Added sidecar record ids to each profile and mirrored them into `generationIntent.sidecarRecordId`.
+- Added explicit SPA lock controls for whole-recruit locks and field-group locks.
+- Lock state is currently browser-local, keyed by save fingerprint and joined recruit/player rows, and overlaid onto profiles on load.
+
+Verification Completed
+
+- `python -m unittest -v test_editor.py` passed with 15 tests.
+- `node franchise_helper.js joined schema\DYNASTY-decompressed-FrTk.bin 1` returned 4,101 joined profiles and confirmed raw Recruit/Player snapshots are populated.
+- After the SPA rewrite, `python -m unittest -v test_editor.py` passed with 15 tests.
+- After sidecar and lock additions, `python -m unittest -v test_editor.py` passed with 15 tests.
+- Browser verification loaded 4,101 joined profiles, showed 7 lock field groups, displayed `generationIntent.sidecarRecordId`, toggled a row lock for Isaac Bynum, and confirmed the lock persisted after reload with no console errors.
+
+Remaining Work For 002
+
+- Feed joined profiles into the future deterministic preview generator from requirement 004.
+- Add generated diff and rollback report structures once preview writes exist.
+- Decide whether lock state should stay browser-local or move into app-local metadata before apply workflows exist.
+
+
+Progress on 003 - Generation Config Contract
+
+Status as of 2026-07-03
+
+Done
+
+- Read `.requirements/README.md` and `.requirements/003-generation-config-contract.md`.
+- Marked 003 as In Progress.
+- Added a built-in version 1 `manifesto-realistic-v1` generator config in `server.py`.
+- Added config validation and normalization helpers for:
+  - required top-level contract keys.
+  - supported `configVersion`.
+  - stable ids.
+  - `reroll-existing-recruits` generator mode.
+  - `verified-fields-only` write policy.
+  - class budget position-weight normalization.
+  - rank-band interval validation.
+  - star-cutoff interval validation.
+  - profile-type rank-band weight normalization.
+  - known position validation.
+  - body-rule numeric range validation.
+  - config write-field group resolution against field capability metadata.
+- Exposed `GET /api/generator/default-configs`.
+- Exposed `POST /api/generator/config/validate`.
+- Added normalized `writeFieldStates` so the UI and future preview/apply code can distinguish writable, preview-only, and disabled config groups.
+- Research-gated write groups such as star rating, archetype, body type, quality modifier, abilities, and skill caps remain blocked from direct writes through config alone.
+- Added SPA config controls for validate, import JSON, export normalized JSON, duplicate, and reset to built-in default.
+- Added a JSON config editor panel to the generator workbench.
+- Added unit coverage for default config validation, validation API behavior, probability normalization, future-version rejection, rank overlap detection, and research-gated write-field warnings.
+- Expanded the built-in archetype profile definitions so every referenced position archetype has primary rating intent.
+- Added validation for position-profile references to known archetype profiles and body rules.
+- Added validation for archetype primary rating keys.
+- Added rank-band coverage validation across profile-type weights.
+- Added development trait weight normalization and validation against known development trait values.
+- Added development rank-band multiplier validation.
+- Added quality modifier budget validation for gem/bust budgets.
+- Added body-rule bounds validation against current safe height and weight ranges.
+- Added class-budget versus star-cutoff mismatch warnings.
+- Added browser-local persistence for the active normalized config. Saved configs are revalidated on page load before use; invalid saved configs fall back to the built-in default.
+- Added config round-trip, cross-reference, profile coverage, body bounds, and class-budget warning unit coverage.
+- Added compact config controls for common settings without raw JSON editing:
+  - config name and id.
+  - five-star and four-star class budgets.
+  - class strength min and max.
+  - overall tolerance and rare-overall validation thresholds.
+  - star rating, archetype, and quality modifier write policies.
+- Config controls submit through the same server validation path as JSON import and keep the normalized JSON editor synchronized.
+- Added explicit config migration handling:
+  - `configVersion: 0` configs migrate to version 1.
+  - missing `configVersion` configs are treated as legacy and migrate to version 1.
+  - sparse legacy configs are filled from the built-in v1 default.
+  - supplied legacy `classBudget.positionWeights` replace default position weights before normalization.
+  - future config versions remain rejected with migration guidance.
+- Validation responses now include `migrationWarnings`, and the SPA surfaces them alongside other config warnings.
+- Added unit coverage for legacy sparse config migration and missing-version migration.
+- Expanded the built-in config so every position with a positive class-budget weight has a position profile, archetype weights, compatible archetype definitions, and body rule coverage.
+- Added config validation requiring every positive-weight class-budget position to have a `positionProfiles` entry before generation.
+- Added lightweight archetype-to-position compatibility validation based on generator archetype id families, while keeping actual `PlayerType` writes research-gated behind RG-4.
+- Added unit coverage for complete default position-profile coverage, missing weighted-position profiles, and mismatched position/archetype config references.
+- Added optional `recruitCount` validation context to `POST /api/generator/config/validate`.
+- Added class-budget plausibility validation against the active recruit count, including five-star plus four-star totals, elite/generational/platinum budget maxima, and gem/bust budget totals.
+- Tightened player-count budget ranges so class scarcity and gem/bust budgets must use non-negative integer counts.
+- Updated the SPA config validator to send the loaded joined recruit count when available and to surface save-specific config errors without replacing the user config.
+- Added unit coverage for recruit-count validation context and impossible class/quality budget totals.
+
+Verification Completed
+
+- `python -m unittest -v test_editor.py` passed with 25 tests.
+- `node --check static\app.js` passed.
+- Started the local server on `http://127.0.0.1:8766`.
+- `GET /api/generator/default-configs` returned HTTP 200.
+- Browser verification loaded the SPA, populated the normalized default config editor, loaded 4,101 joined recruit profiles, showed no console errors, and validated the config through the UI.
+- Browser verification duplicated a config, reloaded the app, confirmed the duplicated config persisted visibly after reload, loaded 4,101 joined recruit profiles with no console errors, then reset back to the built-in default config.
+- Browser verification changed config values through the compact controls, applied them through validation, confirmed normalized JSON updates, confirmed a research-gated quality modifier write request was converted to preview-only with one warning, and reset back to the built-in default config.
+- Fresh-server HTTP verification on `http://127.0.0.1:8768` validated a sparse `configVersion: 0` config, returned a migration warning, normalized it to version 1, and preserved the supplied five-star budget.
+- `python -m unittest -v test_editor.py` passed with 26 tests after full weighted-position profile coverage and archetype compatibility validation were added.
+- `python -m unittest -v test_editor.py` passed with 27 tests after recruit-count budget validation was added.
+- `node --check static\app.js` passed.
+
+Remaining Work For 003
+
+- Estimated progress: 97%.
+- Wire normalized configs into deterministic preview generation from requirement 004.
+- Replace generator-id archetype compatibility with decoded `PlayerType` compatibility once RG-4 maps are complete.
+- Add full manifesto body-type restriction validation once RG-5 maps body type values.
+
+
+Progress on 004 - Core Talent Generation V1
+
+Status as of 2026-07-03
+
+Done
+
+- Read `.requirements/README.md` and `.requirements/004-core-talent-generation-v1.md`.
+- Started preview-only V1 implementation; no apply/write path was added.
+- Added deterministic preview generation in `server.py` from joined recruit profiles, normalized config, save fingerprint, and seed.
+- Added stable seed-driven PRNG, weighted position allocation, rank-band lookup, rank-derived star preview values, profile-type selection, archetype selection, class-strength modifier, and scarce elite-development/gem/bust budgets.
+- Added body generation from config body rules with height, display weight, encoded weight, and body-composition labels.
+- Added ratings generation from readiness, physical, technical, mental, ceiling, archetype primary ratings, and rank-band overall validation targets.
+- Added final quality sorting, then assigned national rank, position rank, and state rank when home-state data is known.
+- Added generated write diffs for verified writable fields only: ranks, position, development trait, height, weight, and ratings.
+- Added skipped-field reporting for research-gated preview concepts such as star rating, archetype/player type, and quality modifier.
+- Added row and field lock handling for preview diffs, accepting both sidecar record ids and browser-local full-fingerprint lock keys.
+- Exposed `POST /api/generator/preview`.
+- Added `SaveStore.preview_generator()` so preview generation operates server-side over the full joined recruit pool.
+- Added SPA controls for preview seed and `Generate Preview`.
+- Added SPA preview summary for preview id, seed, writable diffs, skipped fields, star distribution, rank-band distribution, development distribution, and quality modifier distribution.
+- Updated the inspector to show generated write payloads for the selected preview recruit.
+- Added unit coverage for deterministic preview output, different-seed changes, unique national ranks, rank-derived star preview, research-gated star exclusion from diffs, generated writable diffs, and row-lock suppression.
+- Added a structured preview validation report with class-level checks for contiguous national ranks, unique position ranks, unique known-state ranks, star cutoffs, rating bounds, rare OVR caps, locked-row diff safety, elite development budget, and gem/bust budget.
+- Added validation error and warning counts to preview summary output and the SPA summary strip.
+- Moved rare OVR cap enforcement to final rank assignment so post-sort rank bands own the actual generated OVR bounds.
+- Added endpoint integration coverage for `POST /api/generator/preview` using a temporary top-level dynasty save copy that is removed after the test.
+- Added per-recruit `gameFields.generatedDiffs` so each generated profile carries its own writable before/after diff rows.
+- Expanded `validationReport.details` with rank-band and position breakdowns, including count and OVR min/max/average values.
+- Added selected-recruit before/after diff table to the SPA inspector.
+- Added compact validation-report details to the SPA inspector and validation counts to the class preview summary strip.
+- Added test coverage for per-recruit generated diffs and validation detail payloads.
+- Added `summary.budgets` with configured min/max, generated target, and actual counts for generational freshmen, elite development, gems, and busts.
+- Marked generated generational freshmen in `generationIntent.generationalFreshman`.
+- Added class-budget chips to the SPA preview summary and selected-recruit generational status to the inspector.
+- Added sampled validation warning/error rows for OVR validation issues and surfaced those samples in the SPA validation report.
+- Added deterministic test coverage for class-budget actual/target counts and validation sample payload keys.
+- Added `summary.diffFields` to group writable diffs by field with counts and sample before/after values.
+- Added `summary.budgetConsumers` to expose budget-consuming recruits for generational freshmen, elite development, gems, and busts.
+- Added a class-level SPA preview browser with compact diff-field and budget-recruit tables.
+- Budget-recruit rows now jump directly to the selected recruit inspector.
+- Added test coverage for diff-field summaries and budget-consumer payload shape.
+- Centralized generated weight encoding through helper functions instead of inline arithmetic.
+- Reused explicit weight decode/encode helpers in preview diff generation and the Node recruit patch helper.
+- Expanded preview validation with body-rule bounds and encoded-weight consistency checks.
+- Added validation counts/check flags for body-rule and encoded-weight errors.
+- Surfaced body-rule and weight-encoding error counts in the SPA validation inspector.
+- Added unit coverage proving valid previews pass the new body/weight checks and mismatched encoded weight fails validation.
+
+Verification Completed
+
+- `node --check static\app.js` passed.
+- `python -m py_compile server.py test_editor.py` passed.
+- `python -m unittest -v test_editor.py` passed with 29 tests.
+- After validation-report and endpoint-test iteration, `node --check static\app.js` passed.
+- After validation-report and endpoint-test iteration, `python -m py_compile server.py test_editor.py` passed.
+- After validation-report and endpoint-test iteration, `python -m unittest -v test_editor.py` passed with 30 tests.
+- After per-recruit diff and validation-detail iteration, `node --check static\app.js` passed.
+- After per-recruit diff and validation-detail iteration, `python -m py_compile server.py test_editor.py` passed.
+- After per-recruit diff and validation-detail iteration, `python -m unittest -v test_editor.py` passed with 30 tests.
+- After class-budget and validation-sample iteration, `node --check static\app.js` passed.
+- After class-budget and validation-sample iteration, `python -m py_compile server.py test_editor.py` passed.
+- After class-budget and validation-sample iteration, focused preview tests passed.
+- After class-budget and validation-sample iteration, `python -m unittest -v test_editor.py` passed with 30 tests.
+- After class-level diff browser iteration, `node --check static\app.js` passed.
+- After class-level diff browser iteration, `python -m py_compile server.py test_editor.py` passed.
+- After class-level diff browser iteration, focused preview tests passed.
+- After class-level diff browser iteration, `python -m unittest -v test_editor.py` passed with 30 tests.
+- After body/weight validation iteration, `node --check static\app.js` passed.
+- After body/weight validation iteration, `node --check franchise_helper.js` passed.
+- After body/weight validation iteration, `python -m py_compile server.py test_editor.py` passed.
+- After body/weight validation iteration, `python -m unittest -v test_editor.py` passed with 31 tests.
+
+Remaining Work For 004
+
+- Continue expanding validation reports with non-OVR warning categories as new generator invariants are added.
+- Improve OVR calculation with position-specific formulas once game OVR behavior is decoded; current V1 uses a deterministic approximation from archetype primary ratings and profile scores.
+- Add sorting/filter controls for class-level diff and budget tables if the compact summaries are not enough.
+- Keep apply/writeback, backup, read-back verification, and sidecar persistence for requirement 005.
+- Estimated progress: 94%.
+
+
+Progress on 005 - Validation, Reporting, Sidecar, And Apply
+
+Status as of 2026-07-03
+
+Done
+
+- Read `.requirements/README.md` and `.requirements/005-validation-reporting-and-apply.md`.
+- Started strict generator apply implementation.
+- Added `POST /api/generator/apply`.
+- Apply now requires `confirm: true`, `file`, `previewId`, `configHash`, `config`, and `seed`.
+- Apply reloads the current save, recomputes the decompressed save fingerprint, regenerates the preview server-side from the supplied config/seed/locks, and rejects mismatched preview ids or config hashes.
+- Apply aborts before writing if preview validation has blocking errors.
+- Added batch recruit patching through `franchise_helper.js patch-batch` so generated class writes can be applied in one franchise load instead of one process per recruit.
+- Corrected generated preview patch keys for development, height, and weight to match the verified recruit patch helper keys: `dev_trait`, `height_inches`, and `weight_lbs`.
+- Added server-side generated patch construction from per-recruit `generatedWrites`.
+- Added generator-mode capability validation for every apply patch before the Node helper can write it.
+- Apply rebuilds the FBCHUNKS save in memory, reparses the rebuilt output, creates a timestamped backup, writes the save, reloads the save, and compares intended generated writes against read-back joined profiles.
+- Added sidecar JSON artifact writing under `sidecars/`.
+- Added validation/report JSON artifact writing under `reports/`.
+- Apply response now returns write status, applied recruit count, changed field count, backup metadata, sidecar metadata, report metadata, before/after save fingerprints, and read-back mismatches.
+- Added SPA `Apply Preview` control gated on a valid preview.
+- The SPA confirm dialog summarizes the selected save and generated field-change count before calling apply.
+- The SPA surfaces applied count, changed field count, backup path, sidecar path, report path, and read-back mismatch state after apply.
+- Added an apply detail panel with save-write status, artifact-write status, backup/sidecar/report paths, validation messages, and read-back mismatch rows.
+- Apply now distinguishes save write success from sidecar/report artifact write failure through `writeSucceeded`, `artifactWriteSucceeded`, and `artifactError`.
+- Added `reports/` and `sidecars/` to `.gitignore` as local runtime artifacts.
+- Added unit/integration coverage for helper-compatible generated patch keys, batch patching, preview/config mismatch rejection, backup creation, sidecar/report artifact creation, and empty read-back mismatch handling.
+- Added disposable non-empty apply coverage using the verified `developmentTrait` write group, including read-back mismatch verification.
+- Added failure-path coverage proving backup failure prevents save overwrite.
+- Added failure-path coverage proving post-write artifact failure is reported explicitly while preserving save-write status.
+- Decided V1 artifact storage policy: app-local JSON files in git-ignored `sidecars/` and `reports/`, named by save, fingerprint or preview id, and timestamp.
+- Added `GET /api/generator/artifacts` to list generator sidecar/report artifacts with path, size, modified time, kind, and SHA-256.
+- Added `POST /api/generator/artifacts/cleanup` to delete older JSON artifacts while keeping the newest N per kind.
+- Added `POST /api/generator/patch-export` for dry-run patch export. It regenerates the preview server-side, checks preview/config hashes, validates, and returns the exact verified patch set without writing the save.
+- Added SPA controls for artifact inspection, artifact cleanup, and dry-run patch JSON export.
+- Added failure-path coverage proving rebuilt-output parse failure occurs before backup and save overwrite.
+- Added artifact listing/cleanup and dry-run patch export tests.
+- Browser verification in Chrome found an apply failure when a generated patch targeted linked recruit row 0, which the patch helper correctly rejected as not patchable.
+- Fixed joined profile generation to exclude linked recruit/player rows that are not patchable while reporting `skippedUnpatchableLinkCount` and warnings.
+- Chrome verification confirmed the fixed joined profile count is 4,100 patchable recruits from 4,101 active linked rows.
+- Chrome verification confirmed dev-trait-only preview generation on a disposable save, dry-run patch export, in-app dry-run summary display, apply confirmation, backup creation, sidecar/report artifact creation, read-back match display, artifact listing, and artifact cleanup.
+- Added in-app dry-run export summary so successful patch export is visible even when browser download instrumentation does not expose the download event.
+
+Verification Completed
+
+- `python -m py_compile server.py test_editor.py` passed.
+- `node --check franchise_helper.js` passed.
+- `node --check static\app.js` passed.
+- `python -m unittest -v test_editor.py` passed with 33 tests.
+- After apply hardening, focused generator apply tests passed.
+- After apply hardening, `python -m unittest -v test_editor.py` passed with 36 tests.
+- After artifact/export iteration, focused generator artifact/export tests passed.
+- After artifact/export iteration, `python -m unittest -v test_editor.py` passed with 39 tests.
+- After Chrome-found unpatchable-row fix, focused joined/apply/export tests passed.
+- Chrome verification passed for the 005 UI workflow against disposable save `DYNASTY-CODEX-CHROME-VERIFY`.
+- After Chrome verification and fixes, `node --check static\app.js` passed.
+- After Chrome verification and fixes, `node --check franchise_helper.js` passed.
+- After Chrome verification and fixes, `python -m py_compile server.py test_editor.py` passed.
+- After Chrome verification and fixes, `python -m unittest -v test_editor.py` passed with 39 tests.
+
+Remaining Work For 005
+
+- Optional polish: add more advanced report browsing/filtering if validation reports grow beyond the current compact detail panel.
+- Optional polish: add per-save artifact filtering/search if artifact volume becomes high.
+- Ready for requirement 006.
+- Estimated progress: 96%.
+
+
+Progress on 006 - SPA Generator Workbench
+
+Status as of 2026-07-03
+
+Done
+
+- Read `.requirements/README.md` and `.requirements/006-spa-generator-workbench.md`.
+- Marked 006 as In Progress.
+- Added explicit SPA view navigation with Generator as the default first view.
+- Kept the existing generator preview/apply workflow intact and visible as the primary workflow.
+- Added a Configs view that reuses the normalized config editor/import/export/validate controls without losing generator state.
+- Added API-backed supporting views for:
+  - Recruit Editor: loads structured recruit rows, supports row selection, and saves manual writable fields through the existing recruit patch endpoint.
+  - Save Tools: shows save metadata, backup actions, and generator artifact listing.
+  - Schema: searches schema entries and selected-save occurrences.
+  - Tables: discovers inferred tables and can inspect sampled table rows.
+  - Roster: loads the legacy roster TLV player scanner and saves selected fixed-width string fields through the existing roster patch endpoint.
+- Added view-specific rendering helpers and state containers so switching views does not clear the loaded generator profiles, preview, config, or selected recruit.
+- Added responsive support-panel styling for the new SPA views.
+- Prevented slow background support-view API calls from overwriting the global status after the user switches away from that view.
+- Ensured fresh app loads always land on Generator, satisfying the default-workflow acceptance criterion.
+
+Verification Completed
+
+- `node --check static\app.js` passed.
+- `python -m py_compile server.py test_editor.py` passed.
+- Browser verification on `http://127.0.0.1:8770/` loaded the SPA to the Generator view by default, populated the built-in config, loaded 4,100 joined recruit profiles, and reported no console errors.
+- Browser verification switched through Configs, Save Tools, Schema, Recruit Editor, Tables, and Roster views without full-page reloads or console errors.
+- Browser verification confirmed the Recruit Editor loaded 4,100 manual recruit rows and selected a row form.
+- Browser verification confirmed Schema search returned results, Tables discovery populated inferred table rows, and Roster loaded 500 visible player rows from the roster scanner.
+- Verification server processes started for the browser pass were stopped and generated log files were removed.
+
+Verification Blocked / Incomplete
+
+- `npm test` was started but did not complete before the 120-second command timeout. No failing assertion was observed before timeout.
+
+Remaining Work For 006
+
+- Add focused automated frontend tests for view routing, default Generator load, and view-switch state preservation.
+- Add pagination or virtual scrolling for manual Recruit Editor and Roster views if the current capped visible rows are not enough.
+- Improve the Tables view with row pagination and editable string-cell controls if generic table editing remains part of the normal workflow.
+- Consider splitting the Generator and Configs panels further if config editing becomes too large for the default Generator view.
+
+Checkpoint Update - 2026-07-03
+
+Additional Done
+
+- Added server-backed paging for the manual Recruit Editor support view using the existing `/api/recruits/{file}?limit=&offset=` contract.
+- Added client-side paging for the Roster support view over the loaded TLV roster records.
+- Added pager controls and compact styling for Recruit Editor and Roster support tables.
+- Reset support-view page offsets and stale secondary-view state when the selected save changes.
+- Added focused automated SPA contract tests for:
+  - Generator-first shell and required supporting views.
+  - pagination controls and support-view state hooks.
+- Full test suite now includes 41 tests.
+
+Verification Completed
+
+- `node --check static\app.js` passed.
+- `python -m py_compile server.py test_editor.py` passed.
+- Focused SPA tests passed:
+  - `test_spa_shell_exposes_generator_default_and_supporting_views`
+  - `test_spa_support_views_have_pagination_and_state_preservation_hooks`
+- `python -m unittest -v test_editor.py` passed with 41 tests in 155.603 seconds.
+
+Current Estimate
+
+- Estimated progress: 55%.
+
+Remaining Work For Next Checkpoint
+
+- Add table-row pagination for the Tables support view.
+- Add browser-level UI regression coverage for tab switching with an existing preview/config, since static tests only verify the shell contract.
+- Add explicit UI handling for stale previews when selected save metadata changes after preview.
+- Decide whether Configs should move out of the default Generator viewport or stay as a shared panel.
+- Consider structured controls for more config sections beyond the current compact common fields.
+
+Checkpoint Update - 2026-07-03 Continued
+
+Additional Done
+
+- Added row pagination to the Tables support view using the existing `/api/table/{file}/{tableId}?limit=&offset=` endpoint.
+- The Tables detail panel now tracks selected table, row offset, row count, and page size, and exposes Previous/Next controls in the detail panel.
+- Added stale-preview context tracking for generator previews:
+  - selected save name.
+  - decompressed save fingerprint.
+  - preview id.
+  - save modified time.
+  - save size.
+- Apply and dry-run patch export are now blocked client-side when the preview context no longer matches the selected save/fingerprint/file metadata.
+- The preview summary displays a stale-preview warning when a preview must be regenerated.
+- Added focused automated SPA tests for stale-preview gating and table pagination hooks.
+- Full test suite now includes 42 tests.
+
+Verification Completed
+
+- `node --check static\app.js` passed.
+- `python -m py_compile server.py test_editor.py` passed.
+- Focused SPA tests passed:
+  - `test_spa_support_views_have_pagination_and_state_preservation_hooks`
+  - `test_spa_preview_apply_is_gated_by_stale_preview_context`
+- `python -m unittest -v test_editor.py` passed with 42 tests in 155.150 seconds.
+
+Current Estimate
+
+- Estimated progress: 68%.
+
+Remaining Work For Next Checkpoint
+
+- Add browser-level UI regression coverage for tab switching with an existing preview/config, since the current automated coverage is static contract plus backend integration.
+- Exercise the new table pagination in browser verification against a real inferred table.
+- Decide whether Configs should move out of the default Generator viewport or stay as a shared panel.
+- Add more structured config controls for rank bands, position budgets, and write-field states.
+- Add richer report/artifact browsing inside the Save Tools view if artifact volume grows.
+
+Checkpoint Update - 2026-07-03 Structured Config And Browser Pass
+
+Additional Done
+
+- Added a structured config section inside the existing Generator/Configs panel.
+- Added editable position-weight controls for the normalized `classBudget.positionWeights` contract.
+- Added editable rank-band controls for rank bounds, expected OVR min/max, and rare max OVR.
+- Added visible write-field state summaries showing group state, writable field count, and blocked field count.
+- Wired the structured config controls into `Apply Controls`, still passing every change through server-side config validation and normalization.
+- Added compact responsive styling for the new structured config tables.
+- Added focused automated coverage for the structured config controls.
+- Browser-verified Generator default load, structured config rendering, preview generation, Configs tab switching, and returning to Generator with the existing preview intact.
+- Browser-verified Tables pagination against the real `ROSTER-Official` Teams inferred table:
+  - page 1 displayed rows 1-50 of 138.
+  - Next displayed rows 51-100 of 138.
+- Confirmed no browser console errors during the verification pass.
+- Full test suite now includes 43 tests.
+
+Verification Completed
+
+- `node --check static\app.js` passed.
+- `python -m py_compile server.py test_editor.py` passed.
+- Focused SPA tests passed:
+  - `test_spa_config_has_structured_controls_for_weights_rank_bands_and_write_states`
+  - `test_spa_support_views_have_pagination_and_state_preservation_hooks`
+  - `test_spa_preview_apply_is_gated_by_stale_preview_context`
+- Browser verification passed on `http://127.0.0.1:8765/`.
+- `python -m unittest -v test_editor.py` passed with 43 tests in 156.650 seconds.
+
+Current Estimate
+
+- Estimated progress: 78%.
+
+Remaining Work For Next Checkpoint
+
+- Decide whether Configs should remain a shared Generator/Configs panel or move to a more separated layout.
+- Add structured controls for development budgets, quality modifier budgets, profile-type weights, and body rules if those need normal editing.
+- Add richer artifact/report browsing inside Save Tools, including filtering and per-artifact detail display.
+- Convert the successful browser smoke path into repeatable automated UI coverage if the project adds a frontend test harness.
+- Consider performance handling for very large inferred tables such as `ROSTER-Official` Players, which can stay in loading state longer than the smaller Teams table.
+
+Checkpoint Update - 2026-07-03 Structured Config Expansion
+
+Additional Done
+
+- Kept Configs as a shared Generator/Configs panel for MVP, with structured controls plus the raw JSON editor as the complete-contract fallback.
+- Added structured class-budget range controls for generational freshmen, elite development, and platinum physical ability budgets.
+- Added structured development controls for trait weights and rank-band multipliers.
+- Added structured quality modifier budget controls for Gem and Bust min/max counts.
+- Added structured profile-type controls for rank-band weights and readiness, physical, technical, mental, and ceiling score ranges.
+- Added structured body-rule controls for height and weight bounds.
+- Preserved open-ended final rank-band handling when structured controls are applied, so blank `maxRank` remains `null`.
+- Expanded compact config styling for wider structured tables and responsive split-table collapse.
+- Expanded focused SPA static coverage for the new structured config controls and config mutation hooks.
+
+Verification Completed
+
+- `node --check static\app.js` passed.
+- `python -m py_compile server.py test_editor.py` passed.
+- Focused SPA test passed:
+  - `test_spa_config_has_structured_controls_for_weights_rank_bands_and_write_states`
+- `python -m unittest -v test_editor.py` passed with 43 tests in 155.338 seconds.
+- Browser verification passed on `http://127.0.0.1:8771/`:
+  - Generator loaded by default.
+  - 4,100 joined recruit profiles loaded.
+  - structured sections rendered for position weights, class budgets, rank bands, development, quality budgets, profile type weights, profile score ranges, body rules, and write states.
+  - `Apply Controls` round-tripped through validation.
+  - final rank-band `maxRank` stayed `null`.
+  - no console errors were reported.
+- Verification server process was stopped and temporary log files were removed.
+
+Current Estimate
+
+- Estimated progress: 86%.
+
+Remaining Work For Next Checkpoint
+
+- Add richer artifact/report browsing inside Save Tools, including filtering and per-artifact detail display.
+- Convert the successful browser smoke path into repeatable automated UI coverage if the project adds a frontend test harness.
+- Consider performance handling for very large inferred tables such as `ROSTER-Official` Players, which can stay in loading state longer than the smaller Teams table.
+- Add more refined controls for nested position/archetype weights if normal users need to tune archetype distribution without JSON editing.
+
+Checkpoint Update - 2026-07-03 Artifact Browser
+
+Additional Done
+
+- Added a read-only managed artifact detail API at `GET /api/generator/artifact?kind=&name=`.
+- Artifact detail reads are constrained to exact JSON file names inside the managed `sidecars/` and `reports/` directories.
+- Added summary extraction for sidecar artifacts, including save name, preview id, seed, fingerprint, config hash, created time, and record count.
+- Added summary extraction for report artifacts, including applied recruit count, changed field count, validation status, validation error/warning counts, and read-back mismatch count.
+- Expanded Save Tools with artifact kind filtering, artifact name/search filtering, selectable artifact rows, summary details, metadata chips, and JSON preview.
+- Updated the top-level `Artifacts` button to open Save Tools and load the artifact browser.
+- Added automated coverage for artifact detail safety, summary extraction, and SPA artifact browser hooks.
+
+Verification Completed
+
+- `node --check static\app.js` passed.
+- `python -m py_compile server.py test_editor.py` passed.
+- Focused tests passed:
+  - `test_spa_support_views_have_pagination_and_state_preservation_hooks`
+  - `test_generator_artifact_listing_and_cleanup_keep_latest_per_kind`
+- `python -m unittest -v test_editor.py` passed with 43 tests in 154.120 seconds.
+- Browser verification passed on `http://127.0.0.1:8772/` using disposable sidecar/report artifacts:
+  - Generator loaded normally with 4,100 joined recruit profiles.
+  - Save Tools loaded the artifact browser.
+  - Report detail displayed preview id, changed field count, validation status, warning count, metadata, and JSON.
+  - Search filtering reduced the list to the matching sidecar artifact.
+  - No console errors were reported.
+- Verification server process was stopped and disposable artifact/log files were removed.
+
+Current Estimate
+
+- Estimated progress: 92%.
+
+Remaining Work For Next Checkpoint
+
+- Consider performance handling for very large inferred tables such as `ROSTER-Official` Players, which can stay in loading state longer than the smaller Teams table.
+- Add more refined controls for nested position/archetype weights if normal users need to tune archetype distribution without JSON editing.
+- Convert the successful browser smoke paths into repeatable automated UI coverage if the project adds a frontend test harness.
+- Prepare to mark 006 complete once remaining items are either implemented or explicitly deferred as post-MVP polish.
+
+
+Progress on 007 - Safe Save Output And Load Validation Hardening
+
+Status as of 2026-07-03
+
+In Progress
+
+- Replaced the old 007 V2 placeholder with a save-output hardening requirement after a reported game crash when loading an overwritten save.
+- Updated generator apply requirements so copy mode is the default and overwrite mode must be explicit.
+- Added RG-12 and RG-13 to track game-load safety separately from local parser/read-back safety.
+- Implemented default generator apply copy mode:
+  - the selected source save remains unchanged.
+  - a new top-level `*-MODDED-*` target save is written.
+  - apply responses include `writeMode`, `sourceFile`, `targetFile`, `targetPath`, and `sourceUnchanged`.
+- Added atomic save-byte writes through a same-directory temporary file for generator and manual save writes.
+- Updated the SPA confirmation and apply-result display so it states that generator apply writes a new copy.
+- Updated README safety notes to distinguish manual overwrite writes from copy-first generator apply.
+
+Verification Pending
+
+- Run the full automated test suite after the 007/008 requirement updates.
+- Manually game-load a no-op generated copy and a development-trait-only generated copy, then record the result against the report artifacts.
+
+
+Progress on 008 - Visual Body Mesh Classifier V1.1
+
+Status as of 2026-07-03
+
+Draft
+
+- Replaced the old combined ability/presentation requirement with a requirement centered on the updated manifesto body-type section.
+- Updated `.requirements/fb-manifesto.md` section 15 with the new constrained visual-mesh model:
+  - legal body-type pools by position group.
+  - Mass Index, Movement Index, and Strength Index inputs.
+  - hard position overrides.
+  - separate internal body composition and final game mesh.
+  - confidence and rarity controls.
+- Split progression and ability/presentation follow-up work into separate 009 and 010 requirement docs.
+- Updated `.requirements/README.md` to reflect the new 007/008 scope.
+- Added `.requirements/009-ceilings-progression-and-normalization-v2.md` for V2 progression analysis, cap decoding, and normalization.
+- Added `.requirements/010-ability-and-recruiting-presentation-v3-v4.md` for ability planning, ability writes, recruiting presentation, and appearance classification.
+
+Verification Pending
+
+- Add preview-only body classifier implementation and tests.
+- Complete RG-5 before any `CharacterBodyType` generator writes.

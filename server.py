@@ -37,6 +37,20 @@ PLAYER_FIRST_KEY = bytes.fromhex("c26ba1")
 PLAYER_LAST_KEY = bytes.fromhex("c2cba1")
 PLAYER_HOMETOWN_KEY = bytes.fromhex("c28d2e")
 
+
+def atomic_write_bytes(path: Path, data: bytes) -> None:
+    timestamp = time.strftime("%Y%m%d%H%M%S")
+    tmp = path.with_name(f".{path.name}.{timestamp}.{os.getpid()}.tmp")
+    try:
+        with tmp.open("wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
 KNOWN_PLAYER_FIELDS = {
     "internal_id": PLAYER_INTERNAL_KEY,
     "first_name": PLAYER_FIRST_KEY,
@@ -3780,6 +3794,7 @@ def write_generator_apply_artifacts(
     read_back_mismatches: list[dict],
     applied_recruit_count: int,
     changed_field_count: int,
+    write_context: dict | None = None,
 ) -> tuple[dict, dict]:
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     fingerprint = preview.get("saveFingerprint") or "UNKNOWN"
@@ -3796,6 +3811,7 @@ def write_generator_apply_artifacts(
         "configHash": preview.get("configHash"),
         "seed": preview.get("seed"),
         "createdAt": timestamp,
+        "writeContext": write_context or {},
         "recordCount": len(sidecar_records),
         "records": sidecar_records,
     }
@@ -3810,6 +3826,7 @@ def write_generator_apply_artifacts(
         "appliedRecruitCount": applied_recruit_count,
         "changedFieldCount": changed_field_count,
         "backup": backup,
+        "writeContext": write_context or {},
         "summary": preview.get("summary", {}),
         "validationReport": preview.get("validationReport", {}),
         "skippedFields": preview.get("skippedFields", []),
@@ -4066,6 +4083,23 @@ class SaveStore:
         path = self.validate_filename(name)
         return path, FBChunks.parse(path.read_bytes())
 
+    def generator_output_path(self, source_path: Path) -> Path:
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        base_name = f"{source_path.name}-MODDED-{timestamp}"
+        for suffix in ["", *[f"-{index}" for index in range(2, 100)]]:
+            candidate = self.base_dir / f"{base_name}{suffix}"
+            if not candidate.exists():
+                return candidate
+        raise AppError("Could not allocate a unique generated save copy name", 500)
+
+    def clear_file_caches(self, file_name: str) -> None:
+        for cache_key in list(self._table_cache):
+            if cache_key.startswith(f"{file_name}:"):
+                self._table_cache.pop(cache_key, None)
+        for cache_key in list(self._occurrence_cache):
+            if cache_key.startswith(f"{file_name}:"):
+                self._occurrence_cache.pop(cache_key, None)
+
     def get_roster(self, name: str) -> dict:
         path, container = self.load_container(name)
         records = parse_player_records(container.decompressed_payload)
@@ -4158,9 +4192,12 @@ class SaveStore:
         config_hash_value: str,
         confirm: bool,
         locks: dict | None = None,
+        write_mode: str = "copy",
     ) -> dict:
         if confirm is not True:
             raise AppError("confirm must be true before applying generated recruits", 400)
+        if write_mode not in {"copy", "overwrite"}:
+            raise AppError("writeMode must be copy or overwrite", 400)
         if not isinstance(config, dict):
             raise AppError("config is required for server-side preview regeneration", 400)
         if not isinstance(preview_id, str) or not preview_id:
@@ -4196,19 +4233,17 @@ class SaveStore:
         rebuilt = container.rebuild(new_payload)
         FBChunks.parse(rebuilt)
         backup = self.create_backup(name)
-        path.write_bytes(rebuilt)
-        for cache_key in list(self._table_cache):
-            if cache_key.startswith(f"{path.name}:"):
-                self._table_cache.pop(cache_key, None)
-        for cache_key in list(self._occurrence_cache):
-            if cache_key.startswith(f"{path.name}:"):
-                self._occurrence_cache.pop(cache_key, None)
+        target_path = path if write_mode == "overwrite" else self.generator_output_path(path)
+        atomic_write_bytes(target_path, rebuilt)
+        self.clear_file_caches(target_path.name)
+        if write_mode == "overwrite":
+            self.clear_file_caches(path.name)
 
-        _, read_back_container = self.load_container(name)
+        read_back_container = FBChunks.parse(target_path.read_bytes())
         read_back_joined = joined_recruit_profiles_from_payload(
             read_back_container.decompressed_payload,
             save_fingerprint=hashlib.sha256(read_back_container.decompressed_payload).hexdigest().upper(),
-            save_name=path.name,
+            save_name=target_path.name,
             limit=7600,
             offset=0,
         )
@@ -4218,12 +4253,21 @@ class SaveStore:
         artifact_error = ""
         try:
             sidecar, report = write_generator_apply_artifacts(
-                path.name,
+                target_path.name,
                 preview,
                 backup,
                 mismatches,
                 applied_recruit_count=len(patches),
                 changed_field_count=changed_field_count,
+                write_context={
+                    "writeMode": write_mode,
+                    "sourceFile": path.name,
+                    "targetFile": target_path.name,
+                    "targetPath": str(target_path),
+                    "sourceUnchanged": write_mode == "copy",
+                    "saveFingerprintBefore": before_fingerprint,
+                    "saveFingerprintAfter": read_back_joined.get("saveFingerprint"),
+                },
             )
         except Exception as exc:
             artifact_error = str(exc) or exc.__class__.__name__
@@ -4240,6 +4284,11 @@ class SaveStore:
             "readBackMismatches": mismatches,
             "previewId": preview.get("previewId"),
             "configHash": preview.get("configHash"),
+            "writeMode": write_mode,
+            "sourceFile": path.name,
+            "targetFile": target_path.name,
+            "targetPath": str(target_path),
+            "sourceUnchanged": write_mode == "copy",
             "saveFingerprintBefore": before_fingerprint,
             "saveFingerprintAfter": read_back_joined.get("saveFingerprint"),
         }
@@ -4399,7 +4448,7 @@ class SaveStore:
         rebuilt = container.rebuild(bytes(patched))
         FBChunks.parse(rebuilt)
         backup = self.create_backup(name)
-        path.write_bytes(rebuilt)
+        atomic_write_bytes(path, rebuilt)
         for cache_key in list(self._table_cache):
             if cache_key.startswith(f"{path.name}:"):
                 self._table_cache.pop(cache_key, None)
@@ -4440,7 +4489,7 @@ class SaveStore:
         rebuilt = container.rebuild(new_payload)
         FBChunks.parse(rebuilt)
         backup = self.create_backup(name)
-        path.write_bytes(rebuilt)
+        atomic_write_bytes(path, rebuilt)
         return {
             "backup": backup,
             "file": self.describe_file(path),
@@ -4457,7 +4506,7 @@ class SaveStore:
         rebuilt = container.rebuild(new_payload)
         FBChunks.parse(rebuilt)
         backup = self.create_backup(name)
-        path.write_bytes(rebuilt)
+        atomic_write_bytes(path, rebuilt)
         for cache_key in list(self._table_cache):
             if cache_key.startswith(f"{path.name}:"):
                 self._table_cache.pop(cache_key, None)
@@ -4481,7 +4530,7 @@ class SaveStore:
         rebuilt = container.rebuild(new_payload)
         FBChunks.parse(rebuilt)
         backup = self.create_backup(name)
-        path.write_bytes(rebuilt)
+        atomic_write_bytes(path, rebuilt)
         for cache_key in list(self._table_cache):
             if cache_key.startswith(f"{path.name}:"):
                 self._table_cache.pop(cache_key, None)
@@ -4664,6 +4713,7 @@ class Handler(BaseHTTPRequestHandler):
                         str(body.get("configHash") or ""),
                         body.get("confirm") is True,
                         locks=locks,
+                        write_mode=str(body.get("writeMode") or "copy"),
                     ),
                 )
                 return

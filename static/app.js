@@ -494,6 +494,7 @@ function renderPreviewSummary() {
         <span>${apply.applied ? "Applied" : "Applied With Mismatches"}</span>
         <span>${numberFmt(apply.appliedRecruitCount || 0)} recruits</span>
         <span>${numberFmt(apply.changedFieldCount || 0)} fields</span>
+        <span title="${escapeHtml(apply.targetPath || "")}">${escapeHtml(apply.writeMode === "copy" ? "New Copy" : "Overwrite")}</span>
         <span title="${escapeHtml(apply.backup?.backup || "")}">Backup</span>
         <span title="${escapeHtml(apply.sidecar?.path || "")}">Sidecar</span>
         <span title="${escapeHtml(apply.report?.path || "")}">Report</span>
@@ -526,7 +527,8 @@ function renderApplyDetails() {
       ${apply ? `
         <h3>Apply Result</h3>
         <dl class="apply-detail-grid">
-          <div><dt>Save Write</dt><dd>${apply.writeSucceeded ? "Written" : "Failed"}</dd></div>
+          <div><dt>Save Write</dt><dd>${apply.writeSucceeded ? (apply.writeMode === "copy" ? "New copy written" : "Overwritten") : "Failed"}</dd></div>
+          <div><dt>Target</dt><dd title="${escapeHtml(apply.targetPath || "")}">${escapeHtml(apply.targetFile || "-")}</dd></div>
           <div><dt>Read Back</dt><dd>${mismatches.length ? `${numberFmt(mismatches.length)} mismatch(es)` : "Matched"}</dd></div>
           <div><dt>Artifacts</dt><dd title="${escapeHtml(apply.artifactError || "")}">${escapeHtml(artifactMessage)}</dd></div>
           <div><dt>Backup</dt><dd title="${escapeHtml(apply.backup?.backup || "")}">${escapeHtml(apply.backup?.backup || "-")}</dd></div>
@@ -1904,7 +1906,7 @@ async function applyPreview() {
   }
   const diffCount = preview.summary?.diffCount || 0;
   const confirmed = window.confirm(
-    `Apply ${numberFmt(diffCount)} generated field changes to ${state.selectedFile}? A backup will be created first.`,
+    `Write ${numberFmt(diffCount)} generated field changes to a new modded save copy based on ${state.selectedFile}? The selected save stays unchanged and a backup will be created first.`,
   );
   if (!confirmed) return;
   els.applyPreviewBtn.disabled = true;
@@ -1920,16 +1922,17 @@ async function applyPreview() {
         config: normalizedConfig,
         seed: preview.seed || els.seedInput.value.trim() || "default",
         confirm: true,
+        writeMode: "copy",
         locks: state.lockMap,
       }),
     });
     state.lastApplyResult = payload;
     setStatus(
       payload.applied && payload.artifactWriteSucceeded
-        ? `Applied ${numberFmt(payload.changedFieldCount || 0)} field change(s); backup ${payload.backup?.backup || ""}`
+        ? `Wrote ${numberFmt(payload.changedFieldCount || 0)} field change(s) to ${payload.targetFile || "new modded save copy"}`
         : payload.applied
-          ? `Apply wrote the save, but artifact writing failed: ${payload.artifactError || "unknown error"}`
-        : `Apply wrote the save but reported ${numberFmt((payload.readBackMismatches || []).length)} read-back mismatch(es)`,
+          ? `Apply wrote ${payload.targetFile || "the target save"}, but artifact writing failed: ${payload.artifactError || "unknown error"}`
+        : `Apply wrote ${payload.targetFile || "the target save"} but reported ${numberFmt((payload.readBackMismatches || []).length)} read-back mismatch(es)`,
       !payload.applied || !payload.artifactWriteSucceeded,
     );
     renderPreviewSummary();

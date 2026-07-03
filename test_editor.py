@@ -109,6 +109,8 @@ class EditorTests(unittest.TestCase):
         self.assertIn("Regenerate preview before apply", app_js)
         self.assertIn("Regenerate preview before dry-run export", app_js)
         self.assertIn("els.applyPreviewBtn.disabled = !preview.valid || Boolean(apply) || Boolean(staleReason)", app_js)
+        self.assertIn('writeMode: "copy"', app_js)
+        self.assertIn("selected save stays unchanged", app_js)
 
     def test_spa_config_has_structured_controls_for_weights_rank_bands_and_write_states(self) -> None:
         html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
@@ -638,6 +640,7 @@ class EditorTests(unittest.TestCase):
                 for key in list(config["writeFields"]):
                     config["writeFields"][key] = False
                 preview = store.preview_generator(file_name, config, "artifact-seed")
+                original_bytes = (temp / file_name).read_bytes()
                 self.assertTrue(preview["valid"], preview["errors"])
                 self.assertEqual(preview["summary"]["diffCount"], 0)
 
@@ -666,8 +669,16 @@ class EditorTests(unittest.TestCase):
             self.assertTrue(result["applied"], result["readBackMismatches"])
             self.assertTrue(result["artifactWriteSucceeded"], result["artifactError"])
             self.assertTrue(Path(result["backup"]["backup"]).is_file())
+            self.assertEqual(result["writeMode"], "copy")
+            self.assertEqual(result["sourceFile"], file_name)
+            self.assertNotEqual(result["targetFile"], file_name)
+            self.assertTrue(Path(result["targetPath"]).is_file())
+            self.assertEqual((temp / file_name).read_bytes(), original_bytes)
             self.assertTrue(Path(result["sidecar"]["path"]).is_file())
             self.assertTrue(Path(result["report"]["path"]).is_file())
+            report_payload = json.loads(Path(result["report"]["path"]).read_text(encoding="utf-8"))
+            self.assertEqual(report_payload["writeContext"]["writeMode"], "copy")
+            self.assertEqual(report_payload["writeContext"]["targetFile"], result["targetFile"])
             self.assertEqual(result["appliedRecruitCount"], 0)
             self.assertEqual(result["changedFieldCount"], 0)
             self.assertEqual(result["readBackMismatches"], [])
@@ -691,6 +702,7 @@ class EditorTests(unittest.TestCase):
                     config["writeFields"][key] = False
                 config["writeFields"]["developmentTrait"] = True
                 preview = store.preview_generator(file_name, config, "non-empty-apply-seed")
+                original_bytes = (temp / file_name).read_bytes()
                 self.assertTrue(preview["valid"], preview["errors"])
                 self.assertGreater(preview["summary"]["diffCount"], 0)
 
@@ -711,6 +723,10 @@ class EditorTests(unittest.TestCase):
             self.assertGreater(result["appliedRecruitCount"], 0)
             self.assertGreater(result["changedFieldCount"], 0)
             self.assertEqual(result["readBackMismatches"], [])
+            self.assertEqual(result["writeMode"], "copy")
+            self.assertTrue(Path(result["targetPath"]).is_file())
+            self.assertEqual((temp / file_name).read_bytes(), original_bytes)
+            self.assertNotEqual(Path(result["targetPath"]).read_bytes(), original_bytes)
 
     def test_generator_apply_backup_failure_leaves_save_unchanged(self) -> None:
         class FailingBackupStore(SaveStore):
@@ -787,6 +803,8 @@ class EditorTests(unittest.TestCase):
             self.assertTrue(result["artifactError"])
             self.assertIsNone(result["sidecar"])
             self.assertIsNone(result["report"])
+            self.assertEqual(result["writeMode"], "copy")
+            self.assertTrue(Path(result["targetPath"]).is_file())
 
     def test_generator_patch_export_is_dry_run_and_matches_preview(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
