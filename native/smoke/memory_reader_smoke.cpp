@@ -117,6 +117,24 @@ void TestScanAndRead() {
   Require(!excessive_matches.complete, "65 requested matches rejection");
 }
 
+void TestScanExcludesMaskBuffer() {
+  cfb27::memory::ScanRequest request{
+      .pattern = std::vector<std::uint8_t>(4096, 0xFF),
+      .mask = std::vector<std::uint8_t>(4096, 0xFF),
+      .max_matches = 2,
+  };
+  const auto mask_begin = reinterpret_cast<std::uintptr_t>(request.mask.data());
+  const auto mask_end = mask_begin + request.mask.size();
+
+  const auto scan = ScanPrivateMemory(request);
+  Require(scan.complete, "mask buffer exclusion scan completes");
+  for (const auto& match : scan.matches) {
+    const auto address = cfb27::memory::ParseAddress(match.address);
+    Require(address && (*address < mask_begin || *address >= mask_end),
+            "scan returned request mask buffer");
+  }
+}
+
 void TestDeniedReads() {
   SYSTEM_INFO system_info{};
   GetSystemInfo(&system_info);
@@ -179,6 +197,7 @@ int main() {
     TestAddressParsing();
     TestRegionEligibility();
     TestScanAndRead();
+    TestScanExcludesMaskBuffer();
     TestDeniedReads();
     TestAggregateScanLimit();
     std::cout << "memory reader smoke passed\n";

@@ -212,6 +212,8 @@ ScanResult ScanPrivateMemory(const ScanRequest& request) {
             const auto match_address = region_base + offset;
             if (OverlapsRange(match_address, request.pattern.size(), request.pattern.data(),
                               request.pattern.size()) ||
+                OverlapsRange(match_address, request.pattern.size(), request.mask.data(),
+                              request.mask.size()) ||
                 OverlapsRange(match_address, request.pattern.size(), region_bytes.data(),
                               region_bytes.capacity()) ||
                 OverlapsMatchContext(match_address, request.pattern.size(), result) ||
