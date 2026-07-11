@@ -589,6 +589,13 @@ def live_rating_write_addresses(object_address: int, field: str) -> tuple[int, i
     )
 
 
+def normalize_live_object_addresses(object_addresses) -> list[int]:
+    addresses = list(dict.fromkeys(int(address) for address in object_addresses))
+    if not 1 <= len(addresses) <= 64:
+        raise ValueError("One to 64 verified live object addresses are required")
+    return addresses
+
+
 def plan_live_rating_object_writes(
     objects: list[dict[str, object]],
     player_id: int,
@@ -634,9 +641,7 @@ def write_live_player_rating(
     maximum = 100 if field == "overall" else 99
     if not (0 <= expected_before <= maximum and 0 <= value <= maximum):
         raise ValueError(f"{field} must be between 0 and {maximum}")
-    addresses = list(dict.fromkeys(int(address) for address in object_addresses))
-    if not (1 <= len(addresses) <= 16):
-        raise ValueError("One to sixteen verified live object addresses are required")
+    addresses = normalize_live_object_addresses(object_addresses)
 
     requested_addresses = addresses
     before_objects = [

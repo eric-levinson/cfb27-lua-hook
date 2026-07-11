@@ -191,6 +191,13 @@ class EditorTests(unittest.TestCase):
         self.assertEqual([item["after"] for item in plan], [90, 90, 90])
         self.assertEqual([item["address"] for item in plan], [0x1000, 0x2000, 0x3000])
 
+    def test_live_object_address_limit_covers_current_cache_generations(self) -> None:
+        self.assertTrue(hasattr(live_process, "normalize_live_object_addresses"))
+        addresses = [0x1000 + (index * 0x100) for index in range(17)]
+        self.assertEqual(live_process.normalize_live_object_addresses(addresses), addresses)
+        with self.assertRaisesRegex(ValueError, "One to 64"):
+            live_process.normalize_live_object_addresses(range(65))
+
     def test_live_rating_write_plan_rejects_identity_or_integrity_mismatch(self) -> None:
         self.assertTrue(hasattr(live_process, "plan_live_rating_object_writes"))
         wrong_player = [
