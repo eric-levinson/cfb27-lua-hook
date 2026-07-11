@@ -324,6 +324,22 @@ test('scanMemoryPage rejects malformed host result fields', async (t) => {
   }
 });
 
+test('scanMemoryPage rejects non-advancing continuation cursors', async (t) => {
+  const invalidResults = [
+    { ...VALID_SCAN_RESULT, complete: false, nextCursor: '0x2000' },
+    { ...VALID_SCAN_RESULT, complete: false, nextCursor: '0x1FFF' },
+  ];
+  let index = 0;
+  const client = await fakeClient(t, () => invalidResults[index++]);
+
+  for (const ignored of invalidResults) {
+    await assert.rejects(
+      client.scanMemoryPage({ ...VALID_SCAN_OPTIONS, cursor: '0x2000' }),
+      (error) => error.code === 'INVALID_RESPONSE',
+    );
+  }
+});
+
 test('readMemory rejects malformed host result fields', async (t) => {
   const invalidResults = [
     { ...VALID_READ_RESULT, supportedBuild: 'true' },

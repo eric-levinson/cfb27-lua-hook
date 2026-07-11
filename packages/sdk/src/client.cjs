@@ -13,7 +13,6 @@ const MEMORY_LIMITS = Object.freeze({
   maxPatternBytes: 4096,
   maxMatches: 64,
   maxContextBytes: 512,
-  maxRegionBytes: 64 * 1024 * 1024,
   maxScanPageBytes: 32 * 1024 * 1024,
   maxPages: 4096,
   maxReadRanges: 64,
@@ -169,6 +168,10 @@ function validateScanPageResult(result, params) {
       !isSafeIntegerBetween(result.scannedBytes, 0, MEMORY_LIMITS.maxScanPageBytes) ||
       !Array.isArray(result.matches) || result.matches.length > params.maxMatches) {
     throw invalidResponse('Host returned an invalid scanMemory result');
+  }
+  if (!result.complete && Object.hasOwn(params, 'cursor') &&
+      BigInt(result.nextCursor) <= BigInt(params.cursor)) {
+    throw invalidResponse('Host returned a non-advancing scanMemory cursor');
   }
 
   const maximumContextBytes = params.patternHex.length / 2 +

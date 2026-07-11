@@ -858,8 +858,12 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
   }
 
   if (command == "scanMemory") {
+    if (params.contains("allowUnsupportedBuild") &&
+        !params["allowUnsupportedBuild"].is_boolean()) {
+      return ErrorResponse(id, "INVALID_REQUEST",
+                           "allowUnsupportedBuild must be a boolean");
+    }
     const bool allow_unsupported = params.contains("allowUnsupportedBuild") &&
-        params["allowUnsupportedBuild"].is_boolean() &&
         params["allowUnsupportedBuild"].get<bool>();
     if (!supported && !allow_unsupported) {
       return ErrorResponse(id, "UNSUPPORTED_BUILD",
@@ -933,8 +937,12 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
   }
 
   if (command == "readMemory") {
+    if (params.contains("allowUnsupportedBuild") &&
+        !params["allowUnsupportedBuild"].is_boolean()) {
+      return ErrorResponse(id, "INVALID_REQUEST",
+                           "allowUnsupportedBuild must be a boolean");
+    }
     const bool allow_unsupported = params.contains("allowUnsupportedBuild") &&
-        params["allowUnsupportedBuild"].is_boolean() &&
         params["allowUnsupportedBuild"].get<bool>();
     if (!supported && !allow_unsupported) {
       return ErrorResponse(id, "UNSUPPORTED_BUILD",

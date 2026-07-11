@@ -193,7 +193,7 @@ int wmain(int argc, wchar_t** argv) {
   false_scan_params["allowUnsupportedBuild"] = 1;
   if (!Request(pipe, {{"protocol", 1}, {"id", "scan-exact-gate"},
                       {"command", "scanMemory"}, {"params", false_scan_params}}, response, false) ||
-      !IsError(response, "UNSUPPORTED_BUILD")) return 40;
+      !IsError(response, "INVALID_REQUEST")) return 40;
 
   Json allowed_scan_params = scan_params;
   allowed_scan_params["allowUnsupportedBuild"] = true;
@@ -362,7 +362,7 @@ int wmain(int argc, wchar_t** argv) {
   invalid_read_params["allowUnsupportedBuild"] = 1;
   if (!Request(pipe, {{"protocol", 1}, {"id", "read-exact-gate"},
                       {"command", "readMemory"}, {"params", invalid_read_params}}, response, false) ||
-      !IsError(response, "UNSUPPORTED_BUILD")) return 39;
+      !IsError(response, "INVALID_REQUEST")) return 39;
   invalid_read_params = read_params;
   invalid_read_params["ranges"][0]["address"] = "0xabcdef";
   if (!Request(pipe, {{"protocol", 1}, {"id", "read-address"},
