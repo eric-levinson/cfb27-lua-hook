@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import gzip
 import json
 import os
 import subprocess
@@ -16,6 +17,17 @@ from pathlib import Path
 from unittest.mock import patch
 
 import server
+from live_process import (
+    LIVE_PLAYER_DUPLICATE_OFFSETS,
+    LIVE_PLAYER_ID_OFFSET,
+    LIVE_PLAYER_OBJECT_SIZE,
+    LIVE_PLAYER_RATING_OFFSETS,
+    configured_game_dir,
+    decode_live_player_object,
+    executable_build,
+    live_rating_write_addresses,
+)
+from native_hook import native_artifacts, resolve_lua_script
 from server import (
     AppError,
     FBChunks,
@@ -39,6 +51,7 @@ from server import (
     parse_player_records,
     patch_player_payload,
     patch_recruits_payload,
+    preview_recruiting_plan,
     validate_recruit_patch_capabilities,
     validate_generated_preview_class,
 )
@@ -110,6 +123,112 @@ def load_recruiting_diff_module():
 
 
 class EditorTests(unittest.TestCase):
+    def test_native_hook_contract_includes_request_detour_lua_and_guarded_record_patch(self) -> None:
+        hook_source = (APP_DIR / "native" / "hook.cpp").read_text(encoding="utf-8")
+        cmake = (APP_DIR / "native" / "CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("kSubmitEditPlayerRequestFactoryRva = 0x08A15DE0", hook_source)
+        self.assertIn("FactoryDetour", hook_source)
+        self.assertIn("kRequestPayloadOffset + g_pending->offset", hook_source)
+        self.assertIn('verb == "PATCH_AT"', hook_source)
+        self.assertIn('lua_setfield(state, -2, "queue_rating")', hook_source)
+        self.assertIn('lua_setfield(state, -2, "patch_record")', hook_source)
+        self.assertIn("lua-5.4.8.tar.gz", cmake)
+        self.assertIn("4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae", cmake)
+        self.assertTrue(resolve_lua_script("speed_test.lua").is_file())
+        with self.assertRaises(PermissionError):
+            resolve_lua_script("../outside.lua")
+        artifacts = native_artifacts()
+        self.assertTrue(str(artifacts["dll"]).endswith("cfb27_live_hook.dll"))
+        self.assertTrue(str(artifacts["injector"]).endswith("cfb27_hook_injector.exe"))
+
+    def test_full_cfb27_schema_exposes_dynasty_player_edit_permission(self) -> None:
+        schema_path = APP_DIR / "schema" / "CFB27_809_0.gz"
+        with gzip.open(schema_path, "rt", encoding="utf-8") as stream:
+            schema = json.load(stream)
+        league_setting = schema["schemaMap"]["LeagueSetting"]
+        ability = next(item for item in league_setting["attributes"] if item["name"] == "AbilityEditControls")
+        self.assertEqual(ability["type"], "AbilityEditControlOptions")
+        members = {
+            item["_name"]: item["_value"]
+            for item in schema["enumMap"]["AbilityEditControlOptions"]["_members"]
+        }
+        self.assertEqual(members, {"NONE": 0, "COMMISHONLY": 1, "ANY": 2, "MAX": 3})
+
+    def test_full_cfb27_schema_exposes_franchise_admin_levels(self) -> None:
+        schema_path = APP_DIR / "schema" / "CFB27_809_0.gz"
+        with gzip.open(schema_path, "rt", encoding="utf-8") as stream:
+            schema = json.load(stream)
+        franchise_user = schema["schemaMap"]["FranchiseUser"]
+        admin = next(item for item in franchise_user["attributes"] if item["name"] == "AdminLevel")
+        self.assertEqual(admin["type"], "AdminLevel")
+        self.assertEqual(schema["enumMap"]["AdminLevel"]["_maxLength"], 2)
+        members = {
+            item["_name"]: item["_value"]
+            for item in schema["enumMap"]["AdminLevel"]["_members"]
+        }
+        self.assertEqual(members, {"Owner": 0, "Commissioner": 1, "None": 2})
+
+    def test_live_rating_write_addresses_cover_primary_and_duplicate_bytes(self) -> None:
+        primary, duplicate = live_rating_write_addresses(0x10000000, "speed")
+        self.assertEqual(primary, 0x10000164)
+        self.assertEqual(duplicate, 0x10000165)
+        overall_primary, overall_duplicate = live_rating_write_addresses(0x10000000, "overall")
+        self.assertEqual(overall_primary, 0x1000010C)
+        self.assertEqual(overall_duplicate, 0x1000010F)
+
+    def test_live_player_layout_decodes_verified_rating_pairs(self) -> None:
+        data = bytearray(LIVE_PLAYER_OBJECT_SIZE)
+        data[LIVE_PLAYER_ID_OFFSET : LIVE_PLAYER_ID_OFFSET + 4] = (25130).to_bytes(4, "little")
+        expected = {
+            "overall": 86,
+            "speed": 82,
+            "acceleration": 86,
+            "strength": 77,
+            "agility": 84,
+            "awareness": 83,
+            "change_of_direction": 80,
+        }
+        for field, value in expected.items():
+            data[LIVE_PLAYER_RATING_OFFSETS[field]] = value
+            data[LIVE_PLAYER_DUPLICATE_OFFSETS[field]] = value
+        decoded = decode_live_player_object(bytes(data), 0x12340000)
+        self.assertEqual(decoded["playerId"], 25130)
+        self.assertEqual({field: decoded["ratings"][field] for field in expected}, expected)
+        self.assertTrue(decoded["duplicateRatingBytesValid"])
+        self.assertEqual(decoded["addressHex"], "0x12340000")
+
+    def test_live_process_build_fingerprint_and_game_dir_override(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            game_dir = Path(temp_dir)
+            executable = game_dir / "CollegeFB27.exe"
+            executable.write_bytes(b"MZ-test-build")
+            build = executable_build(executable)
+            self.assertTrue(build["exists"])
+            self.assertEqual(build["size"], len(b"MZ-test-build"))
+            self.assertEqual(len(build["sha256"]), 64)
+            self.assertFalse(build["recognized"])
+            self.assertEqual(configured_game_dir({"CFB27_GAME_DIR": temp_dir}), game_dir.resolve())
+
+    def test_live_status_endpoint_is_read_only(self) -> None:
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        port = httpd.server_address[1]
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        payload = {
+            "supportedPlatform": True,
+            "mode": "read-only-discovery",
+            "writeEligible": False,
+            "writeBlockers": ["test guard"],
+        }
+        try:
+            with patch("server.live_status", return_value=payload):
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/live/status") as response:
+                    self.assertEqual(json.loads(response.read()), payload)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(timeout=2)
+
     def test_resolve_save_dir_defaults_to_app_parent(self) -> None:
         self.assertEqual(resolve_save_dir({}), APP_DIR.parent.resolve())
 
@@ -142,8 +261,9 @@ class EditorTests(unittest.TestCase):
         self.assertIn('data-view="generator"', html)
         self.assertLess(html.index('data-view-tab="generator"'), html.index('data-view-tab="configs"'))
         view_sections = {
-            "configs": 'data-view="generator configs"',
+            "configs": 'data-view="configs"',
             "recruit-editor": 'data-view="recruit-editor"',
+            "live": 'data-view="live"',
             "save-tools": 'data-view="save-tools"',
             "schema": 'data-view="schema"',
             "tables": 'data-view="tables"',
@@ -153,8 +273,13 @@ class EditorTests(unittest.TestCase):
             self.assertIn(f'data-view-tab="{view}"', html)
             self.assertIn(section, html)
 
-        self.assertIn('activeView: "generator"', app_js)
-        self.assertIn('return "generator";', app_js)
+        self.assertIn('id="generatorEngineSelect" aria-label="Generator engine" hidden', html)
+        self.assertIn('<option value="home-dogs">Home Dogs</option>', html)
+        self.assertNotIn("Local Legacy", html)
+        self.assertIn('id="exportPatchBtn" type="button" disabled hidden', html)
+        self.assertNotIn('data-view="generator configs"', html)
+        self.assertIn('activeView: "recruiting"', app_js)
+        self.assertIn('return "recruiting";', app_js)
         self.assertIn("setActiveView(state.activeView, false)", app_js)
 
     def test_spa_support_views_have_pagination_and_state_preservation_hooks(self) -> None:
@@ -1328,6 +1453,42 @@ class EditorTests(unittest.TestCase):
         self.assertGreaterEqual(occurrences["count"], 1)
         self.assertTrue(any(entry["name"] == "RecruitTarget" for entry in occurrences["entries"]))
 
+    def test_recruiting_preview_validates_weekly_action_hour_delta(self) -> None:
+        board = {
+            "saveFingerprint": "abc",
+            "counters": {"hoursUsed": 25, "hoursMax": 1000},
+            "targets": [
+                {
+                    "id": "UserRecruitTarget:9",
+                    "name": "Stanley Herron",
+                    "actionBooleans": {"SendTheHouse": False},
+                    "provenance": {"userRecruitTargetRow": 9},
+                }
+            ],
+            "writeGates": {"actions": "preview-only"},
+        }
+        result = preview_recruiting_plan(
+            board,
+            [
+                {
+                    "type": "set-weekly-action",
+                    "targetId": "UserRecruitTarget:9",
+                    "userRecruitTargetRow": 9,
+                    "actionField": "SendTheHouse",
+                    "enabled": True,
+                    "hoursDelta": 50,
+                }
+            ],
+            expected_fingerprint="abc",
+        )
+
+        self.assertTrue(result["valid"])
+        self.assertFalse(result["writeEnabled"])
+        self.assertEqual(result["hourSummary"]["plannedDelta"], 50)
+        self.assertEqual(result["hourSummary"]["projectedUsed"], 75)
+        self.assertEqual(result["plannedTargets"][0]["status"], "validated-preview-write-gated")
+        self.assertEqual(result["plannedTargets"][0]["actionField"], "SendTheHouse")
+
     def test_upstream_import_manifest_requires_source_metadata(self) -> None:
         upstream_import = load_upstream_import_module()
         with self.assertRaises(ValueError) as missing:
@@ -1455,7 +1616,7 @@ class EditorTests(unittest.TestCase):
         self.assertEqual(weekly["ContactHighSchoolCoaches"]["upstream"]["action"]["shortName"], "DM Player")
         self.assertEqual(weekly["ContactFriendsAndFamily"]["upstream"]["cost"], 25)
         self.assertEqual(weekly["SendTheHouse"]["upstream"]["cost"], 50)
-        self.assertEqual(weekly["SendTheHouse"]["status"], "experimental-opened-user-request")
+        self.assertEqual(weekly["SendTheHouse"]["status"], "validated-multi-source")
         active_visit = maps["derived"]["activeVisitInfoActivityLowNibble"]
         self.assertEqual(active_visit["13"]["shortName"], "Tailgate")
 

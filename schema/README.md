@@ -26,7 +26,7 @@ Expected generated files:
   - Extracted FranTk XML schema payload.
 - `recruiting_schema_index.json`
   - Compact schema/enum index used by the app's Schema tab.
-- `CFB27_schema_for_madden_franchise.gz`
+- `CFB27_809_0.gz`
   - Converted schema bundle used by `madden-franchise` through `schemaOverride`.
 - `DYNASTY-decompressed-FrTk.bin`
   - Optional local research artifact containing a decompressed dynasty payload. This is save-derived and should never be committed.
@@ -36,7 +36,7 @@ Expected generated files:
 The structured dynasty editor depends on:
 
 ```text
-schema/CFB27_schema_for_madden_franchise.gz
+schema/CFB27_809_0.gz
 ```
 
 That file lets `madden-franchise` read tables with real names instead of anonymous fields. For example:

@@ -3,6 +3,9 @@ __pycache__/
 
 node_modules/
 npm-debug.log*
+native/build*/
+.research/
+.omc/
 
 backups/
 reports/

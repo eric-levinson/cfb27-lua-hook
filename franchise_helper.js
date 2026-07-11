@@ -4,8 +4,26 @@ const path = require("path");
 const Franchise = require("madden-franchise");
 const utilService = require("madden-franchise/services/utilService");
 
-const SCHEMA_PATH = path.join(__dirname, "schema", "CFB27_schema_for_madden_franchise.gz");
-const GAME_YEAR = 26;
+const originalConsoleError = console.error.bind(console);
+console.error = (...args) => {
+  const message = args.map((arg) => String(arg)).join(" ");
+  if (message.startsWith("Tried to read ") && message.includes(" as a reference")) return;
+  originalConsoleError(...args);
+};
+const originalStderrWrite = process.stderr.write.bind(process.stderr);
+process.stderr.write = (chunk, encoding, callback) => {
+  const message = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+  if (message.startsWith("Tried to read ") && message.includes(" as a reference")) {
+    if (typeof callback === "function") callback();
+    return true;
+  }
+  return originalStderrWrite(chunk, encoding, callback);
+};
+
+const SCHEMA_PATH = path.join(__dirname, "schema", "CFB27_809_0.gz");
+const SCHEMA_MAJOR = 809;
+const SCHEMA_MINOR = 0;
+const GAME_YEAR = 27;
 const PLAYER_TABLE = "Player";
 const RECRUIT_TABLE = "Recruit";
 const RECRUITING_DIFF_TABLES = [
@@ -368,6 +386,12 @@ function decodeProspectStarRating(value) {
   return PROSPECT_STAR_BITS[text.slice(0, 3)] || "";
 }
 
+function prospectStarCount(value) {
+  const rating = decodeProspectStarRating(value);
+  const index = PROSPECT_STAR_RATINGS.indexOf(rating);
+  return index >= 0 ? index + 1 : null;
+}
+
 function encodeProspectStarRating(currentValue, rating) {
   const bits = PROSPECT_STAR_VALUE_BITS[rating];
   if (!bits) {
@@ -463,8 +487,8 @@ async function loadFranchise(filePath, options = {}) {
   }
   return Franchise.create(filePath, {
     schemaOverride: {
-      major: 27,
-      minor: 1,
+      major: SCHEMA_MAJOR,
+      minor: SCHEMA_MINOR,
       gameYear: GAME_YEAR,
       path: SCHEMA_PATH,
     },
@@ -523,6 +547,208 @@ async function readRecruitResearchTables(franchise) {
   await recruitTable.readRecords();
   await playerTable.readRecords();
   return { recruitTable, playerTable };
+}
+
+async function searchPlayers(filePath, query, limit = 100) {
+  const franchise = await loadFranchise(filePath);
+  const playerTable = franchise.getTableByName(PLAYER_TABLE);
+  if (!playerTable) throw new Error("Player table was not found in this save");
+  const fields = [
+    "FirstName",
+    "LastName",
+    "Position",
+    "JerseyNum",
+    "PlayerType",
+    "TraitDevelopment",
+    "GenericHeadAssetName",
+    "PLYR_GENERICHEAD",
+    ...RATING_FIELDS.map((field) => field[3]),
+  ];
+  await playerTable.readRecords(fields);
+  const needle = String(query || "").trim().toLowerCase();
+  const matches = [];
+  for (let row = 0; row < playerTable.records.length && matches.length < Math.max(1, Math.min(limit, 500)); row += 1) {
+    const record = playerTable.records[row];
+    if (!record || record.isEmpty) continue;
+    const searchable = [
+      record.FirstName,
+      record.LastName,
+      record.GenericHeadAssetName,
+      record.PLYR_GENERICHEAD,
+    ].map((value) => String(value || "").toLowerCase()).join(" ");
+    if (needle && !searchable.includes(needle)) continue;
+    const ratings = {};
+    for (const [key, shortLabel, displayLabel, schemaField] of RATING_FIELDS) {
+      ratings[key] = {
+        label: shortLabel,
+        display: displayLabel,
+        schemaField,
+        value: Number(record[schemaField] || 0),
+      };
+    }
+    matches.push({
+      row,
+      firstName: record.FirstName || "",
+      lastName: record.LastName || "",
+      position: record.Position || "",
+      jerseyNum: Number(record.JerseyNum || 0),
+      playerType: record.PlayerType || "",
+      development: record.TraitDevelopment || "",
+      genericHeadAssetName: record.GenericHeadAssetName || "",
+      genericHead: record.PLYR_GENERICHEAD || "",
+      ratings,
+      rawHex: record._data ? record._data.toString("hex") : "",
+      fieldMetadata: fieldMetadata(record),
+    });
+  }
+  return {
+    file: path.basename(filePath),
+    query: String(query || ""),
+    playerTableId: playerTable.header.tableId,
+    playerRecordCapacity: playerTable.records.length,
+    count: matches.length,
+    players: matches,
+  };
+}
+
+async function buildPlayerRecordPatch(filePath, rowValue, fieldValue, nextValue) {
+  const row = Number(rowValue);
+  const next = Number(nextValue);
+  if (!Number.isInteger(row) || row < 0) throw new Error("Player row must be a non-negative integer");
+  if (!Number.isInteger(next)) throw new Error("Player rating value must be an integer");
+  const rating = RATING_FIELDS.find(([key, , , schemaField]) => key === fieldValue || schemaField === fieldValue);
+  if (!rating) throw new Error(`Unsupported player rating: ${fieldValue}`);
+  const [key, , display, schemaField, , minimum, maximum] = rating;
+  if (next < minimum || next > maximum) throw new Error(`${schemaField} must be between ${minimum} and ${maximum}`);
+
+  const franchise = await loadFranchise(filePath);
+  const playerTable = franchise.getTableByName(PLAYER_TABLE);
+  if (!playerTable) throw new Error("Player table was not found in this save");
+  await playerTable.readRecords(["FirstName", "LastName", "GenericHeadAssetName", "PresentationId", schemaField]);
+  const record = playerTable.records[row];
+  if (!record || record.isEmpty) throw new Error(`Player row ${row} is unavailable`);
+  const before = Buffer.from(record._data);
+  const previous = Number(record[schemaField]);
+  record[schemaField] = next;
+  const after = Buffer.from(record._data);
+  const changes = [];
+  for (let offset = 0; offset < before.length; offset += 1) {
+    if (before[offset] === after[offset]) continue;
+    changes.push({ offset, before: before[offset], after: after[offset] });
+  }
+  if (!changes.length && previous !== next) throw new Error(`${schemaField} did not produce a record-byte change`);
+  return {
+    kind: "cfb27.playerRecordPatch.v1",
+    file: path.basename(filePath),
+    playerTableId: playerTable.header.tableId,
+    playerTableUniqueId: playerTable.header.uniqueId,
+    recordCapacity: playerTable.records.length,
+    recordSize: before.length,
+    row,
+    player: {
+      playerId: Number(record.PresentationId || 0),
+      firstName: record.FirstName || "",
+      lastName: record.LastName || "",
+      genericHeadAssetName: record.GenericHeadAssetName || "",
+    },
+    field: key,
+    display,
+    schemaField,
+    expectedBefore: previous,
+    value: next,
+    fieldMetadata: fieldMetadata(record)[schemaField],
+    beforeHex: before.toString("hex"),
+    afterHex: after.toString("hex"),
+    changes,
+  };
+}
+
+async function buildLeagueEditPermissionPatch(filePath, requestedValue = "ANY") {
+  const values = new Map([
+    ["NONE", "00"],
+    ["COMMISHONLY", "01"],
+    ["ANY", "10"],
+    ["MAX", "11"],
+  ]);
+  const normalized = String(requestedValue || "ANY").trim().toUpperCase();
+  const encoded = values.get(normalized);
+  if (!encoded) throw new Error(`AbilityEditControls must be one of: ${[...values.keys()].join(", ")}`);
+  const franchise = await loadFranchise(filePath);
+  const table = franchise.tables.find((candidate) => candidate.name === "LeagueSetting");
+  if (!table) throw new Error("LeagueSetting table was not found in this Dynasty");
+  await table.readRecords(["AbilityEditControls", "FranchiseStyle"]);
+  const record = table.records.find((candidate) => candidate && !candidate.isEmpty);
+  if (!record) throw new Error("LeagueSetting does not contain an active record");
+  const before = Buffer.from(record._data);
+  const previous = String(record.AbilityEditControls ?? "");
+  record.AbilityEditControls = encoded;
+  const after = Buffer.from(record._data);
+  const changes = [];
+  for (let offset = 0; offset < before.length; offset += 1) {
+    if (before[offset] === after[offset]) continue;
+    changes.push({ offset, before: before[offset], after: after[offset] });
+  }
+  return {
+    kind: "cfb27.leagueEditPermissionPatch.v1",
+    file: path.basename(filePath),
+    table: "LeagueSetting",
+    tableId: table.header.tableId,
+    tableUniqueId: table.header.uniqueId,
+    row: record.index,
+    recordSize: before.length,
+    field: "AbilityEditControls",
+    expectedBefore: previous,
+    value: normalized,
+    encoded,
+    fieldMetadata: fieldMetadata(record).AbilityEditControls,
+    beforeHex: before.toString("hex"),
+    afterHex: after.toString("hex"),
+    changes,
+  };
+}
+
+async function buildFranchiseOwnerPatch(filePath) {
+  const franchise = await loadFranchise(filePath);
+  const table = franchise.tables.find((candidate) => candidate.name === "FranchiseUser");
+  if (!table) throw new Error("FranchiseUser table was not found in this Dynasty");
+  await table.readRecords(["AdminLevel"]);
+  const record = table.records.find((candidate) => candidate && !candidate.isEmpty);
+  if (!record) throw new Error("FranchiseUser does not contain an active record");
+  const before = Buffer.from(record._data);
+  const after = Buffer.from(before);
+
+  // CFB27 schema 809 stores AdminLevel in the high two bits of byte 36:
+  // Owner=00, Commissioner=01, None=10. The current franchise library expands
+  // this enum to 32 bits, so write the two schema bits directly and preserve
+  // the remaining six bits in the byte.
+  const adminByteOffset = 36;
+  if (after.length <= adminByteOffset) throw new Error("FranchiseUser record is shorter than the AdminLevel field");
+  const encodedBefore = (before[adminByteOffset] >>> 6) & 0x03;
+  after[adminByteOffset] &= 0x3f;
+  const labels = ["Owner", "Commissioner", "None", "Max"];
+  const changes = [];
+  for (let offset = 0; offset < before.length; offset += 1) {
+    if (before[offset] === after[offset]) continue;
+    changes.push({ offset, before: before[offset], after: after[offset] });
+  }
+  return {
+    kind: "cfb27.franchiseOwnerPatch.v1",
+    file: path.basename(filePath),
+    table: "FranchiseUser",
+    tableId: table.header.tableId,
+    tableUniqueId: table.header.uniqueId,
+    row: record.index,
+    recordSize: before.length,
+    field: "AdminLevel",
+    expectedBefore: labels[encodedBefore],
+    value: "Owner",
+    encoded: "00",
+    bitOffset: 288,
+    bitLength: 2,
+    beforeHex: before.toString("hex"),
+    afterHex: after.toString("hex"),
+    changes,
+  };
 }
 
 function recruitPlayerPair(recruitRecord, recruitIndex, playerTable) {
@@ -1515,6 +1741,195 @@ function hasScholarshipOffer(status) {
   return Boolean(status && status !== "None");
 }
 
+function scholarshipLabel(status) {
+  return hasScholarshipOffer(status) ? "Offered" : "None";
+}
+
+function firstUserBoard(snapshot) {
+  const boards = (snapshot.boardRows || [])
+    .filter((board) => board && board.recruitsList && board.recruitsList.userRecruitTargetRows.length)
+    .sort((left, right) => {
+      const leftCount = left.recruitsList.userRecruitTargetRows.length;
+      const rightCount = right.recruitsList.userRecruitTargetRows.length;
+      if (leftCount !== rightCount) return rightCount - leftCount;
+      return left.row - right.row;
+    });
+  return boards[0] || null;
+}
+
+function recruitingWriteGates() {
+  return {
+    actions: "preview-only-existing-action-fields; apply blocked by 017 MVP",
+    scouting: "blocked-by-true-scouting-grade-evidence",
+    offers: "preview-only; copy-write still gated",
+    visitsAndPitches: "existing-active-pitch pitch/intensity validated by 016; forced allocation blocked",
+    forcedActivePitchAllocation: "blocked-by-load-failure",
+  };
+}
+
+function recruitingFieldCapabilities() {
+  return [
+    {
+      field: "UserRecruitTarget.SearchSocialMedia",
+      state: "preview-only",
+      evidence: "015 action-hour fixtures",
+    },
+    {
+      field: "UserRecruitTarget.ContactHighSchoolCoaches",
+      state: "preview-only",
+      evidence: "015 action-hour fixtures",
+    },
+    {
+      field: "UserRecruitTarget.ContactFriendsAndFamily",
+      state: "preview-only",
+      evidence: "015 action-hour fixtures",
+    },
+    {
+      field: "UserRecruitTarget.SendTheHouse",
+      state: "preview-only",
+      evidence: "015 action-hour fixtures",
+    },
+    {
+      field: "UserRecruitTarget.ScholarshipStatus",
+      state: "preview-only",
+      evidence: "015 offer fixtures; apply still gated by 017 MVP",
+    },
+    {
+      field: "ActiveRecruitingPitch.Pitch",
+      state: "validated-existing-row-preview-only",
+      evidence: "016 natural active-pitch row load/week-survival chain",
+    },
+    {
+      field: "ActiveRecruitingPitch.Intensity",
+      state: "validated-existing-row-preview-only",
+      evidence: "016 pitch-only, Hard Sell, and Sway probes",
+    },
+    {
+      field: "ActiveRecruitingPitch[] allocation",
+      state: "unsafe",
+      evidence: "016 seeded allocation parsed locally but failed game load",
+    },
+  ];
+}
+
+function recruitingTargetFromState(state, boardRow) {
+  const profile = state.recruitingProfile || {};
+  const maxHours = state.activePitches && state.activePitches.length ? 60 : 50;
+  const ambiguousPitchEvidence = (state.sameRecruitTargetActivePitches || []).slice(0, 5).map((item) => ({
+    recruitTargetRow: item.recruitTargetRow,
+    activePitchesRef: item.activePitchesRef,
+    activePitches: item.activePitches,
+    referencingBoardRows: item.referencingBoardRows,
+    ownershipStatus: item.ownershipStatus,
+  }));
+  return {
+    id: `UserRecruitTarget:${state.userRecruitTargetRow}`,
+    boardRow,
+    name: state.name,
+    position: state.position,
+    stars: state.stars,
+    nationalRank: state.nationalRank,
+    positionRank: state.positionRank,
+    stateRank: state.stateRank,
+    stage: "Active Board",
+    interestRank: null,
+    scoutingPercent: null,
+    offerState: scholarshipLabel(state.scholarshipStatus),
+    activeHours: state.selectedActionHours,
+    maxHours,
+    selectedActions: state.selectedActions,
+    actionBooleans: state.actionBooleans,
+    activePitches: state.activePitches,
+    scholarshipStatus: state.scholarshipStatus,
+    scholarshipBonus: state.scholarshipBonus,
+    currentNilOffer: state.currentNilOffer,
+    nilExpectation: state.nilExpectation,
+    archetype: state.archetype,
+    heightInches: state.heightInches,
+    heightDisplay: state.heightDisplay,
+    weightLbs: state.weightLbs,
+    homeState: state.homeState,
+    hometown: state.hometown,
+    isFavorite: state.isFavorite,
+    prospectInfluenceTotal: state.prospectInfluenceTotal,
+    prospectHoursSpentCurrent: state.prospectHoursSpentCurrent,
+    recruitingProfile: profile,
+    visit: compactVisitState(state),
+    prospectInteractions: (state.prospectInteractions || []).map((interaction) => ({
+      row: interaction.row,
+      fields: {
+        IsVisitScheduled: interaction.fields ? interaction.fields.IsVisitScheduled ?? null : null,
+        VisitWeekNumber: interaction.fields ? interaction.fields.VisitWeekNumber ?? null : null,
+        HasOfferedScholarship: interaction.fields ? interaction.fields.HasOfferedScholarship ?? null : null,
+        TimesScouted: interaction.fields ? interaction.fields.TimesScouted ?? null : null,
+        UnlockedIntelBitfield: interaction.fields ? interaction.fields.UnlockedIntelBitfield ?? null : null,
+      },
+    })),
+    provenance: {
+      recruitRow: state.recruitRow,
+      playerRow: state.playerRow,
+      userRecruitTargetRow: state.userRecruitTargetRow,
+      prospectInteractionRows: state.prospectInteractionRows,
+      activePitchesRef: state.activePitchesRef,
+      activePitchRows: (state.activePitches || []).map((pitch) => pitch.row),
+      sameRecruitTargetActivePitches: ambiguousPitchEvidence,
+      sameRecruitTargetActivePitchCount: (state.sameRecruitTargetActivePitches || []).length,
+      boardRow,
+      confidence: {
+        board: "high-for-current-save",
+        profile: state.recruitRow !== null && state.playerRow !== null ? "high" : "missing-link",
+        counters: "derived-from-board-and-selected-actions",
+      },
+    },
+  };
+}
+
+async function recruitingWorkbenchBoard(filePath) {
+  const snapshot = await recruitingSnapshot(filePath, path.basename(filePath));
+  const board = firstUserBoard(snapshot);
+  const userRows = board && board.recruitsList
+    ? board.recruitsList.userRecruitTargetRows
+    : Object.keys((snapshot.tables.UserRecruitTarget && snapshot.tables.UserRecruitTarget.rows) || {})
+      .map((row) => Number(row))
+      .sort((left, right) => left - right);
+  const targetStates = userRows
+    .map((row) => userRecruitTargetState(snapshot, row))
+    .filter(Boolean);
+  const targets = targetStates.map((target) => recruitingTargetFromState(target, board ? board.row : null));
+  const selectedHours = targets.reduce((total, target) => total + Number(target.activeHours || 0), 0);
+  const scholarshipsUsed = targets.filter((target) => hasScholarshipOffer(target.scholarshipStatus)).length;
+  const hoursMax = board ? Number(board.recruitingHoursTotal || 0) : null;
+  const hoursRemaining = board && board.recruitingHoursAssigned !== null
+    ? Number(board.recruitingHoursAssigned || 0)
+    : (hoursMax === null ? null : Math.max(0, hoursMax - selectedHours));
+  return {
+    kind: "cfb27.recruitingWorkbench.v1",
+    saveName: path.basename(filePath),
+    readOnly: true,
+    phase: "unknown",
+    boardRow: board ? board.row : null,
+    board,
+    writeGates: recruitingWriteGates(),
+    fieldCapabilities: recruitingFieldCapabilities(),
+    counters: {
+      remainingPoints: hoursRemaining,
+      targetsUsed: targets.length,
+      targetsMax: 35,
+      hoursUsed: selectedHours,
+      hoursMax,
+      scholarshipsUsed,
+      scholarshipsMax: 35,
+      boardVisibleHoursUsed: board ? board.derivedVisibleHoursUsed : null,
+      boardRecruitingHoursAssigned: board ? board.recruitingHoursAssigned : null,
+      boardRecruitingHoursProcessed: board ? board.recruitingHoursProcessed : null,
+    },
+    targets,
+    warnings: board
+      ? []
+      : ["No RecruitingBoard row referencing UserRecruitTarget rows was found; showing all UserRecruitTarget rows."],
+  };
+}
+
 function hasScheduledVisitState(state) {
   if (!state) return false;
   if (state.scheduledVisit) return true;
@@ -1608,6 +2023,15 @@ function userRecruitTargetState(snapshot, row) {
     name: displayName(playerFields),
     position: playerFields ? playerFields.Position || "" : "",
     nationalRank: recruitFields ? Number(recruitFields.NationalRank || 0) : 0,
+    positionRank: recruitFields ? Number(recruitFields.PositionRank || 0) : null,
+    stateRank: recruitFields ? Number(recruitFields.StateRank || 0) : null,
+    stars: playerFields ? prospectStarCount(playerFields.ProspectStarRating) : null,
+    archetype: playerFields ? playerFields.PlayerType || "" : "",
+    heightInches: playerFields ? Number(playerFields.Height || 0) : null,
+    heightDisplay: playerFields ? heightDisplay(playerFields.Height) : "",
+    weightLbs: playerFields ? poundsFromRaw(playerFields.Weight) : null,
+    homeState: playerFields ? playerFields.HomeState || "" : "",
+    hometown: playerFields ? playerFields.Hometown || playerFields.HomeTown || "" : "",
     recruitingProfile: playerFields
       ? {
         dealbreakerRaw: playerFields.RecruitingDealbreaker ?? null,
@@ -2430,7 +2854,7 @@ async function recruitingProbeAction(filePath, patchPath, outputPath) {
 async function main() {
   const [command, filePath, arg1, arg2, arg3] = process.argv.slice(2);
   if (!command || !filePath) {
-    fail("Usage: node franchise_helper.js <list|joined|patch|patch-batch|research|recruiting-diff|recruiting-probe-action> <file> ...");
+    fail("Usage: node franchise_helper.js <list|joined|player-search|player-record-patch|league-edit-permission-patch|franchise-owner-patch|patch|patch-batch|research|recruiting-board|recruiting-diff|recruiting-probe-action> <file> ...");
   }
   if (command === "list") {
     const result = await listRecruits(filePath, Number(arg1 || 1000), Number(arg2 || 0));
@@ -2439,6 +2863,27 @@ async function main() {
   }
   if (command === "joined") {
     const result = await joinedRecruitProfiles(filePath, Number(arg1 || 1000), Number(arg2 || 0));
+    console.log(JSON.stringify(result));
+    return;
+  }
+  if (command === "player-search") {
+    const result = await searchPlayers(filePath, arg1 || "", Number(arg2 || 100));
+    console.log(JSON.stringify(result));
+    return;
+  }
+  if (command === "player-record-patch") {
+    if (arg1 === undefined || !arg2 || arg3 === undefined) fail("Player record patch requires <row> <rating-field> <value>");
+    const result = await buildPlayerRecordPatch(filePath, arg1, arg2, arg3);
+    console.log(JSON.stringify(result));
+    return;
+  }
+  if (command === "league-edit-permission-patch") {
+    const result = await buildLeagueEditPermissionPatch(filePath, arg1 || "ANY");
+    console.log(JSON.stringify(result));
+    return;
+  }
+  if (command === "franchise-owner-patch") {
+    const result = await buildFranchiseOwnerPatch(filePath);
     console.log(JSON.stringify(result));
     return;
   }
@@ -2469,6 +2914,11 @@ async function main() {
       }));
       return;
     }
+    console.log(JSON.stringify(result));
+    return;
+  }
+  if (command === "recruiting-board") {
+    const result = await recruitingWorkbenchBoard(filePath);
     console.log(JSON.stringify(result));
     return;
   }
