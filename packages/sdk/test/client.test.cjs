@@ -102,12 +102,96 @@ test('client negotiates hello and preserves multiline evaluate', async (t) => {
 
 test('client maps a silent host to PIPE_TIMEOUT', async (t) => {
   const pipeName = `\\\\.\\pipe\\cfb27-timeout-${process.pid}-${Date.now()}`;
-  const server = net.createServer(() => {});
+  let connections = 0;
+  const server = net.createServer(() => {
+    connections += 1;
+  });
   await listen(server, pipeName);
   t.after(() => server.close());
 
   const client = createClient({ pipeName, timeoutMs: 25 });
   await assert.rejects(client.status(), (error) => error.code === 'PIPE_TIMEOUT');
+  assert.equal(connections, 1);
+});
+
+test('client applies one total deadline while a named pipe stays absent', async () => {
+  const timeoutMs = 35;
+  const startedAt = Date.now();
+  const client = createClient({ pipeName: testPipeName('absent'), timeoutMs });
+
+  await assert.rejects(client.status(), (error) => error.code === 'PIPE_TIMEOUT');
+  const elapsedMs = Date.now() - startedAt;
+  assert.ok(elapsedMs >= timeoutMs, `request ended before its deadline (${elapsedMs} ms)`);
+  assert.ok(elapsedMs < 250, `request deadline was reset by retries (${elapsedMs} ms)`);
+});
+
+test('scanMemory retries a transient gap between named-pipe server instances', async (t) => {
+  const pipeName = testPipeName('pipe-gap');
+  const server = net.createServer();
+  const requests = [];
+  let relistenTimer;
+
+  server.on('connection', (socket) => {
+    const decoder = new FrameDecoder();
+    socket.on('data', (chunk) => {
+      for (const request of decoder.push(chunk)) {
+        requests.push(request);
+        const firstPage = requests.length === 1;
+        const result = firstPage
+          ? { supportedBuild: true, complete: false, nextCursor: '0x1000',
+            scannedBytes: 32, matches: [] }
+          : { supportedBuild: true, complete: true, nextCursor: null,
+            scannedBytes: 8, matches: [] };
+
+        if (firstPage) {
+          server.close(() => {
+            relistenTimer = setTimeout(() => server.listen(pipeName), 40);
+          });
+        }
+        socket.end(encodeFrame({ protocol: 1, id: request.id, ok: true, result }));
+      }
+    });
+  });
+  await listen(server, pipeName);
+  t.after(async () => {
+    clearTimeout(relistenTimer);
+    if (server.listening) await new Promise((resolve) => server.close(resolve));
+  });
+
+  const client = createClient({ pipeName, timeoutMs: 500 });
+  assert.deepEqual(
+    await client.scanMemory({ ...VALID_SCAN_OPTIONS, maxPages: 2 }),
+    { supportedBuild: true, complete: true, scannedBytes: 40, matches: [] },
+  );
+  assert.deepEqual(requests.map((request) => request.params.cursor), [undefined, '0x1000']);
+});
+
+test('client does not retry after a host response error', async (t) => {
+  const pipeName = testPipeName('host-error');
+  let requests = 0;
+  const server = net.createServer((socket) => {
+    const decoder = new FrameDecoder();
+    socket.on('data', (chunk) => {
+      for (const request of decoder.push(chunk)) {
+        requests += 1;
+        server.close();
+        socket.end(encodeFrame({
+          protocol: 1,
+          id: request.id,
+          ok: false,
+          error: { code: 'TEST_HOST_ERROR', message: 'Host rejected the request' },
+        }));
+      }
+    });
+  });
+  await listen(server, pipeName);
+  t.after(async () => {
+    if (server.listening) await new Promise((resolve) => server.close(resolve));
+  });
+
+  const client = createClient({ pipeName, timeoutMs: 100 });
+  await assert.rejects(client.status(), (error) => error.code === 'TEST_HOST_ERROR');
+  assert.equal(requests, 1);
 });
 
 test('memory APIs clone options and send exact typed commands', async (t) => {

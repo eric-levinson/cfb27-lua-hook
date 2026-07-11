@@ -25,6 +25,7 @@ const CANONICAL_ADDRESS = /^0x(?:0|[1-9A-F][0-9A-F]{0,15})$/;
 const UPPER_HEX_BYTES = /^(?:[0-9A-F]{2})+$/;
 const TELEMETRY_TYPE = /^[a-z][a-z0-9_.-]{0,63}$/;
 const RESERVED_TELEMETRY_TYPES = new Set(['game_ready', 'tick', 'log']);
+const PIPE_CONNECT_RETRY_DELAY_MS = 10;
 
 function invalidRequest(message) {
   return new Cfb27HookError('INVALID_REQUEST', message);
@@ -255,7 +256,9 @@ function createClient({ pid, pipeName, timeoutMs = 3000 } = {}) {
     const id = crypto.randomUUID();
     return new Promise((resolve, reject) => {
       const decoder = new FrameDecoder();
-      const socket = net.createConnection(resolvedPipeName);
+      let socket;
+      let retryTimer;
+      let commandSent = false;
       let settled = false;
       const timer = setTimeout(() => {
         finish(new Cfb27HookError('PIPE_TIMEOUT', `Host did not respond within ${timeoutMs} ms`, {
@@ -267,57 +270,76 @@ function createClient({ pid, pipeName, timeoutMs = 3000 } = {}) {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        socket.destroy();
+        clearTimeout(retryTimer);
+        socket?.destroy();
         if (error) reject(error);
         else resolve(result);
       }
 
-      socket.once('connect', () => {
-        try {
-          socket.write(encodeFrame({ protocol: 1, id, command, params }));
-        } catch (error) {
-          finish(error);
-        }
-      });
-      socket.on('data', (chunk) => {
-        let responses;
-        try {
-          responses = decoder.push(chunk);
-        } catch (error) {
-          finish(error);
-          return;
-        }
-        for (const response of responses) {
-          if (!response || response.protocol !== 1) {
-            finish(new Cfb27HookError('PROTOCOL_MISMATCH', 'Host protocol version does not match'));
+      function connect() {
+        if (settled) return;
+        const attemptSocket = net.createConnection(resolvedPipeName);
+        socket = attemptSocket;
+        let connected = false;
+
+        attemptSocket.once('connect', () => {
+          connected = true;
+          commandSent = true;
+          try {
+            attemptSocket.write(encodeFrame({ protocol: 1, id, command, params }));
+          } catch (error) {
+            finish(error);
+          }
+        });
+        attemptSocket.on('data', (chunk) => {
+          let responses;
+          try {
+            responses = decoder.push(chunk);
+          } catch (error) {
+            finish(error);
             return;
           }
-          if (response.id !== id || typeof response.ok !== 'boolean') {
-            finish(new Cfb27HookError('INVALID_RESPONSE', 'Host response does not match the request'));
+          for (const response of responses) {
+            if (!response || response.protocol !== 1) {
+              finish(new Cfb27HookError('PROTOCOL_MISMATCH', 'Host protocol version does not match'));
+              return;
+            }
+            if (response.id !== id || typeof response.ok !== 'boolean') {
+              finish(new Cfb27HookError('INVALID_RESPONSE', 'Host response does not match the request'));
+              return;
+            }
+            if (!response.ok) {
+              const hostError = response.error || {};
+              finish(new Cfb27HookError(
+                typeof hostError.code === 'string' ? hostError.code : 'INVALID_RESPONSE',
+                typeof hostError.message === 'string' ? hostError.message : 'Host request failed',
+                hostError.details,
+              ));
+              return;
+            }
+            finish(null, response.result);
             return;
           }
-          if (!response.ok) {
-            const hostError = response.error || {};
-            finish(new Cfb27HookError(
-              typeof hostError.code === 'string' ? hostError.code : 'INVALID_RESPONSE',
-              typeof hostError.message === 'string' ? hostError.message : 'Host request failed',
-              hostError.details,
-            ));
+        });
+        attemptSocket.once('end', () => {
+          if (!settled) {
+            finish(new Cfb27HookError('INVALID_RESPONSE', 'Host closed without a response'));
+          }
+        });
+        attemptSocket.once('error', (error) => {
+          if (!connected && !commandSent && error.code === 'ENOENT') {
+            attemptSocket.destroy();
+            retryTimer = setTimeout(connect, PIPE_CONNECT_RETRY_DELAY_MS);
             return;
           }
-          finish(null, response.result);
-          return;
-        }
-      });
-      socket.once('end', () => {
-        if (!settled) finish(new Cfb27HookError('INVALID_RESPONSE', 'Host closed without a response'));
-      });
-      socket.once('error', (error) => {
-        finish(new Cfb27HookError('HOST_NOT_READY', 'Could not connect to the Lua host', {
-          pipeName: resolvedPipeName,
-          cause: error.message,
-        }));
-      });
+          finish(new Cfb27HookError('HOST_NOT_READY', 'Could not connect to the Lua host', {
+            pipeName: resolvedPipeName,
+            cause: error.message,
+          }));
+        });
+      }
+
+      connect();
     });
   }
 
