@@ -56,10 +56,10 @@ Earlier request-detour and save-editor findings are retained separately in
   to `14986`, the event cursor advanced from `871` to `1506`, and no error was
   observed.
 
-The version-only native rebuild performed after this manual gate necessarily
-changes the final host binary hash. That final packaged hash was verified by
-the automated release gate in the final section, but was not the binary
-exercised by this manual live session.
+The native version bump and final typed-parameter contract correction performed
+after this manual gate necessarily change the final host binary hash. That
+final packaged hash was verified by the automated release gate in the final
+section, but was not the binary exercised by this manual live session.
 
 ### Retained manual commands
 
@@ -115,13 +115,13 @@ Node suite, Windows x64 release build, startup, memory-reader, telemetry, and
 framed-protocol smokes, package preview, checksum verification, and archive
 inspection. Its retained SHA-256 values are:
 
-- Release ZIP: `8016A9959C66B61A68D7E075AD323F6E324021E5DF633788F2F77539A0179B69`
+- Release ZIP: `1B5261A4CD46FA74E98865E073054A5BA01D1C6F554F63842CFD6EC7BCE36F3E`
 - Forwarding proxy: `4638D7E54A6715538119254069B075C94EB7AB41A6914907AAD96750ABD0F756`
-- Final host: `9A2B34AC98964266FE072B3961AE1A914DB76B8E292D73C4A8A4C1A06101E0D8`
+- Final host: `72C4CF08BA19F526F9E89F5B54F7EE70C3B5B630D9C7BA4658523F862AF5CB98`
 - CLI tarball: `A8FA2C550FCC85A51070C3F937CB6CD3A6FC0DC0213037D55C0EDFABB6CB7494`
-- SDK tarball: `AF104E0514BB69A5C3ACCE1536E1A0BA77E9B73356B13FB8DB8032F778F2F64B`
+- SDK tarball: `94527FC3D1D832001647E176FEB0CA5D025C4451CACCF750376B3309627A92A8`
 
-The final host above was automated- and smoke-tested after the version-only
-rebuild, but it was not manually live-tested in CFB27. The manual evidence in
-this document applies to host
+The final host above was automated- and smoke-tested after the version bump and
+final contract correction, but it was not manually live-tested in CFB27. The
+manual evidence in this document applies to host
 `1420F4BCAA089153E671FD41D7B89F3162EFF8AAD94B4D1EFD18039E6590D3CE`.
