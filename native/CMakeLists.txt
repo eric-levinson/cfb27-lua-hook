@@ -17,6 +17,13 @@ if(NOT lua_source_POPULATED)
   FetchContent_Populate(lua_source)
 endif()
 
+FetchContent_Declare(
+  nlohmann_json
+  URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
+  URL_HASH SHA256=d6c65aca6b1ed68e7a182f4757257b107ae403032760ed6ef121c9d55e81757d
+)
+FetchContent_MakeAvailable(nlohmann_json)
+
 set(LUA_DIR "${lua_source_SOURCE_DIR}/src")
 set(LUA_SOURCES
   ${LUA_DIR}/lapi.c ${LUA_DIR}/lauxlib.c ${LUA_DIR}/lbaselib.c
@@ -36,10 +43,13 @@ add_library(lua54 STATIC ${LUA_SOURCES})
 target_include_directories(lua54 PUBLIC ${LUA_DIR})
 set_target_properties(lua54 PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-add_library(cfb27_lua_host SHARED host/lua_host.cpp)
+add_library(cfb27_lua_host SHARED
+  host/lua_host.cpp
+  host/protocol.cpp
+)
 target_compile_features(cfb27_lua_host PRIVATE cxx_std_20)
 target_compile_definitions(cfb27_lua_host PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_link_libraries(cfb27_lua_host PRIVATE lua54 bcrypt)
+target_link_libraries(cfb27_lua_host PRIVATE lua54 bcrypt nlohmann_json::nlohmann_json)
 
 add_library(cfb27_cryptbase_proxy SHARED
   proxy/cryptbase_proxy.cpp
@@ -52,3 +62,9 @@ add_executable(cfb27_startup_smoke smoke/startup_host_smoke.cpp)
 target_compile_features(cfb27_startup_smoke PRIVATE cxx_std_20)
 target_compile_definitions(cfb27_startup_smoke PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_options(cfb27_startup_smoke PRIVATE /STACK:1048576)
+
+add_executable(cfb27_protocol_smoke smoke/protocol_smoke.cpp)
+target_compile_features(cfb27_protocol_smoke PRIVATE cxx_std_20)
+target_compile_definitions(cfb27_protocol_smoke PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(cfb27_protocol_smoke PRIVATE nlohmann_json::nlohmann_json)
+target_link_options(cfb27_protocol_smoke PRIVATE /STACK:1048576)

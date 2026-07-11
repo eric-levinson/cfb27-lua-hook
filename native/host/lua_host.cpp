@@ -2,6 +2,8 @@
 #include <tlhelp32.h>
 #include <bcrypt.h>
 
+#include "protocol.h"
+
 #include <array>
 #include <atomic>
 #include <charconv>
@@ -26,6 +28,8 @@ extern "C" {
 namespace {
 
 constexpr wchar_t kPipePrefix[] = L"\\\\.\\pipe\\CFB27LuaHost.";
+constexpr wchar_t kV1PipePrefix[] = L"\\\\.\\pipe\\CFB27LuaHost.v1.";
+constexpr char kHostVersion[] = "0.1.0-dev.1";
 constexpr std::uintmax_t kSupportedExecutableSize = 247845776;
 constexpr char kSupportedExecutableSha256[] = "9E654AD49C4702D8F9FA4E38FD1110ABE657DD38926D4124B30C70E7D29ADFE8";
 constexpr DWORD kTickMilliseconds = 100;
@@ -319,6 +323,8 @@ bool RunLuaText(std::string_view text, const char* chunk_name, std::string& resu
     return false;
   }
   result = "ok";
+  g_last_error.clear();
+  lua_settop(g_lua, 0);
   ++g_scripts_run;
   return true;
 }
@@ -346,6 +352,93 @@ std::string StatusJson() {
       << ",\"ticks\":" << g_ticks.load()
       << ",\"lastError\":\"" << JsonEscape(g_last_error) << "\"}";
   return out.str();
+}
+
+cfb27::protocol::Json SuccessResponse(
+    const std::string& id, cfb27::protocol::Json result) {
+  return {
+      {"protocol", cfb27::protocol::kVersion},
+      {"id", id},
+      {"ok", true},
+      {"result", std::move(result)},
+  };
+}
+
+cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
+  using cfb27::protocol::ErrorResponse;
+  using Json = cfb27::protocol::Json;
+
+  const std::string id = request.is_object() && request.contains("id") &&
+      request["id"].is_string() ? request["id"].get<std::string>() : "";
+  if (!request.is_object() || !request.contains("protocol") ||
+      !request["protocol"].is_number_integer() ||
+      request["protocol"].get<int>() != static_cast<int>(cfb27::protocol::kVersion) ||
+      !request.contains("id") || !request["id"].is_string() ||
+      !request.contains("command") || !request["command"].is_string()) {
+    return ErrorResponse(id, "INVALID_REQUEST",
+                         "Request is missing protocol, id, or command");
+  }
+
+  const std::string command = request["command"].get<std::string>();
+  const Json params = request.contains("params") ? request["params"] : Json::object();
+  if (!params.is_object()) {
+    return ErrorResponse(id, "INVALID_REQUEST", "Request params must be an object");
+  }
+
+  const bool supported = SupportedBuild();
+  const bool writes_allowed = supported && !RealAnticheatIsRunning();
+  if (command == "hello") {
+    return SuccessResponse(id, {
+        {"protocolVersion", cfb27::protocol::kVersion},
+        {"hostVersion", kHostVersion},
+        {"supportedBuild", supported},
+        {"writesAllowed", writes_allowed},
+        {"capabilities", {"status", "runScript", "evaluate"}},
+    });
+  }
+
+  if (command == "status") {
+    std::string last_error;
+    {
+      std::lock_guard lock(g_lua_mutex);
+      last_error = g_last_error;
+    }
+    return SuccessResponse(id, {
+        {"ready", g_ready.load(std::memory_order_acquire)},
+        {"supportedBuild", supported},
+        {"writesAllowed", writes_allowed},
+        {"scriptsRun", g_scripts_run.load(std::memory_order_acquire)},
+        {"ticks", g_ticks.load(std::memory_order_acquire)},
+        {"lastError", std::move(last_error)},
+    });
+  }
+
+  std::string source;
+  std::string chunk_name;
+  if (command == "runScript") {
+    if (!params.contains("name") || !params["name"].is_string() ||
+        !params.contains("source") || !params["source"].is_string()) {
+      return ErrorResponse(id, "INVALID_REQUEST",
+                           "runScript requires string name and source params");
+    }
+    chunk_name = params["name"].get<std::string>();
+    source = params["source"].get<std::string>();
+  } else if (command == "evaluate") {
+    if (!params.contains("source") || !params["source"].is_string()) {
+      return ErrorResponse(id, "INVALID_REQUEST",
+                           "evaluate requires a string source param");
+    }
+    chunk_name = "evaluate";
+    source = params["source"].get<std::string>();
+  } else {
+    return ErrorResponse(id, "INVALID_REQUEST", "Unknown command", {{"command", command}});
+  }
+
+  std::string result;
+  if (!RunLuaText(source, chunk_name.c_str(), result)) {
+    return ErrorResponse(id, "SCRIPT_ERROR", result);
+  }
+  return SuccessResponse(id, {{"status", "ok"}});
 }
 
 std::string HandleCommand(std::string command) {
@@ -417,6 +510,11 @@ DWORD WINAPI Start(void* module_value) {
   g_ready.store(true);
   FireEvent("game_ready");
   std::thread(PipeServer).detach();
+  const std::wstring v1_pipe_name =
+      std::wstring(kV1PipePrefix) + std::to_wstring(GetCurrentProcessId());
+  std::thread([v1_pipe_name] {
+    cfb27::protocol::Serve(v1_pipe_name, g_running, HandleV1Request);
+  }).detach();
   std::thread(TickLoop).detach();
   Log("CFB27 Lua host ready");
   return 0;
