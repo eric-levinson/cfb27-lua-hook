@@ -16,7 +16,7 @@ const state = {
   previewContext: null,
   lastApplyResult: null,
   lastPatchExport: null,
-  live: { status: null, loading: false, playerResult: null },
+  live: { status: null, luaHost: null, loading: false, playerResult: null },
   recruitEditor: { columns: [], rows: [], selectedId: "", dirty: {}, offset: 0, pageSize: 250, total: 0 },
   tableBrowser: { summaries: [], selected: null, rowOffset: 0, rowPageSize: 50, rowCount: 0 },
   artifactBrowser: { artifacts: [], selected: null, detail: null, loaded: false },
@@ -208,6 +208,9 @@ const els = {
   liveSafetyPanel: document.querySelector("#liveSafetyPanel"),
   liveModulesBody: document.querySelector("#liveModulesBody"),
   livePlayerPanel: document.querySelector("#livePlayerPanel"),
+  luaHostState: document.querySelector("#luaHostState"),
+  luaScriptInput: document.querySelector("#luaScriptInput"),
+  runLuaBtn: document.querySelector("#runLuaBtn"),
   loadRecruitingBtn: document.querySelector("#loadRecruitingBtn"),
   previewRecruitingPlanBtn: document.querySelector("#previewRecruitingPlanBtn"),
   recruitingStatus: document.querySelector("#recruitingStatus"),
@@ -413,10 +416,13 @@ function setActiveView(view, persist = true) {
 
 function renderLiveStatus() {
   const status = state.live.status;
+  const luaHost = state.live.luaHost;
   if (!status) {
     els.liveSessionPanel.innerHTML = '<div class="empty-state compact">Checking for your running game…</div>';
     els.liveSafetyPanel.innerHTML = '<div class="empty-state compact">Editing status will appear here.</div>';
     els.liveModulesBody.innerHTML = "";
+    els.luaHostState.textContent = "Game not found";
+    els.runLuaBtn.disabled = true;
     return;
   }
   const build = (status.builds || []).find((item) => String(item.path || "").toLowerCase().endsWith("collegefb27.exe"));
@@ -428,6 +434,7 @@ function renderLiveStatus() {
       <dt>Status</dt><dd><strong>${attach.attached ? "Connected" : "Game not found"}</strong></dd>
       <dt>Game</dt><dd>${process ? "College Football 27" : "Launch CFB27 in offline mode"}</dd>
       <dt>Version</dt><dd>${build?.recognized ? "Supported" : "Not yet supported"}</dd>
+      <dt>Lua scripts</dt><dd>${luaHost?.ready ? "Ready" : "Not loaded"}</dd>
     </dl>
     <details class="inline-technical"><summary>Connection info</summary><code>${escapeHtml(build?.sha256 || "-")}</code></details>`;
   const blockers = status.writeBlockers || [];
@@ -437,6 +444,8 @@ function renderLiveStatus() {
     <p>${status.writeEligible ? "Player changes are available." : "Player search works, but changes are temporarily disabled while this build is being verified."}</p>
     <details class="inline-technical"><summary>Why?</summary><ul>${blockers.map((item) => `<li>${escapeHtml(item)}</li>`).join("") || "<li>No issues found.</li>"}</ul></details>`;
   const modules = process?.modules || [];
+  els.luaHostState.textContent = luaHost?.ready ? "Ready" : "Not loaded";
+  els.runLuaBtn.disabled = !luaHost?.ready;
   els.liveModulesBody.innerHTML = modules.map((module) => `
     <tr>
       <td>${escapeHtml(module.name)}</td>
@@ -571,13 +580,33 @@ async function loadLiveStatus() {
   state.live.loading = true;
   els.refreshLiveBtn.disabled = true;
   try {
-    state.live.status = await api("/api/live/status");
+    [state.live.status, state.live.luaHost] = await Promise.all([
+      api("/api/live/status"),
+      api("/api/live/lua/status"),
+    ]);
     renderLiveStatus();
     const process = state.live.status.gameProcesses?.[0];
     setStatus(process ? "Connected to College Football 27." : "College Football 27 is not running.", !process);
   } finally {
     state.live.loading = false;
     els.refreshLiveBtn.disabled = false;
+  }
+}
+
+async function runLuaSnippet() {
+  const script = els.luaScriptInput.value.trim();
+  if (!script) throw new Error("Enter a Lua script first.");
+  if (!state.live.luaHost?.ready) throw new Error("The Lua host is not loaded in the running game.");
+  els.runLuaBtn.disabled = true;
+  setStatus("Running Lua in College Football 27...");
+  try {
+    await api("/api/live/lua/eval", {
+      method: "POST",
+      body: JSON.stringify({ script }),
+    });
+    setStatus("Lua script ran in the current game session.");
+  } finally {
+    els.runLuaBtn.disabled = !state.live.luaHost?.ready;
   }
 }
 
@@ -3704,6 +3733,7 @@ for (const tab of els.viewTabs) {
 els.refreshLiveBtn.addEventListener("click", () => loadLiveStatus().catch((error) => setStatus(error.message, true)));
 els.unlockDynastyBtn.addEventListener("click", () => unlockDynastyEditing().catch((error) => setStatus(error.message, true)));
 els.discoverLivePlayerBtn.addEventListener("click", () => discoverLivePlayer().catch((error) => setStatus(error.message, true)));
+els.runLuaBtn.addEventListener("click", () => runLuaSnippet().catch((error) => setStatus(error.message, true)));
 els.livePlayerQuery.addEventListener("keydown", (event) => {
   if (event.key === "Enter") discoverLivePlayer().catch((error) => setStatus(error.message, true));
 });

@@ -1711,6 +1711,51 @@ body:not(.recruiting-active) .advanced-nav-menu button.active {
   margin-top: 14px;
 }
 
+.lua-console {
+  margin-top: 12px;
+  border: 1px solid #29313a;
+  border-radius: 6px;
+  background: #11171d;
+}
+
+.lua-console > summary {
+  padding: 11px 13px;
+  cursor: pointer;
+  color: #d9dee3;
+  font-weight: 700;
+}
+
+.lua-console > summary span {
+  margin-left: 8px;
+  color: #f0d989;
+  font-size: 11px;
+}
+
+.lua-console-body {
+  padding: 0 12px 12px;
+}
+
+.lua-console textarea {
+  width: 100%;
+  min-height: 130px;
+  resize: vertical;
+  font-family: Consolas, "Courier New", monospace;
+}
+
+.lua-console-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.lua-console-actions p {
+  margin: 0;
+  color: #8f99a3;
+  font-size: 12px;
+}
+
 .live-panel #livePlayerPanel input[type="number"] {
   width: 82px;
 }

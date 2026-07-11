@@ -28,7 +28,8 @@ from live_dynasty import (
 )
 from native_hook import (
     attach_hook, attach_response_guard, hook_command, hook_status, list_lua_scripts,
-    patch_record_at, queue_response_rating, response_guard_status, run_lua_script,
+    eval_startup_lua, patch_record_at, queue_response_rating, response_guard_status, run_lua_script,
+    startup_lua_status,
 )
 
 
@@ -5504,6 +5505,14 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 self.send_json(200, hook_status(int(processes[0]["pid"])))
                 return
+            if parsed.path == "/api/live/lua/status":
+                status = live_status()
+                processes = status.get("gameProcesses", [])
+                if not processes:
+                    self.send_json(200, {"loaded": False, "ready": False, "reason": "CollegeFB27.exe is not running"})
+                    return
+                self.send_json(200, startup_lua_status(int(processes[0]["pid"])))
+                return
             if parsed.path == "/api/live/hook/unlock-status":
                 self.send_json(200, dynasty_unlock_monitor_status())
                 return
@@ -5744,6 +5753,27 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 except (FileNotFoundError, RuntimeError, OSError, ValueError) as exc:
                     raise AppError(str(exc), 409) from exc
+                self.send_json(200, result)
+                return
+            if self.path == "/api/live/lua/eval":
+                body = self.read_json_body()
+                script = body.get("script")
+                if not isinstance(script, str) or not script.strip():
+                    raise AppError("script is required", 400)
+                status = live_status()
+                processes = status.get("gameProcesses", [])
+                if not processes:
+                    raise AppError("CollegeFB27.exe is not running", 409)
+                pid = int(processes[0]["pid"])
+                host = startup_lua_status(pid)
+                if not host.get("loaded") or not host.get("ready"):
+                    raise AppError(str(host.get("reason") or "The persistent Lua host is not ready"), 409)
+                try:
+                    result = eval_startup_lua(pid, script)
+                except (FileNotFoundError, PermissionError, RuntimeError, OSError, ValueError) as exc:
+                    raise AppError(str(exc), 409) from exc
+                if not result.get("ok"):
+                    raise AppError(str(result.get("result") or result.get("error") or "Lua evaluation failed"), 409)
                 self.send_json(200, result)
                 return
             if self.path == "/api/live/hook/run-script":

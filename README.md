@@ -1,6 +1,8 @@
 # CFB27 Save Editor
 
 Reverse-engineering and live-hook findings are tracked in [docs/live-hook-research.md](docs/live-hook-research.md).
+Persistent startup scripting, the Lua API, and recovery steps are documented in
+[docs/live-lua-host.md](docs/live-lua-host.md).
 
 Local web app for inspecting and editing EA SPORTS College Football 27 save files.
 

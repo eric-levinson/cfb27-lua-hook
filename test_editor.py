@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import gzip
+import hashlib
 import json
 import os
 import subprocess
@@ -11,6 +12,7 @@ import tempfile
 import threading
 import unittest
 from types import SimpleNamespace
+import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -124,6 +126,118 @@ def load_recruiting_diff_module():
 
 
 class EditorTests(unittest.TestCase):
+    def test_startup_lua_host_client_reports_status_and_evaluates_in_process(self) -> None:
+        import native_hook
+
+        calls = []
+        with patch(
+            "native_hook._hook_command_to_pipe",
+            side_effect=lambda pid, command, **kwargs: calls.append((pid, command, kwargs))
+            or {"ok": True, "ready": True},
+        ):
+            status = native_hook.startup_lua_status(321)
+            evaluated = native_hook.eval_startup_lua(321, 'cfb.log("hello")')
+        self.assertTrue(status["loaded"])
+        self.assertTrue(status["ready"])
+        self.assertTrue(evaluated["ok"])
+        self.assertEqual(calls[0][1], "STATUS")
+        self.assertEqual(calls[1][1], 'EVAL cfb.log("hello")')
+        self.assertTrue(all(call[2]["pipe_prefix"] == native_hook.LUA_HOST_PIPE_PREFIX for call in calls))
+
+    def test_startup_hook_install_preserves_mmc_proxy_and_is_reversible(self) -> None:
+        import startup_hook
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            game_dir = root / "game"
+            third_party = root / "tools" / "ThirdParty"
+            artifacts = root / "artifacts"
+            game_dir.mkdir()
+            third_party.mkdir(parents=True)
+            artifacts.mkdir()
+            mmc_bytes = b"original-mmc-cryptbase"
+            proxy_bytes = b"cfb27-startup-proxy"
+            host_bytes = b"cfb27-lua-host"
+            (game_dir / "CryptBase.dll").write_bytes(mmc_bytes)
+            (third_party / "CryptBase.dll").write_bytes(mmc_bytes)
+            proxy = artifacts / "cfb27_cryptbase_proxy.dll"
+            host = artifacts / "cfb27_lua_host.dll"
+            autorun = artifacts / "autorun.lua"
+            proxy.write_bytes(proxy_bytes)
+            host.write_bytes(host_bytes)
+            autorun.write_text('cfb.log("autorun")', encoding="utf-8")
+            expected_hash = hashlib.sha256(mmc_bytes).hexdigest().upper()
+
+            with patch("startup_hook.running_game_processes", return_value=[]):
+                result = startup_hook.install_startup_hook(
+                    game_dir,
+                    third_party.parent,
+                    proxy,
+                    host,
+                    autorun_script=autorun,
+                    expected_mmc_sha256=expected_hash,
+                )
+            self.assertTrue(result["installed"])
+            self.assertEqual((game_dir / "MMCBase.dll").read_bytes(), mmc_bytes)
+            self.assertEqual((third_party / "MMCBase.dll").read_bytes(), mmc_bytes)
+            self.assertEqual((game_dir / "CryptBase.dll").read_bytes(), proxy_bytes)
+            self.assertEqual((third_party / "CryptBase.dll").read_bytes(), proxy_bytes)
+            self.assertEqual((game_dir / "CFB27LiveEditor" / "cfb27_lua_host.dll").read_bytes(), host_bytes)
+            self.assertEqual(
+                (game_dir / "CFB27LiveEditor" / "scripts" / "autorun.lua").read_text(encoding="utf-8"),
+                'cfb.log("autorun")',
+            )
+
+            with patch("startup_hook.running_game_processes", return_value=[]):
+                restored = startup_hook.uninstall_startup_hook(game_dir, third_party.parent)
+            self.assertTrue(restored["restored"])
+            self.assertEqual((game_dir / "CryptBase.dll").read_bytes(), mmc_bytes)
+            self.assertEqual((third_party / "CryptBase.dll").read_bytes(), mmc_bytes)
+
+    def test_startup_lua_host_contract_uses_mmc_proxy_chain_without_remote_injection(self) -> None:
+        host_path = APP_DIR / "native" / "lua_host.cpp"
+        proxy_path = APP_DIR / "native" / "cryptbase_proxy.cpp"
+        exports_path = APP_DIR / "native" / "cryptbase_proxy.def"
+        self.assertTrue(host_path.is_file())
+        self.assertTrue(proxy_path.is_file())
+        self.assertTrue(exports_path.is_file())
+        host = host_path.read_text(encoding="utf-8")
+        proxy = proxy_path.read_text(encoding="utf-8")
+        exports = exports_path.read_text(encoding="utf-8")
+        cmake = (APP_DIR / "native" / "CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("CFB27LuaHost.", host)
+        self.assertIn("9E654AD49C4702D8F9FA4E38FD1110ABE657DD38926D4124B30C70E7D29ADFE8", host)
+        self.assertIn("LuaAobScan", host)
+        self.assertIn("LuaReadU8", host)
+        self.assertIn("LuaWriteU8", host)
+        self.assertIn("LuaOn", host)
+        self.assertIn('FireEvent("game_ready")', host)
+        self.assertIn("RunAutorun", host)
+        self.assertIn("cfb27_lua_host.dll", proxy)
+        self.assertIn("CFB27LiveEditor", proxy)
+        self.assertIn("SystemFunction001=MMCBase.SystemFunction001", exports)
+        self.assertIn("add_library(cfb27_lua_host SHARED lua_host.cpp)", cmake)
+        self.assertIn("add_library(cfb27_cryptbase_proxy SHARED cryptbase_proxy.cpp cryptbase_proxy.def)", cmake)
+        self.assertNotIn("CreateRemoteThread", host)
+        self.assertNotIn("CreateRemoteThread", proxy)
+
+    def test_startup_lua_host_does_not_allocate_executable_hash_buffer_on_thread_stack(self) -> None:
+        host_source = (APP_DIR / "native" / "lua_host.cpp").read_text(encoding="utf-8")
+        sha_start = host_source.index("std::string Sha256File")
+        sha_end = host_source.index("bool VerifySupportedBuild", sha_start)
+        sha_source = host_source[sha_start:sha_end]
+
+        self.assertNotIn("std::array<char, 1024 * 1024>", sha_source)
+        self.assertIn("std::vector<char> buffer", sha_source)
+
+    def test_startup_lua_host_preserves_multiline_eval_payloads(self) -> None:
+        host_source = (APP_DIR / "native" / "lua_host.cpp").read_text(encoding="utf-8")
+        eval_start = host_source.index('if (verb == "EVAL")')
+        eval_end = host_source.index('return "{\\"ok\\":false', eval_start)
+        eval_source = host_source[eval_start:eval_end]
+
+        self.assertIn("std::getline(input >> std::ws, script, '\\0')", eval_source)
+
     def test_native_hook_contract_includes_request_detour_lua_and_guarded_record_patch(self) -> None:
         hook_source = (APP_DIR / "native" / "hook.cpp").read_text(encoding="utf-8")
         cmake = (APP_DIR / "native" / "CMakeLists.txt").read_text(encoding="utf-8")
@@ -280,6 +394,18 @@ class EditorTests(unittest.TestCase):
         self.assertIn("move the roster cursor away and back once", live_apply)
         self.assertNotIn("Reopen the player screen to verify", live_apply)
 
+    def test_live_editor_exposes_persistent_lua_console_without_engineering_clutter(self) -> None:
+        index_html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        app_js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="luaHostState"', index_html)
+        self.assertIn('id="luaScriptInput"', index_html)
+        self.assertIn('id="runLuaBtn"', index_html)
+        self.assertIn("/api/live/lua/status", app_js)
+        self.assertIn("/api/live/lua/eval", app_js)
+        self.assertIn("async function runLuaSnippet", app_js)
+        self.assertNotIn("CreateRemoteThread", index_html)
+
     def test_live_apply_endpoint_uses_layered_transaction(self) -> None:
         source = (APP_DIR / "server.py").read_text(encoding="utf-8")
         endpoint = source[source.index('if self.path == "/api/live/hook/apply-rating"') :]
@@ -339,6 +465,73 @@ class EditorTests(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
             thread.join(timeout=2)
+
+    def test_startup_lua_status_endpoint_reports_persistent_host(self) -> None:
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        port = httpd.server_address[1]
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        expected = {
+            "loaded": True,
+            "ready": True,
+            "supportedBuild": True,
+            "writesAllowed": True,
+            "ticks": 12,
+        }
+        try:
+            with (
+                patch("server.live_status", return_value={"gameProcesses": [{"pid": 6228}]}),
+                patch("server.startup_lua_status", return_value=expected, create=True) as status_mock,
+            ):
+                try:
+                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/live/lua/status") as response:
+                        status_code = response.status
+                        payload = json.loads(response.read())
+                except urllib.error.HTTPError as exc:
+                    status_code = exc.code
+                    payload = json.loads(exc.read())
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(timeout=2)
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload, expected)
+        status_mock.assert_called_once_with(6228)
+
+    def test_startup_lua_eval_endpoint_executes_in_persistent_host(self) -> None:
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        port = httpd.server_address[1]
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        expected = {"ok": True, "result": "ok", "transport": "startup-lua-host"}
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/live/lua/eval",
+            data=json.dumps({"script": 'cfb.log("from editor")'}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with (
+                patch("server.live_status", return_value={"gameProcesses": [{"pid": 6228}]}),
+                patch("server.startup_lua_status", return_value={"loaded": True, "ready": True}),
+                patch("server.eval_startup_lua", return_value=expected, create=True) as eval_mock,
+            ):
+                try:
+                    with urllib.request.urlopen(request) as response:
+                        status_code = response.status
+                        payload = json.loads(response.read())
+                except urllib.error.HTTPError as exc:
+                    status_code = exc.code
+                    payload = json.loads(exc.read())
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(timeout=2)
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload, expected)
+        eval_mock.assert_called_once_with(6228, 'cfb.log("from editor")')
 
     def test_resolve_save_dir_defaults_to_app_parent(self) -> None:
         self.assertEqual(resolve_save_dir({}), APP_DIR.parent.resolve())
