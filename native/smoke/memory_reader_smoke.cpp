@@ -6,7 +6,7 @@
 #include <cstring>
 #include <algorithm>
 #include <iostream>
-#include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -190,9 +190,11 @@ void TestPagedLargeRegionAndBoundaries() {
       .cursor = FormatAddress(reinterpret_cast<std::uintptr_t>(bytes)),
   };
   std::vector<cfb27::memory::ScanMatch> matches;
-  std::optional<std::string> previous;
+  std::set<std::string> cursors;
   bool completed = false;
   for (std::size_t pages = 0; pages < 4096; ++pages) {
+    const auto input_cursor = cfb27::memory::ParseAddress(*request.cursor);
+    Require(input_cursor.has_value(), "page input cursor is valid");
     const auto result = ScanPrivateMemory(request);
     Require(result.code.empty(), "large-region page succeeds");
     Require(result.scanned_bytes <= cfb27::memory::kMaxScanPageBytes,
@@ -204,13 +206,11 @@ void TestPagedLargeRegionAndBoundaries() {
       break;
     }
     Require(result.next_cursor.has_value(), "partial page has cursor");
-    Require(result.next_cursor != previous, "cursor advances");
-    if (previous) {
-      Require(cfb27::memory::ParseAddress(*result.next_cursor) >
-                  cfb27::memory::ParseAddress(*previous),
-              "cursor is monotonic");
-    }
-    previous = result.next_cursor;
+    const auto next_cursor = cfb27::memory::ParseAddress(*result.next_cursor);
+    Require(next_cursor && *next_cursor > *input_cursor,
+            "every partial page advances beyond its input cursor");
+    Require(cursors.insert(*result.next_cursor).second,
+            "partial page cursor is never repeated");
     request.cursor = result.next_cursor;
   }
   Require(completed, "paged scan terminates");
@@ -255,6 +255,43 @@ void TestInvalidPageCursors() {
   });
   Require(!overflowing.complete && overflowing.code == "INVALID_REQUEST",
           "overflowing cursor rejected");
+
+  const auto canonical = FormatAddress(maximum - 0xA);
+  auto lowercase_digit = canonical;
+  std::transform(lowercase_digit.begin() + 2, lowercase_digit.end(),
+                 lowercase_digit.begin() + 2, [](unsigned char character) {
+                   return static_cast<char>(std::tolower(character));
+                 });
+  const std::vector<std::string> noncanonical{
+      canonical.substr(2),
+      "0x0" + canonical.substr(2),
+      lowercase_digit,
+      "0X" + canonical.substr(2),
+  };
+  for (const auto& cursor : noncanonical) {
+    const auto rejected = ScanPrivateMemory({
+        .pattern = HexBytes("A1B2C3D4E5F60718"),
+        .mask = std::vector<std::uint8_t>(8, 0xFF),
+        .max_matches = 1,
+        .cursor = cursor,
+    });
+    Require(!rejected.complete && rejected.code == "INVALID_REQUEST",
+            "noncanonical cursor rejected");
+  }
+}
+
+void TestTerminalCompletionPrecedesPageBudget() {
+  using cfb27::memory::detail::ClassifyScanPageBoundary;
+  using cfb27::memory::detail::ScanPageBoundary;
+
+  Require(ClassifyScanPageBoundary(0x2000, 0x1FFF,
+                                   cfb27::memory::kMaxScanPageBytes) ==
+              ScanPageBoundary::kComplete,
+          "terminal completion wins when page budget is reached exactly");
+  Require(ClassifyScanPageBoundary(0x1FFF, 0x1FFF,
+                                   cfb27::memory::kMaxScanPageBytes) ==
+              ScanPageBoundary::kIncomplete,
+          "exhausted budget remains incomplete before terminal traversal");
 }
 
 void TestDeniedReads() {
@@ -305,7 +342,8 @@ void TestPagedScanBeyondOldAggregateLimit() {
   });
 
   auto sentinel = HexBytes("D13C579B2468ACE00123456789ABCDEF");
-  std::memcpy(static_cast<std::uint8_t*>(regions.back()) + 1024, sentinel.data(),
+  constexpr std::size_t kTargetOffset = cfb27::memory::kMaxScanPageBytes + 1024;
+  std::memcpy(static_cast<std::uint8_t*>(regions.back()) + kTargetOffset, sentinel.data(),
               sentinel.size());
   cfb27::memory::ScanRequest request{
       .pattern = sentinel,
@@ -322,7 +360,8 @@ void TestPagedScanBeyondOldAggregateLimit() {
     Require(result.code.empty(), "aggregate continuation succeeds");
     Require(result.scanned_bytes <= cfb27::memory::kMaxScanPageBytes,
             "aggregate continuation page bounded");
-    if (CountAddress(result.matches, static_cast<std::uint8_t*>(regions.back()) + 1024) == 1) {
+    if (CountAddress(result.matches,
+                     static_cast<std::uint8_t*>(regions.back()) + kTargetOffset) == 1) {
       found = true;
       break;
     }
@@ -345,6 +384,7 @@ int main() {
     TestScanExcludesMaskBuffer();
     TestPagedLargeRegionAndBoundaries();
     TestInvalidPageCursors();
+    TestTerminalCompletionPrecedesPageBudget();
     TestDeniedReads();
     TestPagedScanBeyondOldAggregateLimit();
     std::cout << "memory reader smoke passed\n";

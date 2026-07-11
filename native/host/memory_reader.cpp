@@ -197,7 +197,8 @@ ScanResult ScanPrivateMemory(const ScanRequest& request, ScanReadFunction read) 
   auto cursor = minimum;
   if (request.cursor) {
     const auto parsed = ParseAddress(*request.cursor);
-    if (!parsed || *parsed < minimum || *parsed > maximum) {
+    if (!parsed || FormatAddress(*parsed) != *request.cursor || *parsed < minimum ||
+        *parsed > maximum) {
       result.code = kInvalidRequest;
       return result;
     }
@@ -308,9 +309,16 @@ ScanResult ScanPrivateMemory(const ScanRequest& request, ScanReadFunction read) 
 
     result.scanned_bytes += static_cast<std::size_t>(unique_bytes);
     cursor = after_unique;
-    if (result.scanned_bytes == kMaxScanPageBytes) {
-      result.next_cursor = FormatAddress(cursor);
-      return result;
+    switch (detail::ClassifyScanPageBoundary(cursor, maximum,
+                                             result.scanned_bytes)) {
+      case detail::ScanPageBoundary::kComplete:
+        result.complete = true;
+        return result;
+      case detail::ScanPageBoundary::kIncomplete:
+        result.next_cursor = FormatAddress(cursor);
+        return result;
+      case detail::ScanPageBoundary::kContinue:
+        break;
     }
 
     if (cursor == region_end && region_end > maximum) break;

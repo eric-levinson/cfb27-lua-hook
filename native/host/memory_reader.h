@@ -21,6 +21,23 @@ constexpr std::size_t kMaxReadRanges = 64;
 constexpr std::size_t kMaxReadRangeBytes = 64ull * 1024;
 constexpr std::size_t kMaxReadBytes = 256ull * 1024;
 
+namespace detail {
+
+enum class ScanPageBoundary {
+  kContinue,
+  kIncomplete,
+  kComplete,
+};
+
+constexpr ScanPageBoundary ClassifyScanPageBoundary(
+    std::uintptr_t cursor, std::uintptr_t maximum, std::size_t scanned_bytes) {
+  if (cursor > maximum) return ScanPageBoundary::kComplete;
+  if (scanned_bytes == kMaxScanPageBytes) return ScanPageBoundary::kIncomplete;
+  return ScanPageBoundary::kContinue;
+}
+
+}  // namespace detail
+
 struct ReadRange {
   std::string address;
   std::size_t length{};
