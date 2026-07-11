@@ -174,6 +174,7 @@ test('memory APIs reject invalid requests before creating a socket', async () =>
       { ranges: [{ ...validRange, extra: true }] },
       { ranges: [{ address: 0x1234, length: 16 }] },
       { ranges: [{ address: '0x7ff612340000', length: 16 }] },
+      { ranges: [{ address: '0x0001', length: 16 }] },
       { ranges: [{ address: '7FF612340000', length: 16 }] },
       { ranges: [{ address: validRange.address, length: Number.MAX_SAFE_INTEGER + 1 }] },
       { ranges: [{ address: validRange.address, length: 65537 }] },
@@ -201,10 +202,13 @@ test('scanMemory rejects malformed host result fields', async (t) => {
     { ...VALID_SCAN_RESULT, scannedBytes: Number.MAX_SAFE_INTEGER + 1 },
     { ...VALID_SCAN_RESULT, matches: Array.from({ length: 65 }, () => VALID_SCAN_RESULT.matches[0]) },
     { ...VALID_SCAN_RESULT, matches: [{ ...VALID_SCAN_RESULT.matches[0], address: 140694844080256 }] },
+    { ...VALID_SCAN_RESULT, matches: [{ ...VALID_SCAN_RESULT.matches[0], address: '0x0001' }] },
     { ...VALID_SCAN_RESULT, matches: [{ ...VALID_SCAN_RESULT.matches[0], regionBase: '0x7ff612340000' }] },
+    { ...VALID_SCAN_RESULT, matches: [{ ...VALID_SCAN_RESULT.matches[0], regionBase: '0x0001' }] },
     { ...VALID_SCAN_RESULT, matches: [{ ...VALID_SCAN_RESULT.matches[0], regionSize: -1 }] },
     { ...VALID_SCAN_RESULT, matches: [{ ...VALID_SCAN_RESULT.matches[0], protection: 4.5 }] },
     { ...VALID_SCAN_RESULT, matches: [{ ...VALID_SCAN_RESULT.matches[0], contextAddress: '0x7ff61234007C' }] },
+    { ...VALID_SCAN_RESULT, matches: [{ ...VALID_SCAN_RESULT.matches[0], contextAddress: '0x0001' }] },
     { ...VALID_SCAN_RESULT, matches: [{ ...VALID_SCAN_RESULT.matches[0], contextHex: 'ABC' }] },
     { ...VALID_SCAN_RESULT, matches: [{ ...VALID_SCAN_RESULT.matches[0], contextHex: '00'.repeat(25) }] },
   ];
@@ -225,6 +229,7 @@ test('readMemory rejects malformed host result fields', async (t) => {
     { ...VALID_READ_RESULT, ranges: Array.from({ length: 65 }, () => VALID_READ_RESULT.ranges[0]) },
     { ...VALID_READ_RESULT, ranges: [{ ...VALID_READ_RESULT.ranges[0], address: 140694844080128 }] },
     { ...VALID_READ_RESULT, ranges: [{ ...VALID_READ_RESULT.ranges[0], address: '0x7ff612340000' }] },
+    { ...VALID_READ_RESULT, ranges: [{ ...VALID_READ_RESULT.ranges[0], address: '0x0001' }] },
     { ...VALID_READ_RESULT, ranges: [{ ...VALID_READ_RESULT.ranges[0], length: 15 }] },
     { ...VALID_READ_RESULT, ranges: [{ ...VALID_READ_RESULT.ranges[0], bytesHex: '00'.repeat(15) }] },
   ];
@@ -237,4 +242,42 @@ test('readMemory rejects malformed host result fields', async (t) => {
       (error) => error.code === 'INVALID_RESPONSE',
     );
   }
+});
+
+test('memory APIs reject unsupported-build results unless explicitly allowed', async (t) => {
+  const client = await fakeClient(t, (request) => request.command === 'scanMemory'
+    ? { ...VALID_SCAN_RESULT, supportedBuild: false }
+    : { ...VALID_READ_RESULT, supportedBuild: false });
+
+  await assert.rejects(
+    client.scanMemory(VALID_SCAN_OPTIONS),
+    (error) => error.code === 'INVALID_RESPONSE',
+  );
+  await assert.rejects(
+    client.readMemory({ ranges: [{ address: '0x7FF612340000', length: 16 }] }),
+    (error) => error.code === 'INVALID_RESPONSE',
+  );
+  await assert.rejects(
+    client.scanMemory({ ...VALID_SCAN_OPTIONS, allowUnsupportedBuild: false }),
+    (error) => error.code === 'INVALID_RESPONSE',
+  );
+  await assert.rejects(
+    client.readMemory({
+      ranges: [{ address: '0x7FF612340000', length: 16 }],
+      allowUnsupportedBuild: false,
+    }),
+    (error) => error.code === 'INVALID_RESPONSE',
+  );
+
+  assert.deepEqual(
+    await client.scanMemory({ ...VALID_SCAN_OPTIONS, allowUnsupportedBuild: true }),
+    { ...VALID_SCAN_RESULT, supportedBuild: false },
+  );
+  assert.deepEqual(
+    await client.readMemory({
+      ranges: [{ address: '0x7FF612340000', length: 16 }],
+      allowUnsupportedBuild: true,
+    }),
+    { ...VALID_READ_RESULT, supportedBuild: false },
+  );
 });

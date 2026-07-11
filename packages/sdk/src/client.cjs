@@ -20,7 +20,7 @@ const MEMORY_LIMITS = Object.freeze({
   maxReadBytes: 256 * 1024,
 });
 
-const CANONICAL_ADDRESS = /^0x[0-9A-F]{1,16}$/;
+const CANONICAL_ADDRESS = /^0x(?:0|[1-9A-F][0-9A-F]{0,15})$/;
 const UPPER_HEX_BYTES = /^(?:[0-9A-F]{2})+$/;
 
 function invalidRequest(message) {
@@ -140,7 +140,9 @@ function cloneReadOptions(options) {
 
 function validateScanResult(result, params) {
   if (!hasExactKeys(result, ['supportedBuild', 'complete', 'scannedBytes', 'matches']) ||
-      typeof result.supportedBuild !== 'boolean' || result.complete !== true ||
+      typeof result.supportedBuild !== 'boolean' ||
+      (result.supportedBuild === false && params.allowUnsupportedBuild !== true) ||
+      result.complete !== true ||
       !isSafeIntegerBetween(result.scannedBytes, 0, MEMORY_LIMITS.maxScanBytes) ||
       !Array.isArray(result.matches) || result.matches.length > params.maxMatches) {
     throw invalidResponse('Host returned an invalid scanMemory result');
@@ -169,7 +171,9 @@ function validateScanResult(result, params) {
 
 function validateReadResult(result, params) {
   if (!hasExactKeys(result, ['supportedBuild', 'ranges']) ||
-      typeof result.supportedBuild !== 'boolean' || !Array.isArray(result.ranges) ||
+      typeof result.supportedBuild !== 'boolean' ||
+      (result.supportedBuild === false && params.allowUnsupportedBuild !== true) ||
+      !Array.isArray(result.ranges) ||
       result.ranges.length !== params.ranges.length ||
       result.ranges.length > MEMORY_LIMITS.maxReadRanges) {
     throw invalidResponse('Host returned an invalid readMemory result');
