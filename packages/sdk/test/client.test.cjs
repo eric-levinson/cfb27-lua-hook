@@ -281,3 +281,71 @@ test('memory APIs reject unsupported-build results unless explicitly allowed', a
     { ...VALID_READ_RESULT, supportedBuild: false },
   );
 });
+
+test('registerTelemetryTypes clones names and sends the exact typed command', async (t) => {
+  const requests = [];
+  const client = await fakeClient(t, (request) => {
+    requests.push({ command: request.command, params: request.params });
+    return { types: ['probe.snapshot', 'recruiting.stability'] };
+  });
+  const types = ['probe.snapshot', 'recruiting.stability'];
+  const pending = client.registerTelemetryTypes(types);
+  types[0] = 'mutated';
+  types.push('extra');
+  assert.deepEqual(await pending, { types: ['probe.snapshot', 'recruiting.stability'] });
+  assert.deepEqual(requests, [{
+    command: 'registerTelemetry',
+    params: { types: ['probe.snapshot', 'recruiting.stability'] },
+  }]);
+});
+
+test('registerTelemetryTypes rejects invalid names before creating a socket', async () => {
+  const originalCreateConnection = net.createConnection;
+  let socketCreations = 0;
+  net.createConnection = (...args) => {
+    socketCreations += 1;
+    return originalCreateConnection(...args);
+  };
+  try {
+    const client = createClient({ pipeName: testPipeName('unused'), timeoutMs: 25 });
+    const cases = [
+      undefined,
+      [],
+      'probe.snapshot',
+      ['game_ready'],
+      ['tick'],
+      ['log'],
+      ['Probe.snapshot'],
+      ['probe snapshot'],
+      ['probe.snapshot', 'probe.snapshot'],
+      Array.from({ length: 17 }, (_, index) => `probe.type${index}`),
+    ];
+    for (const types of cases) {
+      await assert.rejects(
+        Promise.resolve().then(() => client.registerTelemetryTypes(types)),
+        (error) => error.code === 'INVALID_REQUEST',
+      );
+    }
+    assert.equal(socketCreations, 0);
+  } finally {
+    net.createConnection = originalCreateConnection;
+  }
+});
+
+test('registerTelemetryTypes rejects malformed host results', async (t) => {
+  const invalidResults = [
+    undefined,
+    {},
+    { types: 'probe.snapshot' },
+    { types: ['other.type'] },
+    { types: ['probe.snapshot'], extra: true },
+  ];
+  let index = 0;
+  const client = await fakeClient(t, () => invalidResults[index++]);
+  for (const ignored of invalidResults) {
+    await assert.rejects(
+      client.registerTelemetryTypes(['probe.snapshot']),
+      (error) => error.code === 'INVALID_RESPONSE',
+    );
+  }
+});

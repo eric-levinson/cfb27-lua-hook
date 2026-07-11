@@ -165,6 +165,7 @@ int wmain(int argc, wchar_t** argv) {
   if (!response.value("ok", false) || response["result"].value("protocolVersion", 0) != 1) return 4;
   const auto capabilities = response["result"]["capabilities"];
   if (std::find(capabilities.begin(), capabilities.end(), "evaluate") == capabilities.end()) return 5;
+  if (std::find(capabilities.begin(), capabilities.end(), "telemetry") == capabilities.end()) return 51;
 
   if (!Request(pipe, {{"protocol", 1}, {"id", "status-1"},
                       {"command", "status"}, {"params", Json::object()}}, response, false)) return 14;
@@ -333,6 +334,71 @@ int wmain(int argc, wchar_t** argv) {
       !IsError(response, "TOO_MANY_MATCHES") ||
       !response["error"].value("details", Json::object()).empty()) return 46;
   SecureZeroMemory(static_cast<std::uint8_t*>(allocation.get()) + 256, kSentinel.size());
+
+  if (!Request(pipe, {{"protocol", 1}, {"id", "emit-unregistered"},
+                      {"command", "evaluate"},
+                      {"params", {{"source", "cfb.emit('probe.unregistered', {value=1})"}}}},
+               response, false) || !IsError(response, "SCRIPT_ERROR")) return 52;
+
+  if (!Request(pipe, {{"protocol", 1}, {"id", "telemetry-extra"},
+                      {"command", "registerTelemetry"},
+                      {"params", {{"types", Json::array({"probe.snapshot"})}, {"extra", true}}}},
+               response, false) || !IsError(response, "INVALID_REQUEST")) return 53;
+  if (!Request(pipe, {{"protocol", 1}, {"id", "telemetry-duplicate"},
+                      {"command", "registerTelemetry"},
+                      {"params", {{"types", Json::array({"probe.snapshot", "probe.snapshot"})}}}},
+               response, false) || !IsError(response, "INVALID_REQUEST")) return 54;
+  if (!Request(pipe, {{"protocol", 1}, {"id", "telemetry-register"},
+                      {"command", "registerTelemetry"},
+                      {"params", {{"types", Json::array({"probe.snapshot"})}}}},
+               response, false) || !response.value("ok", false) ||
+      response["result"] != Json({{"types", Json::array({"probe.snapshot"})}})) return 55;
+
+  if (!Request(pipe, {{"protocol", 1}, {"id", "events-baseline"}, {"command", "events"},
+                      {"params", {{"after", 0}, {"limit", 256}}}}, response, false) ||
+      !response.value("ok", false)) return 56;
+  const auto telemetry_after = response["result"].value("nextCursor", 0ull);
+
+  const std::string telemetry_source =
+      "assert(cfb.emit('probe.snapshot', {sequence=1, stable=true}))";
+  if (!Request(pipe, {{"protocol", 1}, {"id", "emit-registered"}, {"command", "evaluate"},
+                      {"params", {{"source", telemetry_source}}}}, response, false) ||
+      !response.value("ok", false)) return 57;
+  if (!Request(pipe, {{"protocol", 1}, {"id", "events-telemetry"}, {"command", "events"},
+                      {"params", {{"after", telemetry_after}, {"limit", 256}}}}, response, false) ||
+      !response.value("ok", false)) return 58;
+  int telemetry_count = 0;
+  for (const auto& event : response["result"]["events"]) {
+    if (event.value("type", "") == "probe.snapshot") {
+      ++telemetry_count;
+      if (event.value("payload", Json::object()) != Json({{"sequence", 1}, {"stable", true}})) {
+        return 59;
+      }
+    }
+  }
+  if (telemetry_count != 1) return 60;
+
+  const std::vector<std::string> invalid_telemetry_sources{
+      "local t={}; t.self=t; cfb.emit('probe.snapshot', t)",
+      "cfb.emit('probe.snapshot', {value=function() end})",
+      "cfb.emit('probe.snapshot', {[1]='a', name='b'})",
+      "cfb.emit('probe.snapshot', {[1]='a', [3]='c'})",
+      "cfb.emit('probe.snapshot', {[true]='value'})",
+      "cfb.emit('probe.snapshot', {nested={address='0x1'}})",
+  };
+  for (std::size_t index = 0; index < invalid_telemetry_sources.size(); ++index) {
+    if (!Request(pipe, {{"protocol", 1}, {"id", "emit-invalid-" + std::to_string(index)},
+                        {"command", "evaluate"},
+                        {"params", {{"source", invalid_telemetry_sources[index]}}}},
+                 response, false) || !IsError(response, "SCRIPT_ERROR")) return 61;
+  }
+  const std::string budget_source =
+      "local t={}; for i=1,17 do t[i]=string.rep('x',1024) end; "
+      "t[18]=function() end; cfb.emit('probe.snapshot', t)";
+  if (!Request(pipe, {{"protocol", 1}, {"id", "emit-budget"}, {"command", "evaluate"},
+                      {"params", {{"source", budget_source}}}}, response, false) ||
+      !IsError(response, "SCRIPT_ERROR") ||
+      response["error"].value("message", "").find("16 KiB") == std::string::npos) return 62;
 
   const std::string source = "local x=40\nx=x+2\ncfb.log(\"protocol-smoke=\"..tostring(x))";
   if (!Request(pipe, {{"protocol", 1}, {"id", "eval-1"},

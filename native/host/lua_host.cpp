@@ -4,13 +4,16 @@
 
 #include "memory_reader.h"
 #include "protocol.h"
+#include "telemetry.h"
 
 #include <array>
 #include <atomic>
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <deque>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -22,6 +25,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 extern "C" {
@@ -322,6 +326,228 @@ int LuaLog(lua_State* state) {
   return 0;
 }
 
+bool AddLuaTelemetryBytes(std::size_t bytes, std::size_t& total, std::string& error) {
+  constexpr std::size_t kMaxSerializedBytes = 16 * 1024;
+  if (bytes > kMaxSerializedBytes - total) {
+    error = "serialized telemetry payload must not exceed 16 KiB";
+    return false;
+  }
+  total += bytes;
+  return true;
+}
+
+bool AddLuaTelemetryValueBytes(const cfb27::protocol::Json& value,
+                               std::size_t& total, std::string& error) {
+  try {
+    return AddLuaTelemetryBytes(value.dump().size(), total, error);
+  } catch (const std::exception&) {
+    error = "telemetry strings must contain valid UTF-8";
+    return false;
+  }
+}
+
+bool IsForbiddenTelemetryKey(std::string_view key) {
+  return key == "address" || key == "addressHex" || key == "regionBase" ||
+         key == "bytesHex" || key == "contextAddress" || key == "contextHex";
+}
+
+bool LuaToTelemetryJson(lua_State* state, int index, std::size_t depth,
+                        std::unordered_set<const void*>& visiting,
+                        std::size_t& serialized_bytes,
+                        cfb27::protocol::Json& output, std::string& error) {
+  using Json = cfb27::protocol::Json;
+  constexpr std::size_t kMaxDepth = 4;
+  constexpr std::size_t kMaxObjectKeys = 64;
+  constexpr std::size_t kMaxArrayEntries = 128;
+  constexpr std::size_t kMaxStringBytes = 1024;
+
+  index = lua_absindex(state, index);
+  switch (lua_type(state, index)) {
+    case LUA_TNIL:
+      output = nullptr;
+      return AddLuaTelemetryValueBytes(output, serialized_bytes, error);
+    case LUA_TBOOLEAN:
+      output = lua_toboolean(state, index) != 0;
+      return AddLuaTelemetryValueBytes(output, serialized_bytes, error);
+    case LUA_TNUMBER:
+      if (lua_isinteger(state, index)) {
+        output = lua_tointeger(state, index);
+        return AddLuaTelemetryValueBytes(output, serialized_bytes, error);
+      } else {
+        const auto value = lua_tonumber(state, index);
+        if (!std::isfinite(value)) {
+          error = "telemetry numbers must be finite";
+          return false;
+        }
+        output = value;
+        return AddLuaTelemetryValueBytes(output, serialized_bytes, error);
+      }
+    case LUA_TSTRING: {
+      std::size_t length = 0;
+      const char* value = lua_tolstring(state, index, &length);
+      if (length > kMaxStringBytes) {
+        error = "telemetry strings must not exceed 1024 bytes";
+        return false;
+      }
+      output = std::string(value, length);
+      return AddLuaTelemetryValueBytes(output, serialized_bytes, error);
+    }
+    case LUA_TTABLE:
+      break;
+    default:
+      error = "telemetry payload contains an unsupported Lua value";
+      return false;
+  }
+
+  if (depth > kMaxDepth) {
+    error = "telemetry payload depth must not exceed 4";
+    return false;
+  }
+  const void* identity = lua_topointer(state, index);
+  if (!visiting.insert(identity).second) {
+    error = "telemetry payload contains a table cycle";
+    return false;
+  }
+  if (!AddLuaTelemetryBytes(2, serialized_bytes, error)) {
+    visiting.erase(identity);
+    return false;
+  }
+
+  bool saw_array_key = false;
+  bool saw_object_key = false;
+  std::vector<std::pair<std::size_t, Json>> array_items;
+  Json object = Json::object();
+  bool valid = true;
+  lua_pushnil(state);
+  while (lua_next(state, index) != 0) {
+    if (lua_type(state, -2) == LUA_TNUMBER && lua_isinteger(state, -2)) {
+      if (saw_object_key) {
+        error = "telemetry tables must not mix array and object keys";
+        lua_pop(state, 1);
+        valid = false;
+        break;
+      }
+      saw_array_key = true;
+      const auto key = lua_tointeger(state, -2);
+      if (key < 1 || static_cast<std::uint64_t>(key) > kMaxArrayEntries) {
+        error = "telemetry arrays must be dense and contain at most 128 entries";
+        lua_pop(state, 1);
+        valid = false;
+        break;
+      }
+      if (!array_items.empty() && !AddLuaTelemetryBytes(1, serialized_bytes, error)) {
+        lua_pop(state, 1);
+        valid = false;
+        break;
+      }
+    } else if (lua_type(state, -2) == LUA_TSTRING) {
+      if (saw_array_key) {
+        error = "telemetry tables must not mix array and object keys";
+        lua_pop(state, 1);
+        valid = false;
+        break;
+      }
+      saw_object_key = true;
+      std::size_t key_length = 0;
+      const char* key = lua_tolstring(state, -2, &key_length);
+      if (key_length > kMaxStringBytes || object.size() >= kMaxObjectKeys) {
+        error = "telemetry objects must contain at most 64 bounded string keys";
+        lua_pop(state, 1);
+        valid = false;
+        break;
+      }
+      const std::string key_text(key, key_length);
+      if (IsForbiddenTelemetryKey(key_text)) {
+        error = "telemetry payloads must not contain address or raw-byte keys";
+        lua_pop(state, 1);
+        valid = false;
+        break;
+      }
+      Json encoded_key = key_text;
+      const std::size_t punctuation = object.empty() ? 1 : 2;
+      if (!AddLuaTelemetryValueBytes(encoded_key, serialized_bytes, error) ||
+          !AddLuaTelemetryBytes(punctuation, serialized_bytes, error)) {
+        lua_pop(state, 1);
+        valid = false;
+        break;
+      }
+    } else {
+      error = "telemetry object keys must be strings";
+      lua_pop(state, 1);
+      valid = false;
+      break;
+    }
+    Json item;
+    if (!LuaToTelemetryJson(state, -1, depth + 1, visiting, serialized_bytes,
+                            item, error)) {
+      lua_pop(state, 1);
+      valid = false;
+      break;
+    }
+    if (saw_array_key) {
+      array_items.emplace_back(
+          static_cast<std::size_t>(lua_tointeger(state, -2)), std::move(item));
+    } else {
+      std::size_t key_length = 0;
+      const char* key = lua_tolstring(state, -2, &key_length);
+      object[std::string(key, key_length)] = std::move(item);
+    }
+    lua_pop(state, 1);
+  }
+  if (!valid) {
+    lua_settop(state, lua_gettop(state) - 1);
+    visiting.erase(identity);
+    return false;
+  }
+
+  if (saw_array_key) {
+    if (array_items.size() > kMaxArrayEntries) {
+      error = "telemetry arrays must not exceed 128 entries";
+      visiting.erase(identity);
+      return false;
+    }
+    std::sort(array_items.begin(), array_items.end(),
+              [](const auto& left, const auto& right) { return left.first < right.first; });
+    output = Json::array();
+    for (std::size_t item_index = 0; item_index < array_items.size(); ++item_index) {
+      if (array_items[item_index].first != item_index + 1) {
+        error = "telemetry arrays must not be sparse";
+        visiting.erase(identity);
+        return false;
+      }
+      output.push_back(std::move(array_items[item_index].second));
+    }
+  } else {
+    output = std::move(object);
+  }
+  visiting.erase(identity);
+  return true;
+}
+
+int LuaEmit(lua_State* state) {
+  if (lua_gettop(state) != 2 || lua_type(state, 1) != LUA_TSTRING) {
+    return luaL_error(state, "cfb.emit requires a telemetry type and payload");
+  }
+  std::size_t type_length = 0;
+  const char* type_value = lua_tolstring(state, 1, &type_length);
+  const std::string type(type_value, type_length);
+  if (!cfb27::telemetry::IsTelemetryTypeRegistered(type)) {
+    return luaL_error(state, "telemetry type is not registered");
+  }
+
+  cfb27::protocol::Json payload;
+  std::string error;
+  std::unordered_set<const void*> visiting;
+  std::size_t serialized_bytes = 0;
+  if (!LuaToTelemetryJson(state, 2, 1, visiting, serialized_bytes, payload, error) ||
+      !cfb27::telemetry::ValidateTelemetryPayload(payload, error)) {
+    return luaL_error(state, "%s", error.c_str());
+  }
+  AppendEvent(type, std::move(payload));
+  lua_pushboolean(state, 1);
+  return 1;
+}
+
 int LuaOn(lua_State* state) {
   const std::string event = luaL_checkstring(state, 1);
   luaL_checktype(state, 2, LUA_TFUNCTION);
@@ -353,6 +579,7 @@ void RegisterApi(lua_State* state) {
   lua_pushcfunction(state, LuaWriteU8); lua_setfield(state, -2, "write_u8");
   lua_pushcfunction(state, LuaAobScan); lua_setfield(state, -2, "aob_scan");
   lua_pushcfunction(state, LuaLog); lua_setfield(state, -2, "log");
+  lua_pushcfunction(state, LuaEmit); lua_setfield(state, -2, "emit");
   lua_pushcfunction(state, LuaOn); lua_setfield(state, -2, "on");
   lua_setglobal(state, "cfb");
 }
@@ -589,7 +816,7 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
         {"supportedBuild", supported},
         {"writesAllowed", writes_allowed},
         {"capabilities", {"status", "runScript", "evaluate", "logs", "events",
-                          "memoryScan", "memoryRead"}},
+                          "memoryScan", "memoryRead", "telemetry"}},
     });
   }
 
@@ -607,6 +834,27 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
         {"ticks", g_ticks.load(std::memory_order_acquire)},
         {"lastError", std::move(last_error)},
     });
+  }
+
+  if (command == "registerTelemetry") {
+    if (!HasOnlyKeys(params, {"types"}) || !params.contains("types") ||
+        !params["types"].is_array() || params["types"].empty() ||
+        params["types"].size() > 16) {
+      return ErrorResponse(id, "INVALID_REQUEST", "Invalid registerTelemetry params");
+    }
+    std::vector<std::string> types;
+    types.reserve(params["types"].size());
+    for (const auto& type : params["types"]) {
+      if (!type.is_string()) {
+        return ErrorResponse(id, "INVALID_REQUEST", "Telemetry types must be strings");
+      }
+      types.push_back(type.get<std::string>());
+    }
+    std::string error;
+    if (!cfb27::telemetry::RegisterTelemetryTypes(types, error)) {
+      return ErrorResponse(id, "INVALID_REQUEST", std::move(error));
+    }
+    return SuccessResponse(id, {{"types", std::move(types)}});
   }
 
   if (command == "scanMemory") {

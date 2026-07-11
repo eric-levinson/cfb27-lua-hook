@@ -37,13 +37,48 @@ Error response:
 - `evaluate { source }` — execute one complete multiline Lua buffer.
 - `logs { limit }` — return up to 256 recent bounded log entries.
 - `events { after, limit }` — return an ordered cursor page and `nextCursor`.
+- `registerTelemetry { types }` — add trusted structured event names for the
+  current host session.
 - `scanMemory { patternHex, maskHex, maxMatches, contextBefore,
   contextAfter, allowUnsupportedBuild? }` — scan bounded readable private memory.
 - `readMemory { ranges, allowUnsupportedBuild? }` — read a bounded batch of
   readable private-memory ranges.
 
 `hello.capabilities` advertises the memory commands as `memoryScan` and
-`memoryRead`. They are read-only host operations and do not expose a write API.
+`memoryRead`, and structured event registration as `telemetry`. They are
+read-only host operations and do not expose a write API.
+
+### Structured telemetry
+
+`registerTelemetry` accepts exactly one parameter, `types`, containing 1–16
+unique strings. Names match `^[a-z][a-z0-9_.-]{0,63}$`; `game_ready`, `tick`,
+and `log` are reserved. Registration is additive for the session and repeating
+an already registered name in a later request is idempotent. At most 16
+distinct custom names may be registered in total.
+
+Request:
+
+```json
+{"protocol":1,"id":"telemetry-1","command":"registerTelemetry","params":{"types":["probe.snapshot"]}}
+```
+
+Result:
+
+```json
+{"types":["probe.snapshot"]}
+```
+
+The SDK method is `client.registerTelemetryTypes(types)`. Both the SDK and host
+strictly validate the request and response contract. Registered Lua code may
+call `cfb.emit(type, payload)` to append exactly one event to the cursor ring;
+emission never writes to the file log.
+
+Payloads are JSON-compatible and limited to depth 4, 64 keys per object, 128
+entries per array, 1,024 bytes per string, and 16 KiB serialized. Numbers must
+be finite. Address and raw-byte keys are rejected at every object depth,
+including `address`, `addressHex`, `regionBase`, `bytesHex`, `contextAddress`,
+and `contextHex`. Lua conversion additionally rejects cycles, functions,
+userdata, threads, mixed or sparse tables, and non-string object keys.
 
 ### Memory scan
 

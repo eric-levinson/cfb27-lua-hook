@@ -22,6 +22,8 @@ const MEMORY_LIMITS = Object.freeze({
 
 const CANONICAL_ADDRESS = /^0x(?:0|[1-9A-F][0-9A-F]{0,15})$/;
 const UPPER_HEX_BYTES = /^(?:[0-9A-F]{2})+$/;
+const TELEMETRY_TYPE = /^[a-z][a-z0-9_.-]{0,63}$/;
+const RESERVED_TELEMETRY_TYPES = new Set(['game_ready', 'tick', 'log']);
 
 function invalidRequest(message) {
   return new Cfb27HookError('INVALID_REQUEST', message);
@@ -193,6 +195,32 @@ function validateReadResult(result, params) {
   return result;
 }
 
+function cloneTelemetryTypes(types) {
+  if (!Array.isArray(types) || types.length < 1 || types.length > 16) {
+    throw invalidRequest('registerTelemetryTypes requires 1 to 16 type names');
+  }
+  const clone = [];
+  const seen = new Set();
+  for (const type of types) {
+    if (typeof type !== 'string' || !TELEMETRY_TYPE.test(type) ||
+        RESERVED_TELEMETRY_TYPES.has(type) || seen.has(type)) {
+      throw invalidRequest('Telemetry type names are invalid, reserved, or duplicated');
+    }
+    seen.add(type);
+    clone.push(type);
+  }
+  return clone;
+}
+
+function validateTelemetryRegistration(result, types) {
+  if (!hasExactKeys(result, ['types']) || !Array.isArray(result.types) ||
+      result.types.length !== types.length ||
+      !result.types.every((type, index) => type === types[index])) {
+    throw invalidResponse('Host returned an invalid registerTelemetry result');
+  }
+  return result;
+}
+
 function createClient({ pid, pipeName, timeoutMs = 3000 } = {}) {
   if (!pipeName && (!Number.isInteger(pid) || pid <= 0)) {
     throw new Cfb27HookError('INVALID_REQUEST', 'createClient requires a positive PID or pipe name');
@@ -304,6 +332,13 @@ function createClient({ pid, pipeName, timeoutMs = 3000 } = {}) {
     async readMemory(options = {}) {
       const params = cloneReadOptions(options);
       return validateReadResult(await request('readMemory', params), params);
+    },
+    async registerTelemetryTypes(types) {
+      const clonedTypes = cloneTelemetryTypes(types);
+      return validateTelemetryRegistration(
+        await request('registerTelemetry', { types: clonedTypes }),
+        clonedTypes,
+      );
     },
   });
 }
