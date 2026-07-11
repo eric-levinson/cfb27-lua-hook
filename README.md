@@ -22,7 +22,7 @@ The previous save editor, experimental injection hooks, and raw research tools
 are retained under `archive/` for provenance. They are unsupported and excluded
 from active packages and releases.
 
-## Target CLI surface
+## CLI surface
 
 ```text
 cfb27lua install
@@ -35,9 +35,24 @@ cfb27lua logs [--follow]
 cfb27lua doctor
 ```
 
-These commands are the `0.1.0-dev.1` target. The restructuring branch adds
-them incrementally with tests; do not treat an unimplemented command as part of
-a published release.
+These commands are implemented in the `0.1.0-dev.1` developer preview. One-shot
+`--json` output is a single object; followed logs use JSON Lines.
+
+## Start here
+
+Build and test the project, close the game, install the startup hook, then
+launch through MMC in your offline configuration:
+
+```powershell
+npm ci
+npm test
+cmake -S native -B native/build-active -A x64
+cmake --build native/build-active --config Release
+node packages/cli/bin/cfb27lua.cjs install
+```
+
+The CLI requires explicit game, MMC, and artifact paths through flags or the
+environment variables documented in the getting-started guide.
 
 ## Safety boundary
 
@@ -51,6 +66,9 @@ a published release.
 ## Documentation
 
 - [Lua API](docs/lua-api.md)
+- [Getting started](docs/getting-started.md)
+- [CLI reference](docs/cli.md)
+- [Protocol v1](docs/protocol.md)
 - [Safety boundary](docs/safety.md)
 - [Runtime verification](docs/research/runtime-verification.md)
 - [Legacy hook findings](docs/research/legacy-hook-findings.md)
