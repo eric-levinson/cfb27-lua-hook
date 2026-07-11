@@ -1,0 +1,24 @@
+{
+  "name": "cfb27-save-editor",
+  "version": "1.0.0",
+  "main": "electron/main.js",
+  "scripts": {
+    "check": "python -m py_compile server.py test_editor.py && node --check franchise_helper.js && node --check static/app.js && node --check electron/main.js && node --check electron/preload.js",
+    "test": "npm run test:fast",
+    "test:fast": "python -m unittest -v test_editor.EditorTests.test_resolve_save_dir_defaults_to_app_parent test_editor.EditorTests.test_resolve_save_dir_uses_environment_override test_editor.EditorTests.test_resolve_save_dir_reads_dotenv_when_env_is_unset test_editor.EditorTests.test_read_dotenv_values_strips_quotes_and_spacing test_editor.EditorTests.test_spa_shell_exposes_generator_default_and_supporting_views test_editor.EditorTests.test_spa_support_views_have_pagination_and_state_preservation_hooks test_editor.EditorTests.test_spa_preview_apply_is_gated_by_stale_preview_context test_editor.EditorTests.test_spa_config_has_structured_controls_for_weights_rank_bands_and_write_states test_editor.EditorTests.test_default_generator_config_validates_and_normalizes test_editor.EditorTests.test_generator_config_validation_endpoint test_editor.EditorTests.test_field_capability_metadata_normalizes_statuses",
+    "test:recruiting": "python -m unittest -v test_editor.EditorTests.test_recruiting_diff_tool_names_local_board_fixture_targets test_editor.EditorTests.test_recruiting_diff_tool_reports_week_three_visit_evidence test_editor.EditorTests.test_recruiting_diff_enrichment_adds_upstream_action_labels test_editor.EditorTests.test_recruiting_probe_builds_experimental_action_and_field_patches test_editor.EditorTests.test_recruiting_probe_can_build_active_pitch_discovery_patch",
+    "test:full": "python -m unittest -v test_editor.py",
+    "start": "python server.py --host 127.0.0.1 --port 8765",
+    "electron": "set ELECTRON_RUN_AS_NODE=&& electron ."
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "madden-franchise": "^3.8.0"
+  },
+  "devDependencies": {
+    "electron": "^43.0.0"
+  }
+}
