@@ -202,14 +202,35 @@ int wmain(int argc, wchar_t** argv) {
   if (!response.value("ok", false)) return 28;
   if (std::find(capabilities.begin(), capabilities.end(), "memoryScan") == capabilities.end() ||
       std::find(capabilities.begin(), capabilities.end(), "memoryRead") == capabilities.end()) return 24;
-  const auto& scan = response["result"];
-  if (scan.size() != 4 || scan.value("supportedBuild", true) || !scan.value("complete", false) ||
-      !scan.contains("scannedBytes") || !scan["scannedBytes"].is_number_unsigned() ||
-      !scan.contains("matches") || scan["matches"].size() != 1) {
+  Json scan = response["result"];
+  std::vector<Json> found_matches;
+  std::string previous_cursor;
+  for (std::size_t page_number = 0; page_number < 4096; ++page_number) {
+    if (scan.size() != 5 || scan.value("supportedBuild", true) ||
+        !scan.contains("scannedBytes") || !scan["scannedBytes"].is_number_unsigned() ||
+        scan["scannedBytes"].get<std::uint64_t>() > 32ull * 1024 * 1024 ||
+        !scan.contains("matches") || !scan["matches"].is_array() ||
+        !scan.contains("nextCursor")) return 29;
+    for (const auto& candidate : scan["matches"]) found_matches.push_back(candidate);
+    if (scan.value("complete", false)) {
+      if (!scan["nextCursor"].is_null()) return 63;
+      break;
+    }
+    if (!IsCanonicalAddress(scan["nextCursor"])) return 64;
+    const auto cursor = scan["nextCursor"].get<std::string>();
+    if (cursor == previous_cursor) return 65;
+    previous_cursor = cursor;
+    allowed_scan_params["cursor"] = cursor;
+    if (!Request(pipe, {{"protocol", 1}, {"id", "scan-page"},
+                        {"command", "scanMemory"}, {"params", allowed_scan_params}},
+                 response, false) || !response.value("ok", false)) return 66;
+    scan = response["result"];
+  }
+  if (!scan.value("complete", false) || found_matches.size() != 1) {
     std::cerr << "scan response: " << response.dump() << '\n';
     return 29;
   }
-  const auto& match = scan["matches"][0];
+  const auto& match = found_matches[0];
   if (match.size() != 6 || !IsCanonicalAddress(match["address"]) ||
       !IsCanonicalAddress(match["regionBase"]) ||
       !IsCanonicalAddress(match["contextAddress"]) ||
@@ -220,6 +241,7 @@ int wmain(int argc, wchar_t** argv) {
       !match.contains("protection") || !match["protection"].is_number_unsigned() ||
       !IsUpperHex(match["contextHex"]) ||
       match.value("contextHex", "") != std::string("00000000") + kSentinelHex + "00000000") return 30;
+  allowed_scan_params.erase("cursor");
 
   const auto address = FormatAddress(reinterpret_cast<std::uintptr_t>(sentinel_address));
   const Json read_params{
@@ -276,6 +298,34 @@ int wmain(int argc, wchar_t** argv) {
   if (!Request(pipe, {{"protocol", 1}, {"id", "scan-integer"},
                       {"command", "scanMemory"}, {"params", invalid_params}}, response, false) ||
       !IsError(response, "INVALID_REQUEST")) return 44;
+  invalid_params = allowed_scan_params;
+  invalid_params["cursor"] = "0xabcdef";
+  if (!Request(pipe, {{"protocol", 1}, {"id", "scan-lower-cursor"},
+                      {"command", "scanMemory"}, {"params", invalid_params}}, response, false) ||
+      !IsError(response, "INVALID_REQUEST")) return 67;
+  invalid_params = allowed_scan_params;
+  invalid_params["cursor"] = "0x0001";
+  if (!Request(pipe, {{"protocol", 1}, {"id", "scan-zero-cursor"},
+                      {"command", "scanMemory"}, {"params", invalid_params}}, response, false) ||
+      !IsError(response, "INVALID_REQUEST")) return 68;
+  invalid_params = allowed_scan_params;
+  invalid_params["cursor"] = 4096;
+  if (!Request(pipe, {{"protocol", 1}, {"id", "scan-numeric-cursor"},
+                      {"command", "scanMemory"}, {"params", invalid_params}}, response, false) ||
+      !IsError(response, "INVALID_REQUEST")) return 69;
+  invalid_params = allowed_scan_params;
+  invalid_params["cursor"] = "0x10000000000000000";
+  if (!Request(pipe, {{"protocol", 1}, {"id", "scan-overflow-cursor"},
+                      {"command", "scanMemory"}, {"params", invalid_params}}, response, false) ||
+      !IsError(response, "INVALID_REQUEST")) return 70;
+  SYSTEM_INFO system_info{};
+  GetSystemInfo(&system_info);
+  const auto above_max = reinterpret_cast<std::uintptr_t>(system_info.lpMaximumApplicationAddress) + 1;
+  invalid_params = allowed_scan_params;
+  invalid_params["cursor"] = FormatAddress(above_max);
+  if (!Request(pipe, {{"protocol", 1}, {"id", "scan-above-max-cursor"},
+                      {"command", "scanMemory"}, {"params", invalid_params}}, response, false) ||
+      !IsError(response, "INVALID_REQUEST")) return 71;
   invalid_params = allowed_scan_params;
   invalid_params["unexpected"] = 1;
   if (!Request(pipe, {{"protocol", 1}, {"id", "scan-extra"},

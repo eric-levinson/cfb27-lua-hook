@@ -14,7 +14,8 @@ const MEMORY_LIMITS = Object.freeze({
   maxMatches: 64,
   maxContextBytes: 512,
   maxRegionBytes: 64 * 1024 * 1024,
-  maxScanBytes: 512 * 1024 * 1024,
+  maxScanPageBytes: 32 * 1024 * 1024,
+  maxPages: 4096,
   maxReadRanges: 64,
   maxReadRangeBytes: 64 * 1024,
   maxReadBytes: 256 * 1024,
@@ -67,9 +68,9 @@ function cloneUpperHex(value, minimumBytes, maximumBytes, fieldName) {
   return value.toUpperCase();
 }
 
-function cloneScanOptions(options) {
+function cloneScanPageOptions(options) {
   const keys = ['patternHex', 'maskHex', 'maxMatches', 'contextBefore', 'contextAfter',
-    'allowUnsupportedBuild'];
+    'allowUnsupportedBuild', 'cursor'];
   if (!hasOnlyKeys(options, keys)) throw invalidRequest('scanMemory options are invalid');
   const patternHex = cloneUpperHex(
     options.patternHex,
@@ -96,6 +97,9 @@ function cloneScanOptions(options) {
       typeof options.allowUnsupportedBuild !== 'boolean') {
     throw invalidRequest('allowUnsupportedBuild must be a boolean');
   }
+  if (Object.hasOwn(options, 'cursor') && !isCanonicalAddress(options.cursor)) {
+    throw invalidRequest('cursor must be a canonical uppercase address');
+  }
 
   const clone = {
     patternHex,
@@ -107,7 +111,22 @@ function cloneScanOptions(options) {
   if (Object.hasOwn(options, 'allowUnsupportedBuild')) {
     clone.allowUnsupportedBuild = options.allowUnsupportedBuild;
   }
+  if (Object.hasOwn(options, 'cursor')) clone.cursor = options.cursor;
   return clone;
+}
+
+function cloneAggregateScanOptions(options) {
+  if (!hasOnlyKeys(options, ['patternHex', 'maskHex', 'maxMatches', 'contextBefore',
+    'contextAfter', 'allowUnsupportedBuild', 'maxPages']) || Object.hasOwn(options, 'cursor')) {
+    throw invalidRequest('scanMemory aggregate options are invalid');
+  }
+  const maxPages = Object.hasOwn(options, 'maxPages') ? options.maxPages : MEMORY_LIMITS.maxPages;
+  if (!isSafeIntegerBetween(maxPages, 1, MEMORY_LIMITS.maxPages)) {
+    throw invalidRequest('maxPages must be an integer from 1 through 4096');
+  }
+  const pageOptions = { ...options };
+  delete pageOptions.maxPages;
+  return { pageOptions: cloneScanPageOptions(pageOptions), maxPages };
 }
 
 function cloneReadOptions(options) {
@@ -140,12 +159,13 @@ function cloneReadOptions(options) {
   return clone;
 }
 
-function validateScanResult(result, params) {
-  if (!hasExactKeys(result, ['supportedBuild', 'complete', 'scannedBytes', 'matches']) ||
+function validateScanPageResult(result, params) {
+  if (!hasExactKeys(result, ['supportedBuild', 'complete', 'nextCursor', 'scannedBytes', 'matches']) ||
       typeof result.supportedBuild !== 'boolean' ||
       (result.supportedBuild === false && params.allowUnsupportedBuild !== true) ||
-      result.complete !== true ||
-      !isSafeIntegerBetween(result.scannedBytes, 0, MEMORY_LIMITS.maxScanBytes) ||
+      typeof result.complete !== 'boolean' ||
+      (result.complete ? result.nextCursor !== null : !isCanonicalAddress(result.nextCursor)) ||
+      !isSafeIntegerBetween(result.scannedBytes, 0, MEMORY_LIMITS.maxScanPageBytes) ||
       !Array.isArray(result.matches) || result.matches.length > params.maxMatches) {
     throw invalidResponse('Host returned an invalid scanMemory result');
   }
@@ -325,9 +345,46 @@ function createClient({ pid, pipeName, timeoutMs = 3000 } = {}) {
     getEvents({ after = 0, limit = 100 } = {}) {
       return request('events', { after, limit });
     },
+    async scanMemoryPage(options = {}) {
+      const params = cloneScanPageOptions(options);
+      return validateScanPageResult(await request('scanMemory', params), params);
+    },
     async scanMemory(options = {}) {
-      const params = cloneScanOptions(options);
-      return validateScanResult(await request('scanMemory', params), params);
+      const { pageOptions, maxPages } = cloneAggregateScanOptions(options);
+      const matches = [];
+      const cursors = new Set();
+      let cursor;
+      let scannedBytes = 0;
+      let supportedBuild;
+
+      for (let pageNumber = 0; pageNumber < maxPages; pageNumber += 1) {
+        const remainingMatches = pageOptions.maxMatches - matches.length;
+        const params = { ...pageOptions, maxMatches: Math.max(1, remainingMatches) };
+        if (cursor) params.cursor = cursor;
+        const page = validateScanPageResult(await request('scanMemory', params), params);
+        if (supportedBuild === undefined) supportedBuild = page.supportedBuild;
+        else if (page.supportedBuild !== supportedBuild) {
+          throw invalidResponse('Host changed supportedBuild during scanMemory');
+        }
+        if (!Number.isSafeInteger(scannedBytes + page.scannedBytes)) {
+          throw invalidResponse('Host scan byte total exceeds the safe integer range');
+        }
+        scannedBytes += page.scannedBytes;
+        matches.push(...page.matches);
+        if (matches.length > pageOptions.maxMatches) {
+          throw new Cfb27HookError('TOO_MANY_MATCHES', 'Memory scan found too many matches');
+        }
+        if (page.complete) {
+          return { supportedBuild, complete: true, scannedBytes, matches };
+        }
+        if (cursors.has(page.nextCursor) ||
+            (cursor && BigInt(page.nextCursor) <= BigInt(cursor))) {
+          throw invalidResponse('Host returned a non-progressing scan cursor');
+        }
+        cursors.add(page.nextCursor);
+        cursor = page.nextCursor;
+      }
+      throw new Cfb27HookError('SCAN_LIMIT_EXCEEDED', 'scanMemory exceeded maxPages');
     },
     async readMemory(options = {}) {
       const params = cloneReadOptions(options);

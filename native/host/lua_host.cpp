@@ -866,7 +866,7 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
                            "Memory scanning requires a supported build or explicit override");
     }
     if (!HasOnlyKeys(params, {"patternHex", "maskHex", "maxMatches", "contextBefore",
-                              "contextAfter", "allowUnsupportedBuild"}) ||
+                              "contextAfter", "allowUnsupportedBuild", "cursor"}) ||
         !params.contains("patternHex") || !params.contains("maskHex")) {
       return ErrorResponse(id, "INVALID_REQUEST", "Invalid scanMemory params");
     }
@@ -885,14 +885,26 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
       return ErrorResponse(id, "INVALID_REQUEST", "Invalid scanMemory params");
     }
 
+    std::optional<std::string> cursor;
+    if (params.contains("cursor")) {
+      if (!params["cursor"].is_string()) {
+        return ErrorResponse(id, "INVALID_REQUEST", "Invalid scanMemory params");
+      }
+      cursor = CanonicalAddress(params["cursor"].get_ref<const std::string&>());
+      if (!cursor) {
+        return ErrorResponse(id, "INVALID_REQUEST", "Invalid scanMemory params");
+      }
+    }
+
     const auto scan = cfb27::memory::ScanPrivateMemory({
         .pattern = std::move(*pattern),
         .mask = std::move(*mask),
         .max_matches = *max_matches,
         .context_before = *context_before,
         .context_after = *context_after,
+        .cursor = std::move(cursor),
     });
-    if (!scan.complete) return MemoryError(id, scan.code);
+    if (!scan.code.empty()) return MemoryError(id, scan.code);
 
     Json matches = Json::array();
     for (const auto& match : scan.matches) {
@@ -913,7 +925,8 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
     }
     return SuccessResponse(id, {
         {"supportedBuild", supported},
-        {"complete", true},
+        {"complete", scan.complete},
+        {"nextCursor", scan.next_cursor ? Json(*scan.next_cursor) : Json(nullptr)},
         {"scannedBytes", scan.scanned_bytes},
         {"matches", std::move(matches)},
     });

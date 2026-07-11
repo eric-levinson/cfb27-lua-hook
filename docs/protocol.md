@@ -40,7 +40,8 @@ Error response:
 - `registerTelemetry { types }` — add trusted structured event names for the
   current host session.
 - `scanMemory { patternHex, maskHex, maxMatches, contextBefore,
-  contextAfter, allowUnsupportedBuild? }` — scan bounded readable private memory.
+  contextAfter, allowUnsupportedBuild?, cursor? }` — scan one bounded page of
+  readable private memory and optionally resume from a continuation cursor.
 - `readMemory { ranges, allowUnsupportedBuild? }` — read a bounded batch of
   readable private-memory ranges.
 
@@ -86,8 +87,10 @@ userdata, threads, mixed or sparse tables, and non-string object keys.
 The pattern is 8–4,096 bytes. A mask byte selects significant bits using
 `(live & mask) == (pattern & mask)`. `maxMatches` is an integer from 1 through
 64. `contextBefore` and `contextAfter` are nonnegative integers no greater than
-512, with at most 512 context bytes requested in total. Each scanned region is
-capped at 64 MiB and aggregate scanning is capped at 512 MiB.
+512, with at most 512 context bytes requested in total. One request scans at
+most 32 MiB of eligible memory in chunks no larger than 4 MiB plus boundary
+lookahead. An optional `cursor` is a canonical uppercase address identifying
+the first virtual byte not covered by the preceding page.
 
 Request:
 
@@ -98,8 +101,24 @@ Request:
 Result:
 
 ```json
-{"supportedBuild":false,"complete":true,"scannedBytes":67108864,"matches":[{"address":"0x7FF612340080","regionBase":"0x7FF612340000","regionSize":65536,"protection":4,"contextAddress":"0x7FF61234007C","contextHex":"00000000CFB27A1100A1B2C3D4E5F60718293A4B00000000"}]}
+{"supportedBuild":false,"complete":false,"nextCursor":"0x7FF614340000","scannedBytes":33554432,"matches":[{"address":"0x7FF612340080","regionBase":"0x7FF612340000","regionSize":65536,"protection":4,"contextAddress":"0x7FF61234007C","contextHex":"00000000CFB27A1100A1B2C3D4E5F60718293A4B00000000"}]}
 ```
+
+Every successful page contains exactly `complete`, `nextCursor`,
+`scannedBytes`, `matches`, and `supportedBuild`. A partial page has
+`complete:false` and a canonical string `nextCursor`; a terminal page has
+`complete:true` and `nextCursor:null`. Completion means the address-space walk
+reached the process maximum, not that the game was paused or that multiple
+pages form an atomic snapshot. Eligible read failures return an error instead
+of silently advancing the cursor.
+
+The SDK exposes `client.scanMemoryPage(options)` for one protocol request and
+`client.scanMemory(options)` for automatic aggregation. The aggregate method
+owns continuation cursors, accepts `maxPages` from 1 through 4,096 (default
+4,096), applies `maxMatches` globally, and rejects repeated or decreasing
+cursors. The default bounds total eligible-byte work to 128 GiB. Before using a
+candidate for interpretation, re-read it and validate its expected structure;
+the live memory map can change between pages.
 
 ### Memory read
 

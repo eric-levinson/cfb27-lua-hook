@@ -50,6 +50,7 @@ const VALID_SCAN_OPTIONS = Object.freeze({
 const VALID_SCAN_RESULT = Object.freeze({
   supportedBuild: true,
   complete: true,
+  nextCursor: null,
   scannedBytes: 65536,
   matches: Object.freeze([Object.freeze({
     address: '0x7FF612340080',
@@ -117,7 +118,7 @@ test('memory APIs clone options and send exact typed commands', async (t) => {
   });
 
   const scanOptions = { ...VALID_SCAN_OPTIONS };
-  const scanPromise = client.scanMemory(scanOptions);
+  const scanPromise = client.scanMemoryPage(scanOptions);
   scanOptions.patternHex = '0000000000000000';
   scanOptions.maxMatches = 64;
   scanOptions.extra = true;
@@ -160,10 +161,22 @@ test('memory APIs reject invalid requests before creating a socket', async () =>
       { ...VALID_SCAN_OPTIONS, maxMatches: Number.MAX_SAFE_INTEGER + 1 },
       { ...VALID_SCAN_OPTIONS, contextBefore: 256, contextAfter: 257 },
       { ...VALID_SCAN_OPTIONS, allowUnsupportedBuild: 'true' },
+      { ...VALID_SCAN_OPTIONS, cursor: '0xabcdef' },
+      { ...VALID_SCAN_OPTIONS, cursor: 4096 },
     ];
     for (const options of scanCases) {
       await assert.rejects(
-        Promise.resolve().then(() => client.scanMemory(options)),
+        Promise.resolve().then(() => client.scanMemoryPage(options)),
+        (error) => error.code === 'INVALID_REQUEST',
+      );
+    }
+    await assert.rejects(
+      Promise.resolve().then(() => client.scanMemory({ ...VALID_SCAN_OPTIONS, cursor: '0x1000' })),
+      (error) => error.code === 'INVALID_REQUEST',
+    );
+    for (const maxPages of [0, 4097, Number.MAX_SAFE_INTEGER + 1, 1.5]) {
+      await assert.rejects(
+        Promise.resolve().then(() => client.scanMemory({ ...VALID_SCAN_OPTIONS, maxPages })),
         (error) => error.code === 'INVALID_REQUEST',
       );
     }
@@ -195,10 +208,14 @@ test('memory APIs reject invalid requests before creating a socket', async () =>
   }
 });
 
-test('scanMemory rejects malformed host result fields', async (t) => {
+test('scanMemoryPage rejects malformed host result fields', async (t) => {
   const invalidResults = [
     { ...VALID_SCAN_RESULT, supportedBuild: 1 },
     { ...VALID_SCAN_RESULT, complete: undefined },
+    { ...VALID_SCAN_RESULT, complete: false, nextCursor: null },
+    { ...VALID_SCAN_RESULT, nextCursor: '0x1000' },
+    { ...VALID_SCAN_RESULT, complete: false, nextCursor: 4096 },
+    { ...VALID_SCAN_RESULT, complete: false, nextCursor: '0xabcdef' },
     { ...VALID_SCAN_RESULT, scannedBytes: Number.MAX_SAFE_INTEGER + 1 },
     { ...VALID_SCAN_RESULT, matches: Array.from({ length: 65 }, () => VALID_SCAN_RESULT.matches[0]) },
     { ...VALID_SCAN_RESULT, matches: [{ ...VALID_SCAN_RESULT.matches[0], address: 140694844080256 }] },
@@ -217,7 +234,7 @@ test('scanMemory rejects malformed host result fields', async (t) => {
 
   for (const ignored of invalidResults) {
     await assert.rejects(
-      client.scanMemory(VALID_SCAN_OPTIONS),
+      client.scanMemoryPage(VALID_SCAN_OPTIONS),
       (error) => error.code === 'INVALID_RESPONSE',
     );
   }
@@ -250,7 +267,7 @@ test('memory APIs reject unsupported-build results unless explicitly allowed', a
     : { ...VALID_READ_RESULT, supportedBuild: false });
 
   await assert.rejects(
-    client.scanMemory(VALID_SCAN_OPTIONS),
+    client.scanMemoryPage(VALID_SCAN_OPTIONS),
     (error) => error.code === 'INVALID_RESPONSE',
   );
   await assert.rejects(
@@ -258,7 +275,7 @@ test('memory APIs reject unsupported-build results unless explicitly allowed', a
     (error) => error.code === 'INVALID_RESPONSE',
   );
   await assert.rejects(
-    client.scanMemory({ ...VALID_SCAN_OPTIONS, allowUnsupportedBuild: false }),
+    client.scanMemoryPage({ ...VALID_SCAN_OPTIONS, allowUnsupportedBuild: false }),
     (error) => error.code === 'INVALID_RESPONSE',
   );
   await assert.rejects(
@@ -270,7 +287,7 @@ test('memory APIs reject unsupported-build results unless explicitly allowed', a
   );
 
   assert.deepEqual(
-    await client.scanMemory({ ...VALID_SCAN_OPTIONS, allowUnsupportedBuild: true }),
+    await client.scanMemoryPage({ ...VALID_SCAN_OPTIONS, allowUnsupportedBuild: true }),
     { ...VALID_SCAN_RESULT, supportedBuild: false },
   );
   assert.deepEqual(
@@ -279,6 +296,83 @@ test('memory APIs reject unsupported-build results unless explicitly allowed', a
       allowUnsupportedBuild: true,
     }),
     { ...VALID_READ_RESULT, supportedBuild: false },
+  );
+});
+
+test('scanMemory aggregates pages and sends exact continuation cursors', async (t) => {
+  const pages = [
+    { supportedBuild: true, complete: false, nextCursor: '0x1000', scannedBytes: 32, matches: [] },
+    { supportedBuild: true, complete: false, nextCursor: '0x2000', scannedBytes: 32,
+      matches: [VALID_SCAN_RESULT.matches[0]] },
+    { supportedBuild: true, complete: true, nextCursor: null, scannedBytes: 8, matches: [] },
+  ];
+  const seen = [];
+  const client = await fakeClient(t, (request) => {
+    seen.push(request);
+    return pages.shift();
+  });
+
+  assert.deepEqual(
+    await client.scanMemory({ ...VALID_SCAN_OPTIONS, maxPages: 3 }),
+    { supportedBuild: true, complete: true, scannedBytes: 72,
+      matches: [VALID_SCAN_RESULT.matches[0]] },
+  );
+  assert.deepEqual(seen.map((request) => request.params.cursor),
+    [undefined, '0x1000', '0x2000']);
+  assert.ok(seen.every((request) => !Object.hasOwn(request.params, 'maxPages')));
+});
+
+test('scanMemory rejects hostile pagination responses', async (t) => {
+  const scenarios = [
+    [
+      { supportedBuild: true, complete: false, nextCursor: '0x1000', scannedBytes: 1, matches: [] },
+      { supportedBuild: true, complete: false, nextCursor: '0x1000', scannedBytes: 1, matches: [] },
+    ],
+    [
+      { supportedBuild: true, complete: false, nextCursor: '0x2000', scannedBytes: 1, matches: [] },
+      { supportedBuild: true, complete: false, nextCursor: '0x1000', scannedBytes: 1, matches: [] },
+    ],
+    [
+      { supportedBuild: true, complete: false, nextCursor: '0x1000',
+        scannedBytes: Number.MAX_SAFE_INTEGER, matches: [] },
+      { supportedBuild: true, complete: true, nextCursor: null, scannedBytes: 1, matches: [] },
+    ],
+    [
+      { supportedBuild: true, complete: false, nextCursor: '0x1000', scannedBytes: 1,
+        matches: [VALID_SCAN_RESULT.matches[0]] },
+      { supportedBuild: true, complete: true, nextCursor: null, scannedBytes: 1,
+        matches: [VALID_SCAN_RESULT.matches[0]] },
+    ],
+    [
+      { supportedBuild: true, complete: false, nextCursor: '0x1000', scannedBytes: 1, matches: [] },
+      { supportedBuild: false, complete: true, nextCursor: null, scannedBytes: 1, matches: [] },
+    ],
+  ];
+
+  for (const scenario of scenarios) {
+    const pages = [...scenario];
+    const client = await fakeClient(t, () => pages.shift());
+    const options = scenario === scenarios[3]
+      ? { ...VALID_SCAN_OPTIONS, maxMatches: 1 }
+      : { ...VALID_SCAN_OPTIONS, allowUnsupportedBuild: true };
+    await assert.rejects(
+      client.scanMemory(options),
+      (error) => error.code === 'INVALID_RESPONSE' || error.code === 'TOO_MANY_MATCHES',
+    );
+  }
+});
+
+test('scanMemory enforces maxPages without returning partial coverage', async (t) => {
+  let cursor = 0x1000;
+  const client = await fakeClient(t, () => {
+    const result = { supportedBuild: true, complete: false,
+      nextCursor: `0x${cursor.toString(16).toUpperCase()}`, scannedBytes: 32, matches: [] };
+    cursor += 0x1000;
+    return result;
+  });
+  await assert.rejects(
+    client.scanMemory({ ...VALID_SCAN_OPTIONS, maxPages: 2 }),
+    (error) => error.code === 'SCAN_LIMIT_EXCEEDED',
   );
 });
 
