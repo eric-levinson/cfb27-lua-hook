@@ -110,16 +110,21 @@ node packages/cli/bin/cfb27lua.cjs events --after 871 --json
 
 ### Final automated release artifacts
 
-After the manual gate, the version-only native rebuild passed the complete
-Node suite, Windows x64 release build, startup, memory-reader, telemetry, and
-framed-protocol smokes, package preview, checksum verification, and archive
-inspection. Its retained SHA-256 values are:
+After the manual gate, the final native rebuild and typed-parameter contract
+correction passed the complete Node suite, Windows x64 release build, startup,
+memory-reader, telemetry, and framed-protocol smokes, package preview, checksum
+verification, and archive inspection. The packager was explicitly bound to that
+build's absolute `Release` directory. Its retained SHA-256 values are:
 
-- Release ZIP: `1B5261A4CD46FA74E98865E073054A5BA01D1C6F554F63842CFD6EC7BCE36F3E`
 - Forwarding proxy: `4638D7E54A6715538119254069B075C94EB7AB41A6914907AAD96750ABD0F756`
 - Final host: `72C4CF08BA19F526F9E89F5B54F7EE70C3B5B630D9C7BA4658523F862AF5CB98`
 - CLI tarball: `A8FA2C550FCC85A51070C3F937CB6CD3A6FC0DC0213037D55C0EDFABB6CB7494`
 - SDK tarball: `94527FC3D1D832001647E176FEB0CA5D025C4451CACCF750376B3309627A92A8`
+
+The ZIP checksum is generated externally in `dist/SHA256SUMS.txt` after the
+archive is complete. It cannot be embedded in this document because this file
+is itself included in the ZIP; embedding that value would change the archive
+being hashed.
 
 The final host above was automated- and smoke-tested after the version bump and
 final contract correction, but it was not manually live-tested in CFB27. The

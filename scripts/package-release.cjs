@@ -103,12 +103,13 @@ async function packWorkspace(workspace, destination, outputName) {
 }
 
 async function main({ artifactsDir } = {}) {
+  const configuredArtifactsDir = artifactsDir || process.env.CFB27_NATIVE_ARTIFACTS;
+  if (!configuredArtifactsDir) {
+    throw new Error('Provide artifactsDir or set CFB27_NATIVE_ARTIFACTS to the native Release directory');
+  }
   const dist = path.join(root, 'dist');
   const stage = path.join(dist, `cfb27-lua-hook-${version}`);
-  const nativeSource = path.resolve(
-    artifactsDir || process.env.CFB27_NATIVE_ARTIFACTS ||
-      path.join(root, 'native', 'build-active', 'Release'),
-  );
+  const nativeSource = path.resolve(configuredArtifactsDir);
   await fs.rm(dist, { recursive: true, force: true });
   await fs.mkdir(path.join(stage, 'native'), { recursive: true });
   await fs.mkdir(path.join(stage, 'packages'), { recursive: true });

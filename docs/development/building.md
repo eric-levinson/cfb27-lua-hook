@@ -7,24 +7,27 @@ Visual Studio 2022 with the C++ desktop workload.
 npm ci
 npm run check
 npm test
-cmake -S native -B native/build-active -A x64
-cmake --build native/build-active --config Release
+cmake -S native -B native/build-release -A x64
+cmake --build native/build-release --config Release
 ```
 
-Verify both native harnesses:
+Verify all four native harnesses:
 
 ```powershell
-native/build-active/Release/cfb27_startup_smoke.exe native/build-active/Release/cfb27_lua_host.dll
-native/build-active/Release/cfb27_protocol_smoke.exe native/build-active/Release/cfb27_lua_host.dll
+native/build-release/Release/cfb27_startup_smoke.exe native/build-release/Release/cfb27_lua_host.dll
+native/build-release/Release/cfb27_memory_reader_smoke.exe
+native/build-release/Release/cfb27_telemetry_smoke.exe
+native/build-release/Release/cfb27_protocol_smoke.exe native/build-release/Release/cfb27_lua_host.dll
 ```
 
-Create the allowlisted preview bundle and checksum:
+Create the allowlisted preview bundle and checksum from that exact build:
 
 ```powershell
+$env:CFB27_NATIVE_ARTIFACTS = (Resolve-Path native/build-release/Release).Path
 npm run pack:preview
 ```
 
-Set `CFB27_NATIVE_ARTIFACTS` when the native DLLs are in a different Release
-directory. Set `SOURCE_DATE_EPOCH` to normalize staged file timestamps. The
-packager rejects archive content, game/save data, logs, dependencies, and build
-intermediates.
+`CFB27_NATIVE_ARTIFACTS` is required; the packager never guesses which build
+directory to use. Set `SOURCE_DATE_EPOCH` to normalize staged file timestamps.
+The packager rejects archive content, game/save data, logs, dependencies, and
+build intermediates.

@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const { releaseEntries, assertAllowedEntry } = require('../scripts/package-release.cjs');
+const { releaseEntries, assertAllowedEntry, main } = require('../scripts/package-release.cjs');
 
 test('release allowlist contains only supported product areas', () => {
   assert.deepEqual(releaseEntries(), [
@@ -27,4 +27,18 @@ test('release rejects archive and generated/private material', () => {
     assert.throws(() => assertAllowedEntry(value), /not allowed/i, value);
   }
   assert.doesNotThrow(() => assertAllowedEntry(path.join('examples', 'lua', 'autorun.lua')));
+});
+
+test('preview packaging requires an explicit native artifact directory', async () => {
+  const previous = process.env.CFB27_NATIVE_ARTIFACTS;
+  delete process.env.CFB27_NATIVE_ARTIFACTS;
+  try {
+    await assert.rejects(
+      main(),
+      /Provide artifactsDir or set CFB27_NATIVE_ARTIFACTS/,
+    );
+  } finally {
+    if (previous === undefined) delete process.env.CFB27_NATIVE_ARTIFACTS;
+    else process.env.CFB27_NATIVE_ARTIFACTS = previous;
+  }
 });
