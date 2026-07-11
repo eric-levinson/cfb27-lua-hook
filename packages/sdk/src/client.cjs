@@ -8,6 +8,187 @@ const { Cfb27HookError } = require('./errors.cjs');
 const { encodeFrame, FrameDecoder } = require('./frame.cjs');
 const { discoverGame } = require('./process.cjs');
 
+const MEMORY_LIMITS = Object.freeze({
+  minPatternBytes: 8,
+  maxPatternBytes: 4096,
+  maxMatches: 64,
+  maxContextBytes: 512,
+  maxRegionBytes: 64 * 1024 * 1024,
+  maxScanBytes: 512 * 1024 * 1024,
+  maxReadRanges: 64,
+  maxReadRangeBytes: 64 * 1024,
+  maxReadBytes: 256 * 1024,
+});
+
+const CANONICAL_ADDRESS = /^0x[0-9A-F]{1,16}$/;
+const UPPER_HEX_BYTES = /^(?:[0-9A-F]{2})+$/;
+
+function invalidRequest(message) {
+  return new Cfb27HookError('INVALID_REQUEST', message);
+}
+
+function invalidResponse(message) {
+  return new Cfb27HookError('INVALID_RESPONSE', message);
+}
+
+function isObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasExactKeys(value, keys) {
+  if (!isObject(value)) return false;
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+function hasOnlyKeys(value, keys) {
+  return isObject(value) && Object.keys(value).every((key) => keys.includes(key));
+}
+
+function isSafeIntegerBetween(value, minimum, maximum) {
+  return Number.isSafeInteger(value) && value >= minimum && value <= maximum;
+}
+
+function isCanonicalAddress(value) {
+  return typeof value === 'string' && CANONICAL_ADDRESS.test(value);
+}
+
+function cloneUpperHex(value, minimumBytes, maximumBytes, fieldName) {
+  if (typeof value !== 'string' || !UPPER_HEX_BYTES.test(value)) {
+    throw invalidRequest(`${fieldName} must contain uppercase hexadecimal bytes`);
+  }
+  const byteLength = value.length / 2;
+  if (byteLength < minimumBytes || byteLength > maximumBytes) {
+    throw invalidRequest(`${fieldName} byte length is outside the supported limits`);
+  }
+  return value.toUpperCase();
+}
+
+function cloneScanOptions(options) {
+  const keys = ['patternHex', 'maskHex', 'maxMatches', 'contextBefore', 'contextAfter',
+    'allowUnsupportedBuild'];
+  if (!hasOnlyKeys(options, keys)) throw invalidRequest('scanMemory options are invalid');
+  const patternHex = cloneUpperHex(
+    options.patternHex,
+    MEMORY_LIMITS.minPatternBytes,
+    MEMORY_LIMITS.maxPatternBytes,
+    'patternHex',
+  );
+  const maskHex = cloneUpperHex(
+    options.maskHex,
+    MEMORY_LIMITS.minPatternBytes,
+    MEMORY_LIMITS.maxPatternBytes,
+    'maskHex',
+  );
+  if (maskHex.length !== patternHex.length) {
+    throw invalidRequest('maskHex must have the same byte length as patternHex');
+  }
+  if (!isSafeIntegerBetween(options.maxMatches, 1, MEMORY_LIMITS.maxMatches) ||
+      !isSafeIntegerBetween(options.contextBefore, 0, MEMORY_LIMITS.maxContextBytes) ||
+      !isSafeIntegerBetween(options.contextAfter, 0, MEMORY_LIMITS.maxContextBytes) ||
+      options.contextBefore + options.contextAfter > MEMORY_LIMITS.maxContextBytes) {
+    throw invalidRequest('scanMemory numeric options are outside the supported limits');
+  }
+  if (Object.hasOwn(options, 'allowUnsupportedBuild') &&
+      typeof options.allowUnsupportedBuild !== 'boolean') {
+    throw invalidRequest('allowUnsupportedBuild must be a boolean');
+  }
+
+  const clone = {
+    patternHex,
+    maskHex,
+    maxMatches: options.maxMatches,
+    contextBefore: options.contextBefore,
+    contextAfter: options.contextAfter,
+  };
+  if (Object.hasOwn(options, 'allowUnsupportedBuild')) {
+    clone.allowUnsupportedBuild = options.allowUnsupportedBuild;
+  }
+  return clone;
+}
+
+function cloneReadOptions(options) {
+  if (!hasOnlyKeys(options, ['ranges', 'allowUnsupportedBuild']) ||
+      !Array.isArray(options.ranges) ||
+      options.ranges.length < 1 ||
+      options.ranges.length > MEMORY_LIMITS.maxReadRanges) {
+    throw invalidRequest('readMemory options are invalid');
+  }
+  if (Object.hasOwn(options, 'allowUnsupportedBuild') &&
+      typeof options.allowUnsupportedBuild !== 'boolean') {
+    throw invalidRequest('allowUnsupportedBuild must be a boolean');
+  }
+
+  let totalBytes = 0;
+  const ranges = options.ranges.map((range) => {
+    if (!hasExactKeys(range, ['address', 'length']) || !isCanonicalAddress(range.address) ||
+        !isSafeIntegerBetween(range.length, 1, MEMORY_LIMITS.maxReadRangeBytes) ||
+        totalBytes > MEMORY_LIMITS.maxReadBytes - range.length) {
+      throw invalidRequest('readMemory range is invalid or exceeds the supported limits');
+    }
+    totalBytes += range.length;
+    return { address: range.address, length: range.length };
+  });
+
+  const clone = { ranges };
+  if (Object.hasOwn(options, 'allowUnsupportedBuild')) {
+    clone.allowUnsupportedBuild = options.allowUnsupportedBuild;
+  }
+  return clone;
+}
+
+function validateScanResult(result, params) {
+  if (!hasExactKeys(result, ['supportedBuild', 'complete', 'scannedBytes', 'matches']) ||
+      typeof result.supportedBuild !== 'boolean' || result.complete !== true ||
+      !isSafeIntegerBetween(result.scannedBytes, 0, MEMORY_LIMITS.maxScanBytes) ||
+      !Array.isArray(result.matches) || result.matches.length > params.maxMatches) {
+    throw invalidResponse('Host returned an invalid scanMemory result');
+  }
+
+  const maximumContextBytes = params.patternHex.length / 2 +
+    params.contextBefore + params.contextAfter;
+  for (const match of result.matches) {
+    if (!hasExactKeys(match, ['address', 'regionBase', 'regionSize', 'protection',
+      'contextAddress', 'contextHex']) ||
+        !isCanonicalAddress(match.address) || !isCanonicalAddress(match.regionBase) ||
+        !isSafeIntegerBetween(match.regionSize, 1, Number.MAX_SAFE_INTEGER) ||
+        !isSafeIntegerBetween(match.protection, 0, 0xFFFFFFFF) ||
+        !isCanonicalAddress(match.contextAddress) ||
+        typeof match.contextHex !== 'string' || !UPPER_HEX_BYTES.test(match.contextHex) ||
+        !isSafeIntegerBetween(
+          match.contextHex.length / 2,
+          params.patternHex.length / 2,
+          maximumContextBytes,
+        )) {
+      throw invalidResponse('Host returned an invalid scanMemory match');
+    }
+  }
+  return result;
+}
+
+function validateReadResult(result, params) {
+  if (!hasExactKeys(result, ['supportedBuild', 'ranges']) ||
+      typeof result.supportedBuild !== 'boolean' || !Array.isArray(result.ranges) ||
+      result.ranges.length !== params.ranges.length ||
+      result.ranges.length > MEMORY_LIMITS.maxReadRanges) {
+    throw invalidResponse('Host returned an invalid readMemory result');
+  }
+
+  for (let index = 0; index < result.ranges.length; index += 1) {
+    const range = result.ranges[index];
+    const requested = params.ranges[index];
+    if (!hasExactKeys(range, ['address', 'length', 'bytesHex']) ||
+        !isCanonicalAddress(range.address) || range.address !== requested.address ||
+        range.length !== requested.length ||
+        typeof range.bytesHex !== 'string' || !UPPER_HEX_BYTES.test(range.bytesHex) ||
+        range.bytesHex.length !== range.length * 2) {
+      throw invalidResponse('Host returned an invalid readMemory range');
+    }
+  }
+  return result;
+}
+
 function createClient({ pid, pipeName, timeoutMs = 3000 } = {}) {
   if (!pipeName && (!Number.isInteger(pid) || pid <= 0)) {
     throw new Cfb27HookError('INVALID_REQUEST', 'createClient requires a positive PID or pipe name');
@@ -111,6 +292,14 @@ function createClient({ pid, pipeName, timeoutMs = 3000 } = {}) {
     },
     getEvents({ after = 0, limit = 100 } = {}) {
       return request('events', { after, limit });
+    },
+    async scanMemory(options = {}) {
+      const params = cloneScanOptions(options);
+      return validateScanResult(await request('scanMemory', params), params);
+    },
+    async readMemory(options = {}) {
+      const params = cloneReadOptions(options);
+      return validateReadResult(await request('readMemory', params), params);
     },
   });
 }

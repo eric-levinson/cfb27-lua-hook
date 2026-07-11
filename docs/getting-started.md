@@ -52,6 +52,41 @@ node packages/cli/bin/cfb27lua.cjs events --after 0 --json
 eligibility separately. A failed write-eligibility check does not prevent safe
 read-only scripts.
 
+## Read live memory from a trusted Node process
+
+The SDK exposes bounded, read-only memory discovery for trusted Node.js and
+Electron main-process code. Do not expose these methods or their raw byte and
+address results to an Electron renderer.
+
+```js
+const { createClient } = require('@cfb27/lua-hook');
+
+const client = createClient({ pid: gamePid });
+const scan = await client.scanMemory({
+  patternHex: 'CFB27A1100A1B2C3D4E5F60718293A4B',
+  maskHex: 'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF',
+  maxMatches: 2,
+  contextBefore: 4,
+  contextAfter: 4,
+});
+
+const read = await client.readMemory({
+  ranges: [{ address: scan.matches[0].address, length: 16 }],
+});
+```
+
+Hex byte strings must be uppercase and addresses must use canonical uppercase
+`0x[0-9A-F]+` strings; JavaScript numbers are never accepted as addresses. A
+scan pattern is 8–4096 bytes, requests at most 64 matches, and allows at most
+512 total context bytes before and after each match. A batch read contains at
+most 64 ranges of 64 KiB each and at most 256 KiB total. Unsupported game builds
+require `allowUnsupportedBuild: true` and report `supportedBuild: false`.
+
+Both methods validate requests before opening the pipe and validate every host
+response field before returning it. They can report `MEMORY_ACCESS_DENIED`,
+`SCAN_LIMIT_EXCEEDED`, or `TOO_MANY_MATCHES`; malformed host results report
+`INVALID_RESPONSE`. The SDK does not provide a memory-write API.
+
 ## Restore MMC
 
 Close the game, then restore both verified original proxies:
