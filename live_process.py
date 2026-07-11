@@ -589,6 +589,44 @@ def live_rating_write_addresses(object_address: int, field: str) -> tuple[int, i
     )
 
 
+def normalize_live_object_addresses(object_addresses) -> list[int]:
+    addresses = list(dict.fromkeys(int(address) for address in object_addresses))
+    if not 1 <= len(addresses) <= 64:
+        raise ValueError("One to 64 verified live object addresses are required")
+    return addresses
+
+
+def plan_live_rating_object_writes(
+    objects: list[dict[str, object]],
+    player_id: int,
+    field: str,
+    value: int,
+) -> list[dict[str, int]]:
+    """Validate live player copies and retain each copy's rollback value."""
+    if field not in LIVE_PLAYER_RATING_OFFSETS:
+        raise ValueError(f"Unsupported live rating field: {field}")
+    maximum = 100 if field == "overall" else 99
+    if not 0 <= value <= maximum:
+        raise ValueError(f"{field} must be between 0 and {maximum}")
+    plan: list[dict[str, int]] = []
+    for item in objects:
+        address = int(item["address"])
+        if int(item["playerId"]) != player_id:
+            raise RuntimeError(f"Player ID changed at 0x{address:X}; rediscover the player")
+        if not item["duplicateRatingBytesValid"]:
+            raise RuntimeError(f"Rating duplicate integrity failed at 0x{address:X}; rediscover the player")
+        ratings = item.get("ratings")
+        if not isinstance(ratings, dict) or field not in ratings:
+            raise RuntimeError(f"Live {field} value is unavailable at 0x{address:X}; rediscover the player")
+        before = int(ratings[field])
+        if not 0 <= before <= maximum:
+            raise RuntimeError(f"Live {field} value is invalid at 0x{address:X}; rediscover the player")
+        plan.append({"address": address, "before": before, "after": value})
+    if not plan:
+        raise RuntimeError("No verified live player copies were available")
+    return plan
+
+
 def write_live_player_rating(
     pid: int,
     object_addresses: list[int],
@@ -597,50 +635,21 @@ def write_live_player_rating(
     expected_before: int,
     value: int,
 ) -> dict[str, object]:
-    """Apply one verified rating to matching live copies with rollback on failure.
-
-    Discovery can return older cache generations for the same player.  Those
-    objects are still structurally valid, but requiring every generation to
-    contain the same value makes an otherwise valid write fail before it
-    starts.  Only objects that still contain ``expected_before`` participate
-    in the transaction; differing generations are reported back as skipped.
-    Identity or duplicate-byte failures remain hard errors.
-    """
+    """Apply one rating to every verified live copy with per-copy rollback."""
     if field not in LIVE_PLAYER_RATING_OFFSETS:
         raise ValueError(f"Unsupported live rating field: {field}")
     maximum = 100 if field == "overall" else 99
     if not (0 <= expected_before <= maximum and 0 <= value <= maximum):
         raise ValueError(f"{field} must be between 0 and {maximum}")
-    addresses = list(dict.fromkeys(int(address) for address in object_addresses))
-    if not (1 <= len(addresses) <= 16):
-        raise ValueError("One to sixteen verified live object addresses are required")
+    addresses = normalize_live_object_addresses(object_addresses)
 
     requested_addresses = addresses
-    before_objects = []
-    skipped_objects = []
-    for address in requested_addresses:
-        decoded = decode_live_player_object(read_process_bytes(pid, address, LIVE_PLAYER_OBJECT_SIZE), address)
-        if decoded["playerId"] != player_id:
-            raise RuntimeError(f"Player ID changed at 0x{address:X}; rediscover the player")
-        if not decoded["duplicateRatingBytesValid"]:
-            raise RuntimeError(f"Rating duplicate integrity failed at 0x{address:X}; rediscover the player")
-        actual = decoded["ratings"][field]
-        if actual != expected_before:
-            skipped_objects.append({
-                "address": address,
-                "addressHex": f"0x{address:X}",
-                "actual": actual,
-                "reason": "stale-value",
-            })
-            continue
-        before_objects.append(decoded)
-
-    addresses = [int(item["address"]) for item in before_objects]
-    if not addresses:
-        observed = sorted({int(item["actual"]) for item in skipped_objects})
-        raise RuntimeError(
-            f"No live {field} copy still contains {expected_before}; observed {observed}. Rediscover the player"
-        )
+    before_objects = [
+        decode_live_player_object(read_process_bytes(pid, address, LIVE_PLAYER_OBJECT_SIZE), address)
+        for address in requested_addresses
+    ]
+    write_plan = plan_live_rating_object_writes(before_objects, player_id, field, value)
+    addresses = [item["address"] for item in write_plan]
 
     kernel32 = _kernel32()
     handle = kernel32.OpenProcess(
@@ -667,10 +676,10 @@ def write_live_player_rating(
 
     try:
         try:
-            for object_address in addresses:
-                for target in live_rating_write_addresses(object_address, field):
+            for item in write_plan:
+                for target in live_rating_write_addresses(item["address"], field):
                     write_byte(target, value)
-                    written_targets.append((target, expected_before))
+                    written_targets.append((target, item["before"]))
             after_objects = [
                 decode_live_player_object(read_process_bytes(pid, address, LIVE_PLAYER_OBJECT_SIZE), address)
                 for address in addresses
@@ -702,11 +711,12 @@ def write_live_player_rating(
         "field": field,
         "before": expected_before,
         "after": value,
+        "observedBeforeValues": sorted({item["before"] for item in write_plan}),
         "requestedObjectAddresses": requested_addresses,
         "objectAddresses": addresses,
         "objectAddressHex": [f"0x{address:X}" for address in addresses],
-        "skippedObjects": skipped_objects,
-        "skippedObjectCount": len(skipped_objects),
+        "skippedObjects": [],
+        "skippedObjectCount": 0,
         "bytesWritten": len(addresses) * 2,
         "verified": True,
         "rollbackUsed": False,

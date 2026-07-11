@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import gzip
+import hashlib
 import json
 import os
 import subprocess
@@ -11,12 +12,14 @@ import tempfile
 import threading
 import unittest
 from types import SimpleNamespace
+import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
 import server
+import live_process
 from live_process import (
     LIVE_PLAYER_DUPLICATE_OFFSETS,
     LIVE_PLAYER_ID_OFFSET,
@@ -123,6 +126,118 @@ def load_recruiting_diff_module():
 
 
 class EditorTests(unittest.TestCase):
+    def test_startup_lua_host_client_reports_status_and_evaluates_in_process(self) -> None:
+        import native_hook
+
+        calls = []
+        with patch(
+            "native_hook._hook_command_to_pipe",
+            side_effect=lambda pid, command, **kwargs: calls.append((pid, command, kwargs))
+            or {"ok": True, "ready": True},
+        ):
+            status = native_hook.startup_lua_status(321)
+            evaluated = native_hook.eval_startup_lua(321, 'cfb.log("hello")')
+        self.assertTrue(status["loaded"])
+        self.assertTrue(status["ready"])
+        self.assertTrue(evaluated["ok"])
+        self.assertEqual(calls[0][1], "STATUS")
+        self.assertEqual(calls[1][1], 'EVAL cfb.log("hello")')
+        self.assertTrue(all(call[2]["pipe_prefix"] == native_hook.LUA_HOST_PIPE_PREFIX for call in calls))
+
+    def test_startup_hook_install_preserves_mmc_proxy_and_is_reversible(self) -> None:
+        import startup_hook
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            game_dir = root / "game"
+            third_party = root / "tools" / "ThirdParty"
+            artifacts = root / "artifacts"
+            game_dir.mkdir()
+            third_party.mkdir(parents=True)
+            artifacts.mkdir()
+            mmc_bytes = b"original-mmc-cryptbase"
+            proxy_bytes = b"cfb27-startup-proxy"
+            host_bytes = b"cfb27-lua-host"
+            (game_dir / "CryptBase.dll").write_bytes(mmc_bytes)
+            (third_party / "CryptBase.dll").write_bytes(mmc_bytes)
+            proxy = artifacts / "cfb27_cryptbase_proxy.dll"
+            host = artifacts / "cfb27_lua_host.dll"
+            autorun = artifacts / "autorun.lua"
+            proxy.write_bytes(proxy_bytes)
+            host.write_bytes(host_bytes)
+            autorun.write_text('cfb.log("autorun")', encoding="utf-8")
+            expected_hash = hashlib.sha256(mmc_bytes).hexdigest().upper()
+
+            with patch("startup_hook.running_game_processes", return_value=[]):
+                result = startup_hook.install_startup_hook(
+                    game_dir,
+                    third_party.parent,
+                    proxy,
+                    host,
+                    autorun_script=autorun,
+                    expected_mmc_sha256=expected_hash,
+                )
+            self.assertTrue(result["installed"])
+            self.assertEqual((game_dir / "MMCBase.dll").read_bytes(), mmc_bytes)
+            self.assertEqual((third_party / "MMCBase.dll").read_bytes(), mmc_bytes)
+            self.assertEqual((game_dir / "CryptBase.dll").read_bytes(), proxy_bytes)
+            self.assertEqual((third_party / "CryptBase.dll").read_bytes(), proxy_bytes)
+            self.assertEqual((game_dir / "CFB27LiveEditor" / "cfb27_lua_host.dll").read_bytes(), host_bytes)
+            self.assertEqual(
+                (game_dir / "CFB27LiveEditor" / "scripts" / "autorun.lua").read_text(encoding="utf-8"),
+                'cfb.log("autorun")',
+            )
+
+            with patch("startup_hook.running_game_processes", return_value=[]):
+                restored = startup_hook.uninstall_startup_hook(game_dir, third_party.parent)
+            self.assertTrue(restored["restored"])
+            self.assertEqual((game_dir / "CryptBase.dll").read_bytes(), mmc_bytes)
+            self.assertEqual((third_party / "CryptBase.dll").read_bytes(), mmc_bytes)
+
+    def test_startup_lua_host_contract_uses_mmc_proxy_chain_without_remote_injection(self) -> None:
+        host_path = APP_DIR / "native" / "lua_host.cpp"
+        proxy_path = APP_DIR / "native" / "cryptbase_proxy.cpp"
+        exports_path = APP_DIR / "native" / "cryptbase_proxy.def"
+        self.assertTrue(host_path.is_file())
+        self.assertTrue(proxy_path.is_file())
+        self.assertTrue(exports_path.is_file())
+        host = host_path.read_text(encoding="utf-8")
+        proxy = proxy_path.read_text(encoding="utf-8")
+        exports = exports_path.read_text(encoding="utf-8")
+        cmake = (APP_DIR / "native" / "CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("CFB27LuaHost.", host)
+        self.assertIn("9E654AD49C4702D8F9FA4E38FD1110ABE657DD38926D4124B30C70E7D29ADFE8", host)
+        self.assertIn("LuaAobScan", host)
+        self.assertIn("LuaReadU8", host)
+        self.assertIn("LuaWriteU8", host)
+        self.assertIn("LuaOn", host)
+        self.assertIn('FireEvent("game_ready")', host)
+        self.assertIn("RunAutorun", host)
+        self.assertIn("cfb27_lua_host.dll", proxy)
+        self.assertIn("CFB27LiveEditor", proxy)
+        self.assertIn("SystemFunction001=MMCBase.SystemFunction001", exports)
+        self.assertIn("add_library(cfb27_lua_host SHARED lua_host.cpp)", cmake)
+        self.assertIn("add_library(cfb27_cryptbase_proxy SHARED cryptbase_proxy.cpp cryptbase_proxy.def)", cmake)
+        self.assertNotIn("CreateRemoteThread", host)
+        self.assertNotIn("CreateRemoteThread", proxy)
+
+    def test_startup_lua_host_does_not_allocate_executable_hash_buffer_on_thread_stack(self) -> None:
+        host_source = (APP_DIR / "native" / "lua_host.cpp").read_text(encoding="utf-8")
+        sha_start = host_source.index("std::string Sha256File")
+        sha_end = host_source.index("bool VerifySupportedBuild", sha_start)
+        sha_source = host_source[sha_start:sha_end]
+
+        self.assertNotIn("std::array<char, 1024 * 1024>", sha_source)
+        self.assertIn("std::vector<char> buffer", sha_source)
+
+    def test_startup_lua_host_preserves_multiline_eval_payloads(self) -> None:
+        host_source = (APP_DIR / "native" / "lua_host.cpp").read_text(encoding="utf-8")
+        eval_start = host_source.index('if (verb == "EVAL")')
+        eval_end = host_source.index('return "{\\"ok\\":false', eval_start)
+        eval_source = host_source[eval_start:eval_end]
+
+        self.assertIn("std::getline(input >> std::ws, script, '\\0')", eval_source)
+
     def test_native_hook_contract_includes_request_detour_lua_and_guarded_record_patch(self) -> None:
         hook_source = (APP_DIR / "native" / "hook.cpp").read_text(encoding="utf-8")
         cmake = (APP_DIR / "native" / "CMakeLists.txt").read_text(encoding="utf-8")
@@ -176,6 +291,128 @@ class EditorTests(unittest.TestCase):
         self.assertEqual(overall_primary, 0x1000010C)
         self.assertEqual(overall_duplicate, 0x1000010F)
 
+    def test_live_rating_write_plan_accepts_verified_mixed_generations(self) -> None:
+        objects = [
+            {"address": 0x1000, "playerId": 25130, "ratings": {"speed": 86}, "duplicateRatingBytesValid": True},
+            {"address": 0x2000, "playerId": 25130, "ratings": {"speed": 87}, "duplicateRatingBytesValid": True},
+            {"address": 0x3000, "playerId": 25130, "ratings": {"speed": 82}, "duplicateRatingBytesValid": True},
+        ]
+
+        self.assertTrue(hasattr(live_process, "plan_live_rating_object_writes"))
+        plan = live_process.plan_live_rating_object_writes(objects, 25130, "speed", 90)
+
+        self.assertEqual([item["before"] for item in plan], [86, 87, 82])
+        self.assertEqual([item["after"] for item in plan], [90, 90, 90])
+        self.assertEqual([item["address"] for item in plan], [0x1000, 0x2000, 0x3000])
+
+    def test_live_object_address_limit_covers_current_cache_generations(self) -> None:
+        self.assertTrue(hasattr(live_process, "normalize_live_object_addresses"))
+        addresses = [0x1000 + (index * 0x100) for index in range(17)]
+        self.assertEqual(live_process.normalize_live_object_addresses(addresses), addresses)
+        with self.assertRaisesRegex(ValueError, "One to 64"):
+            live_process.normalize_live_object_addresses(range(65))
+
+    def test_live_rating_write_plan_rejects_identity_or_integrity_mismatch(self) -> None:
+        self.assertTrue(hasattr(live_process, "plan_live_rating_object_writes"))
+        wrong_player = [
+            {"address": 0x1000, "playerId": 99999, "ratings": {"speed": 86}, "duplicateRatingBytesValid": True},
+        ]
+        corrupt_duplicate = [
+            {"address": 0x1000, "playerId": 25130, "ratings": {"speed": 86}, "duplicateRatingBytesValid": False},
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "Player ID changed"):
+            live_process.plan_live_rating_object_writes(wrong_player, 25130, "speed", 90)
+        with self.assertRaisesRegex(RuntimeError, "duplicate integrity failed"):
+            live_process.plan_live_rating_object_writes(corrupt_duplicate, 25130, "speed", 90)
+
+    def test_apply_live_rating_layers_writes_before_arming_fallback(self) -> None:
+        self.assertTrue(hasattr(server, "apply_live_rating_layers"))
+        discovery_queries = []
+
+        def discover_player(_name, query, player_row=None):
+            self.assertTrue(query)
+            discovery_queries.append(query)
+            return {
+                "player": {
+                    "row": player_row,
+                    "playerId": 25130,
+                    "firstName": "Kaelan",
+                    "lastName": "Chudzinski",
+                    "ratings": {"overall": 86, "speed": 87, "acceleration": 86, "agility": 84, "awareness": 83},
+                },
+                "discovery": {
+                    "objects": [{"address": 0x1000}, {"address": 0x2000}],
+                },
+            }
+
+        store = SimpleNamespace(
+            validate_filename=lambda _name: Path("active-dynasty"),
+            discover_live_player=discover_player,
+        )
+        patch_result = {
+            "expectedBefore": 87,
+            "player": {"playerId": 25130, "firstName": "Kaelan", "lastName": "Chudzinski"},
+            "field": "speed",
+            "value": 82,
+        }
+        calls = []
+        with (
+            patch("server.attach_hook", side_effect=lambda _pid: calls.append("attach-hook")),
+            patch("server.player_rating_patch", return_value=patch_result),
+            patch(
+                "server.write_live_player_rating",
+                side_effect=lambda *_args: calls.append("direct-write") or {"verified": True, "bytesWritten": 4},
+            ),
+            patch("server.attach_response_guard", side_effect=lambda _pid: calls.append("attach-guard")),
+            patch(
+                "server.queue_response_rating",
+                side_effect=lambda *_args: calls.append("queue-guard") or {"queued": True},
+            ),
+            patch("server.unlock_dynasty_player_editing", return_value={"ok": True}),
+            patch("server.start_dynasty_unlock_monitor", return_value={"running": True}),
+            patch(
+                "server.discover_live_player_objects",
+                return_value={"count": 2, "objects": [{"address": 0x1000}, {"address": 0x2000}]},
+            ),
+        ):
+            result = server.apply_live_rating_layers(store, "active-dynasty", 6228, 100, "speed", 87, 82)
+
+        self.assertEqual(calls, ["attach-hook", "direct-write", "attach-guard", "queue-guard"])
+        self.assertEqual(discovery_queries, ["Chudzinski"])
+        self.assertTrue(result["directWrite"]["verified"])
+        self.assertEqual(result["refresh"], "instant-pending-verification")
+
+    def test_live_apply_ui_prefers_direct_write_message(self) -> None:
+        app_js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+        start = app_js.index("async function writeLiveRating")
+        end = app_js.index("async function discoverLivePlayer", start)
+        live_apply = app_js[start:end]
+
+        self.assertIn("response.directWrite?.verified", live_apply)
+        self.assertIn("response.discovery", live_apply)
+        self.assertIn("move the roster cursor away and back once", live_apply)
+        self.assertNotIn("Reopen the player screen to verify", live_apply)
+
+    def test_live_editor_exposes_persistent_lua_console_without_engineering_clutter(self) -> None:
+        index_html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        app_js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="luaHostState"', index_html)
+        self.assertIn('id="luaScriptInput"', index_html)
+        self.assertIn('id="runLuaBtn"', index_html)
+        self.assertIn("/api/live/lua/status", app_js)
+        self.assertIn("/api/live/lua/eval", app_js)
+        self.assertIn("async function runLuaSnippet", app_js)
+        self.assertNotIn("CreateRemoteThread", index_html)
+
+    def test_live_apply_endpoint_uses_layered_transaction(self) -> None:
+        source = (APP_DIR / "server.py").read_text(encoding="utf-8")
+        endpoint = source[source.index('if self.path == "/api/live/hook/apply-rating"') :]
+        endpoint = endpoint[: endpoint.index('if self.path == "/api/live/hook/run-script"')]
+        self.assertIn("apply_live_rating_layers(", endpoint)
+        self.assertNotIn("queue_response_rating(", endpoint)
+
     def test_live_player_layout_decodes_verified_rating_pairs(self) -> None:
         data = bytearray(LIVE_PLAYER_OBJECT_SIZE)
         data[LIVE_PLAYER_ID_OFFSET : LIVE_PLAYER_ID_OFFSET + 4] = (25130).to_bytes(4, "little")
@@ -228,6 +465,73 @@ class EditorTests(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
             thread.join(timeout=2)
+
+    def test_startup_lua_status_endpoint_reports_persistent_host(self) -> None:
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        port = httpd.server_address[1]
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        expected = {
+            "loaded": True,
+            "ready": True,
+            "supportedBuild": True,
+            "writesAllowed": True,
+            "ticks": 12,
+        }
+        try:
+            with (
+                patch("server.live_status", return_value={"gameProcesses": [{"pid": 6228}]}),
+                patch("server.startup_lua_status", return_value=expected, create=True) as status_mock,
+            ):
+                try:
+                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/live/lua/status") as response:
+                        status_code = response.status
+                        payload = json.loads(response.read())
+                except urllib.error.HTTPError as exc:
+                    status_code = exc.code
+                    payload = json.loads(exc.read())
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(timeout=2)
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload, expected)
+        status_mock.assert_called_once_with(6228)
+
+    def test_startup_lua_eval_endpoint_executes_in_persistent_host(self) -> None:
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        port = httpd.server_address[1]
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        expected = {"ok": True, "result": "ok", "transport": "startup-lua-host"}
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/live/lua/eval",
+            data=json.dumps({"script": 'cfb.log("from editor")'}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with (
+                patch("server.live_status", return_value={"gameProcesses": [{"pid": 6228}]}),
+                patch("server.startup_lua_status", return_value={"loaded": True, "ready": True}),
+                patch("server.eval_startup_lua", return_value=expected, create=True) as eval_mock,
+            ):
+                try:
+                    with urllib.request.urlopen(request) as response:
+                        status_code = response.status
+                        payload = json.loads(response.read())
+                except urllib.error.HTTPError as exc:
+                    status_code = exc.code
+                    payload = json.loads(exc.read())
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(timeout=2)
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload, expected)
+        eval_mock.assert_called_once_with(6228, 'cfb.log("from editor")')
 
     def test_resolve_save_dir_defaults_to_app_parent(self) -> None:
         self.assertEqual(resolve_save_dir({}), APP_DIR.parent.resolve())

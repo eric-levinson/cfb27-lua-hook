@@ -157,6 +157,16 @@
         <section class="support-detail" id="livePlayerPanel">
           <div class="empty-state compact">Search for a player above to view their ratings.</div>
         </section>
+        <details class="lua-console">
+          <summary>Lua scripting <span id="luaHostState">Checking…</span></summary>
+          <div class="lua-console-body">
+            <textarea id="luaScriptInput" spellcheck="false" aria-label="Lua script">cfb.log("Hello from Dynasty Lab")</textarea>
+            <div class="lua-console-actions">
+              <p>Runs inside the current offline game session.</p>
+              <button id="runLuaBtn" type="button">Run Script</button>
+            </div>
+          </div>
+        </details>
         <details class="technical-details">
           <summary>Technical details</summary>
           <div class="support-table-wrap">

@@ -1,0 +1,13 @@
+LIBRARY CryptBase
+EXPORTS
+  SystemFunction001=MMCBase.SystemFunction001
+  SystemFunction002=MMCBase.SystemFunction002
+  SystemFunction003=MMCBase.SystemFunction003
+  SystemFunction004=MMCBase.SystemFunction004
+  SystemFunction005=MMCBase.SystemFunction005
+  SystemFunction028=MMCBase.SystemFunction028
+  SystemFunction029=MMCBase.SystemFunction029
+  SystemFunction034=MMCBase.SystemFunction034
+  SystemFunction036=MMCBase.SystemFunction036
+  SystemFunction040=MMCBase.SystemFunction040
+  SystemFunction041=MMCBase.SystemFunction041

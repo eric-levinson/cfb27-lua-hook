@@ -13,12 +13,15 @@ APP_DIR = Path(__file__).resolve().parent
 NATIVE_RELEASE_DIR = APP_DIR / "native" / "build-final" / "Release"
 HOOK_DLL = NATIVE_RELEASE_DIR / "cfb27_live_hook.dll"
 RESPONSE_GUARD_DLL = NATIVE_RELEASE_DIR / "cfb27_response_guard.dll"
+LUA_HOST_DLL = NATIVE_RELEASE_DIR / "cfb27_lua_host.dll"
+STARTUP_PROXY_DLL = NATIVE_RELEASE_DIR / "cfb27_cryptbase_proxy.dll"
 HOOK_INJECTOR = NATIVE_RELEASE_DIR / "cfb27_hook_injector.exe"
 SCRIPT_DIR = APP_DIR / "scripts"
 PIPE_PREFIX = r"\\.\pipe\CFB27LiveEditor."
 FALLBACK_PIPE_PREFIX = r"\\.\pipe\CFB27LiveEditorFallback."
 DIRECT_FAST_PIPE_PREFIX = r"\\.\pipe\CFB27LiveEditorDirectFast."
 RESPONSE_GUARD_PIPE_PREFIX = r"\\.\pipe\CFB27ResponseGuard."
+LUA_HOST_PIPE_PREFIX = r"\\.\pipe\CFB27LuaHost."
 
 
 def native_artifacts() -> dict[str, object]:
@@ -26,6 +29,8 @@ def native_artifacts() -> dict[str, object]:
         "built": HOOK_DLL.is_file() and HOOK_INJECTOR.is_file(),
         "dll": str(HOOK_DLL),
         "responseGuardDll": str(RESPONSE_GUARD_DLL),
+        "luaHostDll": str(LUA_HOST_DLL),
+        "startupProxyDll": str(STARTUP_PROXY_DLL),
         "injector": str(HOOK_INJECTOR),
         "scriptDirectory": str(SCRIPT_DIR),
     }
@@ -134,6 +139,37 @@ def response_guard_status(pid: int) -> dict[str, object]:
     result["loaded"] = True
     result["ready"] = bool(status.get("ok"))
     return result
+
+
+def startup_lua_status(pid: int) -> dict[str, object]:
+    result: dict[str, object] = {
+        "built": LUA_HOST_DLL.is_file() and STARTUP_PROXY_DLL.is_file(),
+        "hostDll": str(LUA_HOST_DLL),
+        "proxyDll": str(STARTUP_PROXY_DLL),
+        "loaded": False,
+        "ready": False,
+    }
+    try:
+        status = _hook_command_to_pipe(pid, "STATUS", timeout_ms=250, pipe_prefix=LUA_HOST_PIPE_PREFIX)
+    except (FileNotFoundError, OSError, RuntimeError):
+        return result
+    result.update(status)
+    result["loaded"] = True
+    result["ready"] = bool(status.get("ok") and status.get("ready"))
+    return result
+
+
+def eval_startup_lua(pid: int, script: str) -> dict[str, object]:
+    if not isinstance(script, str) or not script.strip():
+        raise ValueError("Lua script is required")
+    if len(script.encode("utf-8")) > 60 * 1024:
+        raise ValueError("Lua script is too large")
+    return _hook_command_to_pipe(
+        pid,
+        f"EVAL {script}",
+        timeout_ms=5000,
+        pipe_prefix=LUA_HOST_PIPE_PREFIX,
+    )
 
 
 def _inject_dll(pid: int, dll: Path) -> str:
@@ -267,6 +303,17 @@ def resolve_lua_script(name: str) -> Path:
 
 def run_lua_script(pid: int, name: str) -> dict[str, object]:
     script = resolve_lua_script(name)
+    startup = startup_lua_status(pid)
+    if startup.get("ready"):
+        result = _hook_command_to_pipe(
+            pid,
+            f"RUN {script}",
+            timeout_ms=5000,
+            pipe_prefix=LUA_HOST_PIPE_PREFIX,
+        )
+        result["script"] = script.name
+        result["host"] = "startup"
+        return result
     attach_response_guard(pid)
     result = _hook_command_to_pipe(pid, f"RUN {script}", pipe_prefix=RESPONSE_GUARD_PIPE_PREFIX)
     result["script"] = script.name
