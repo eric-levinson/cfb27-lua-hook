@@ -1,6 +1,6 @@
 {
   "name": "cfb27-lua-hook",
-  "version": "0.1.0-dev.1",
+  "version": "0.2.0-dev.1",
   "description": "Developer CLI for the offline CFB27 Lua hook.",
   "type": "commonjs",
   "license": "MIT",
@@ -15,6 +15,6 @@
     "src"
   ],
   "dependencies": {
-    "@cfb27/lua-hook": "0.1.0-dev.1"
+    "@cfb27/lua-hook": "0.2.0-dev.1"
   }
 }

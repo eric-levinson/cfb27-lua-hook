@@ -37,6 +37,113 @@ Error response:
 - `evaluate { source }` — execute one complete multiline Lua buffer.
 - `logs { limit }` — return up to 256 recent bounded log entries.
 - `events { after, limit }` — return an ordered cursor page and `nextCursor`.
+- `registerTelemetry { types }` — add trusted structured event names for the
+  current host session.
+- `scanMemory { patternHex, maskHex, maxMatches, contextBefore,
+  contextAfter, allowUnsupportedBuild?, cursor? }` — scan one bounded page of
+  readable private memory and optionally resume from a continuation cursor.
+- `readMemory { ranges, allowUnsupportedBuild? }` — read a bounded batch of
+  readable private-memory ranges.
+
+`hello.capabilities` advertises the memory commands as `memoryScan` and
+`memoryRead`, and structured event registration as `telemetry`. They are
+read-only host operations and do not expose a write API.
+
+### Structured telemetry
+
+`registerTelemetry` accepts exactly one parameter, `types`, containing 1–16
+unique strings. Names match `^[a-z][a-z0-9_.-]{0,63}$`; `game_ready`, `tick`,
+and `log` are reserved. Registration is additive for the session and repeating
+an already registered name in a later request is idempotent. At most 16
+distinct custom names may be registered in total.
+
+Request:
+
+```json
+{"protocol":1,"id":"telemetry-1","command":"registerTelemetry","params":{"types":["probe.snapshot"]}}
+```
+
+Result:
+
+```json
+{"types":["probe.snapshot"]}
+```
+
+The SDK method is `client.registerTelemetryTypes(types)`. Both the SDK and host
+strictly validate the request and response contract. Registered Lua code may
+call `cfb.emit(type, payload)` to append exactly one event to the cursor ring;
+emission never writes to the file log.
+
+Payloads are JSON-compatible and limited to depth 4, 64 keys per object, 128
+entries per array, 1,024 bytes per string, and 16 KiB serialized. Numbers must
+be finite. Address and raw-byte keys are rejected at every object depth,
+including `address`, `addressHex`, `regionBase`, `bytesHex`, `contextAddress`,
+and `contextHex`. Lua conversion additionally rejects cycles, functions,
+userdata, threads, mixed or sparse tables, and non-string object keys.
+
+### Memory scan
+
+`patternHex` and `maskHex` are equal-length uppercase hexadecimal byte strings.
+The pattern is 8–4,096 bytes. A mask byte selects significant bits using
+`(live & mask) == (pattern & mask)`. `maxMatches` is an integer from 1 through
+64. `contextBefore` and `contextAfter` are nonnegative integers no greater than
+512, with at most 512 context bytes requested in total. One request scans at
+most 32 MiB of eligible memory in chunks no larger than 4 MiB plus boundary
+lookahead. An optional `cursor` is a canonical uppercase address identifying
+the first virtual byte not covered by the preceding page.
+
+Request:
+
+```json
+{"protocol":1,"id":"scan-1","command":"scanMemory","params":{"patternHex":"CFB27A1100A1B2C3D4E5F60718293A4B","maskHex":"FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF","maxMatches":2,"contextBefore":4,"contextAfter":4,"allowUnsupportedBuild":true}}
+```
+
+Result:
+
+```json
+{"supportedBuild":false,"complete":false,"nextCursor":"0x7FF614340000","scannedBytes":33554432,"matches":[{"address":"0x7FF612340080","regionBase":"0x7FF612340000","regionSize":65536,"protection":4,"contextAddress":"0x7FF61234007C","contextHex":"00000000CFB27A1100A1B2C3D4E5F60718293A4B00000000"}]}
+```
+
+Every successful page contains exactly `complete`, `nextCursor`,
+`scannedBytes`, `matches`, and `supportedBuild`. A partial page has
+`complete:false` and a canonical string `nextCursor`; a terminal page has
+`complete:true` and `nextCursor:null`. Completion means the address-space walk
+reached the process maximum, not that the game was paused or that multiple
+pages form an atomic snapshot. Eligible read failures return an error instead
+of silently advancing the cursor.
+
+The SDK exposes `client.scanMemoryPage(options)` for one protocol request and
+`client.scanMemory(options)` for automatic aggregation. The aggregate method
+owns continuation cursors, accepts `maxPages` from 1 through 4,096 (default
+4,096), applies `maxMatches` globally, and rejects repeated or decreasing
+cursors. The default bounds total eligible-byte work to 128 GiB. Before using a
+candidate for interpretation, re-read it and validate its expected structure;
+the live memory map can change between pages.
+
+### Memory read
+
+`ranges` contains 1–64 objects with exactly `address` and `length` keys.
+Addresses use canonical uppercase `0x[0-9A-F]+` strings without redundant
+leading zeroes. Each length is an integer from 1 through 65,536 bytes, and the
+aggregate request is capped at 262,144 bytes. Every range is validated before
+any bytes are copied, so a failure never returns partial results.
+
+Request:
+
+```json
+{"protocol":1,"id":"read-1","command":"readMemory","params":{"allowUnsupportedBuild":true,"ranges":[{"address":"0x7FF612340080","length":16}]}}
+```
+
+Result:
+
+```json
+{"supportedBuild":false,"ranges":[{"address":"0x7FF612340080","length":16,"bytesHex":"CFB27A1100A1B2C3D4E5F60718293A4B"}]}
+```
+
+Both commands reject unknown parameter keys; range objects also reject unknown
+keys. On an unsupported executable, `allowUnsupportedBuild` must be the JSON
+boolean `true` or the command returns `UNSUPPORTED_BUILD`. Successful diagnostic
+requests then return `supportedBuild:false`. This override never enables writes.
 
 The host retains at most 512 log entries and 1,024 events. Event cursors are
 monotonic for one host session. Tick events are coalesced to at most one per
@@ -48,6 +155,11 @@ Stable SDK error families include runtime availability, protocol mismatch,
 timeout, invalid request/response, script failure, installation conflict, and
 backup-verification failure. Consumers should branch on `error.code`, not error
 message text.
+
+Memory commands additionally return `MEMORY_ACCESS_DENIED` when a requested
+range is not wholly readable private memory, `SCAN_LIMIT_EXCEEDED` when the
+aggregate scan bound would be crossed, and `TOO_MANY_MATCHES` rather than
+silently truncating a scan. These errors do not include memory or region dumps.
 
 The unversioned legacy text pipe remains temporarily available for migration,
 but it is not the integration contract for new tools.

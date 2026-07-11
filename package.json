@@ -1,6 +1,6 @@
 {
   "name": "cfb27-lua-hook-workspace",
-  "version": "0.1.0-dev.1",
+  "version": "0.2.0-dev.1",
   "private": true,
   "description": "Offline CFB27 Lua hook, scripting SDK, and MMC startup tooling for PC.",
   "license": "MIT",

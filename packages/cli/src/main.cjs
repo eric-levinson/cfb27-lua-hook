@@ -15,6 +15,10 @@ Commands:
   doctor       Run read-only diagnostics
   logs          Read recent host logs
   events        Read host events after a cursor
+  memory scan   Scan bounded private readable memory (diagnostic)
+  memory read   Read bounded canonical address ranges (diagnostic)
+  telemetry register <type...>
+                Register structured telemetry type names
 
 Options:
   --game-dir <path>       College Football 27 directory
@@ -23,6 +27,14 @@ Options:
   --json                  Emit one JSON object
   --follow                Follow new log events as JSONL with --json
   --after <cursor>        Start event reads after this cursor
+  --pattern <hex>         Uppercase scan pattern bytes
+  --mask <hex>            Uppercase scan mask bytes
+  --max-matches <count>   Maximum scan matches (1-64)
+  --max-pages <count>     Maximum scan pages (1-4096; default 4096)
+  --context <bytes>       Context bytes on each side (0-256)
+  --range <address:length> Canonical read range; may be repeated
+  --allow-unsupported-build
+                          Explicitly allow unsupported-build diagnostics
   -h, --help              Show this help`;
 
 const defaultIo = {
@@ -45,6 +57,72 @@ function requireDirectory(value, label) {
   return value;
 }
 
+function requireMemoryScanOptions(options) {
+  if (!options.pattern) throw usageError('--pattern is required for memory scan');
+  if (!options.mask) throw usageError('--mask is required for memory scan');
+  if (options.maxMatches === undefined) throw usageError('--max-matches is required for memory scan');
+  if (options.context === undefined) throw usageError('--context is required for memory scan');
+  return {
+    patternHex: options.pattern,
+    maskHex: options.mask,
+    maxMatches: options.maxMatches,
+    contextBefore: options.context,
+    contextAfter: options.context,
+    maxPages: options.maxPages || 4096,
+    ...(options.allowUnsupportedBuild ? { allowUnsupportedBuild: true } : {}),
+  };
+}
+
+function rejectMisplacedDeveloperOptions(command, positionals, options) {
+  const operation = command === 'memory' ? positionals[0] : undefined;
+  const scanOptions = [
+    options.pattern, options.mask, options.maxMatches, options.maxPages, options.context,
+  ];
+  if (command !== 'memory' && (scanOptions.some((value) => value !== undefined) ||
+      options.ranges.length || options.allowUnsupportedBuild)) {
+    throw usageError('Memory diagnostic options are only valid for memory diagnostics; they are not valid for this command');
+  }
+  if (operation === 'scan' && options.ranges.length) {
+    throw usageError('--range is not valid for memory scan');
+  }
+  if (operation === 'read' && scanOptions.some((value) => value !== undefined)) {
+    throw usageError('Scan options are not valid for memory read');
+  }
+}
+
+function memoryHumanLines(command, result) {
+  if (command === 'memory scan') {
+    const count = result.matches.length;
+    return [
+      `${count} ${count === 1 ? 'match' : 'matches'}, ${result.scannedBytes} bytes scanned`,
+      ...result.matches.map((match) => `${match.address} (region ${match.regionBase})`),
+    ];
+  }
+  const bytes = result.ranges.reduce((total, range) => total + range.length, 0);
+  return [
+    `${result.ranges.length} ${result.ranges.length === 1 ? 'range' : 'ranges'}, ${bytes} bytes`,
+    ...result.ranges.map((range) => `${range.address}: ${range.length} bytes`),
+  ];
+}
+
+function printCommandSuccess(io, command, result, json) {
+  if (json) {
+    printSuccess(io, command, result, true);
+    return;
+  }
+  if (command.startsWith('memory ')) {
+    for (const line of memoryHumanLines(command, result)) io.out(line);
+    return;
+  }
+  if (command === 'telemetry register') {
+    const count = result.types.length;
+    io.out(`${count} telemetry ${count === 1 ? 'type' : 'types'} registered`);
+    for (const type of result.types) io.out(type);
+    return;
+  }
+  printSuccess(io, command, result, false);
+}
+
 async function main(argv, { sdk = require('@cfb27/lua-hook'), io = defaultIo } = {}) {
   let parsed = { json: false };
   try {
@@ -55,6 +133,7 @@ async function main(argv, { sdk = require('@cfb27/lua-hook'), io = defaultIo } =
       io.out(HELP);
       return 0;
     }
+    rejectMisplacedDeveloperOptions(command, positionals, options);
 
     let result;
     if (command === 'install') {
@@ -116,11 +195,37 @@ async function main(argv, { sdk = require('@cfb27/lua-hook'), io = defaultIo } =
         after: options.after || 0,
         limit: 256,
       });
+    } else if (command === 'memory') {
+      const [operation, ...extra] = positionals;
+      if (operation === 'scan') {
+        if (extra.length) throw usageError('memory scan does not accept positional arguments');
+        const scanOptions = requireMemoryScanOptions(options);
+        const game = await sdk.discoverGame();
+        result = await sdk.createClient({ pid: game.pid, timeoutMs: 10_000 }).scanMemory(scanOptions);
+      } else if (operation === 'read') {
+        if (extra.length) throw usageError('memory read does not accept positional arguments');
+        if (!options.ranges.length) throw usageError('memory read requires at least one --range');
+        const readOptions = { ranges: options.ranges };
+        if (options.allowUnsupportedBuild) readOptions.allowUnsupportedBuild = true;
+        const game = await sdk.discoverGame();
+        result = await sdk.createClient({ pid: game.pid }).readMemory(readOptions);
+      } else {
+        throw usageError('memory requires scan or read');
+      }
+    } else if (command === 'telemetry') {
+      const [operation, ...types] = positionals;
+      if (operation !== 'register') throw usageError('telemetry requires register');
+      if (!types.length) throw usageError('telemetry register requires at least one type name');
+      const game = await sdk.discoverGame();
+      result = await sdk.createClient({ pid: game.pid }).registerTelemetryTypes(types);
     } else {
       throw usageError(`Unknown command: ${command}`);
     }
 
-    printSuccess(io, command, result, json);
+    const displayCommand = command === 'memory' || command === 'telemetry'
+      ? `${command} ${positionals[0]}`
+      : command;
+    printCommandSuccess(io, displayCommand, result, json);
     return 0;
   } catch (error) {
     printError(io, error, parsed.json === true);

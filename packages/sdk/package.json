@@ -1,6 +1,6 @@
 {
   "name": "@cfb27/lua-hook",
-  "version": "0.1.0-dev.1",
+  "version": "0.2.0-dev.1",
   "description": "Node SDK for the offline CFB27 Lua hook.",
   "main": "index.cjs",
   "type": "commonjs",

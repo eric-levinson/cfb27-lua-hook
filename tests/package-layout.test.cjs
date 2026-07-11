@@ -21,7 +21,7 @@ test('SDK and CLI package identities are stable', () => {
   const sdk = readJson('packages/sdk/package.json');
   const cli = readJson('packages/cli/package.json');
   assert.equal(sdk.name, '@cfb27/lua-hook');
-  assert.equal(sdk.version, '0.1.0-dev.1');
+  assert.equal(sdk.version, '0.2.0-dev.1');
   assert.equal(cli.name, 'cfb27-lua-hook');
   assert.equal(cli.bin.cfb27lua, 'bin/cfb27lua.cjs');
 });

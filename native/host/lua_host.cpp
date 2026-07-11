@@ -2,23 +2,30 @@
 #include <tlhelp32.h>
 #include <bcrypt.h>
 
+#include "memory_reader.h"
 #include "protocol.h"
+#include "telemetry.h"
 
 #include <array>
 #include <atomic>
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <deque>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <initializer_list>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 extern "C" {
@@ -31,7 +38,7 @@ namespace {
 
 constexpr wchar_t kPipePrefix[] = L"\\\\.\\pipe\\CFB27LuaHost.";
 constexpr wchar_t kV1PipePrefix[] = L"\\\\.\\pipe\\CFB27LuaHost.v1.";
-constexpr char kHostVersion[] = "0.1.0-dev.1";
+constexpr char kHostVersion[] = "0.2.0-dev.1";
 constexpr std::uintmax_t kSupportedExecutableSize = 247845776;
 constexpr char kSupportedExecutableSha256[] = "9E654AD49C4702D8F9FA4E38FD1110ABE657DD38926D4124B30C70E7D29ADFE8";
 constexpr DWORD kTickMilliseconds = 100;
@@ -319,6 +326,228 @@ int LuaLog(lua_State* state) {
   return 0;
 }
 
+bool AddLuaTelemetryBytes(std::size_t bytes, std::size_t& total, std::string& error) {
+  constexpr std::size_t kMaxSerializedBytes = 16 * 1024;
+  if (bytes > kMaxSerializedBytes - total) {
+    error = "serialized telemetry payload must not exceed 16 KiB";
+    return false;
+  }
+  total += bytes;
+  return true;
+}
+
+bool AddLuaTelemetryValueBytes(const cfb27::protocol::Json& value,
+                               std::size_t& total, std::string& error) {
+  try {
+    return AddLuaTelemetryBytes(value.dump().size(), total, error);
+  } catch (const std::exception&) {
+    error = "telemetry strings must contain valid UTF-8";
+    return false;
+  }
+}
+
+bool IsForbiddenTelemetryKey(std::string_view key) {
+  return key == "address" || key == "addressHex" || key == "regionBase" ||
+         key == "bytesHex" || key == "contextAddress" || key == "contextHex";
+}
+
+bool LuaToTelemetryJson(lua_State* state, int index, std::size_t depth,
+                        std::unordered_set<const void*>& visiting,
+                        std::size_t& serialized_bytes,
+                        cfb27::protocol::Json& output, std::string& error) {
+  using Json = cfb27::protocol::Json;
+  constexpr std::size_t kMaxDepth = 4;
+  constexpr std::size_t kMaxObjectKeys = 64;
+  constexpr std::size_t kMaxArrayEntries = 128;
+  constexpr std::size_t kMaxStringBytes = 1024;
+
+  index = lua_absindex(state, index);
+  switch (lua_type(state, index)) {
+    case LUA_TNIL:
+      output = nullptr;
+      return AddLuaTelemetryValueBytes(output, serialized_bytes, error);
+    case LUA_TBOOLEAN:
+      output = lua_toboolean(state, index) != 0;
+      return AddLuaTelemetryValueBytes(output, serialized_bytes, error);
+    case LUA_TNUMBER:
+      if (lua_isinteger(state, index)) {
+        output = lua_tointeger(state, index);
+        return AddLuaTelemetryValueBytes(output, serialized_bytes, error);
+      } else {
+        const auto value = lua_tonumber(state, index);
+        if (!std::isfinite(value)) {
+          error = "telemetry numbers must be finite";
+          return false;
+        }
+        output = value;
+        return AddLuaTelemetryValueBytes(output, serialized_bytes, error);
+      }
+    case LUA_TSTRING: {
+      std::size_t length = 0;
+      const char* value = lua_tolstring(state, index, &length);
+      if (length > kMaxStringBytes) {
+        error = "telemetry strings must not exceed 1024 bytes";
+        return false;
+      }
+      output = std::string(value, length);
+      return AddLuaTelemetryValueBytes(output, serialized_bytes, error);
+    }
+    case LUA_TTABLE:
+      break;
+    default:
+      error = "telemetry payload contains an unsupported Lua value";
+      return false;
+  }
+
+  if (depth > kMaxDepth) {
+    error = "telemetry payload depth must not exceed 4";
+    return false;
+  }
+  const void* identity = lua_topointer(state, index);
+  if (!visiting.insert(identity).second) {
+    error = "telemetry payload contains a table cycle";
+    return false;
+  }
+  if (!AddLuaTelemetryBytes(2, serialized_bytes, error)) {
+    visiting.erase(identity);
+    return false;
+  }
+
+  bool saw_array_key = false;
+  bool saw_object_key = false;
+  std::vector<std::pair<std::size_t, Json>> array_items;
+  Json object = Json::object();
+  bool valid = true;
+  lua_pushnil(state);
+  while (lua_next(state, index) != 0) {
+    if (lua_type(state, -2) == LUA_TNUMBER && lua_isinteger(state, -2)) {
+      if (saw_object_key) {
+        error = "telemetry tables must not mix array and object keys";
+        lua_pop(state, 1);
+        valid = false;
+        break;
+      }
+      saw_array_key = true;
+      const auto key = lua_tointeger(state, -2);
+      if (key < 1 || static_cast<std::uint64_t>(key) > kMaxArrayEntries) {
+        error = "telemetry arrays must be dense and contain at most 128 entries";
+        lua_pop(state, 1);
+        valid = false;
+        break;
+      }
+      if (!array_items.empty() && !AddLuaTelemetryBytes(1, serialized_bytes, error)) {
+        lua_pop(state, 1);
+        valid = false;
+        break;
+      }
+    } else if (lua_type(state, -2) == LUA_TSTRING) {
+      if (saw_array_key) {
+        error = "telemetry tables must not mix array and object keys";
+        lua_pop(state, 1);
+        valid = false;
+        break;
+      }
+      saw_object_key = true;
+      std::size_t key_length = 0;
+      const char* key = lua_tolstring(state, -2, &key_length);
+      if (key_length > kMaxStringBytes || object.size() >= kMaxObjectKeys) {
+        error = "telemetry objects must contain at most 64 bounded string keys";
+        lua_pop(state, 1);
+        valid = false;
+        break;
+      }
+      const std::string key_text(key, key_length);
+      if (IsForbiddenTelemetryKey(key_text)) {
+        error = "telemetry payloads must not contain address or raw-byte keys";
+        lua_pop(state, 1);
+        valid = false;
+        break;
+      }
+      Json encoded_key = key_text;
+      const std::size_t punctuation = object.empty() ? 1 : 2;
+      if (!AddLuaTelemetryValueBytes(encoded_key, serialized_bytes, error) ||
+          !AddLuaTelemetryBytes(punctuation, serialized_bytes, error)) {
+        lua_pop(state, 1);
+        valid = false;
+        break;
+      }
+    } else {
+      error = "telemetry object keys must be strings";
+      lua_pop(state, 1);
+      valid = false;
+      break;
+    }
+    Json item;
+    if (!LuaToTelemetryJson(state, -1, depth + 1, visiting, serialized_bytes,
+                            item, error)) {
+      lua_pop(state, 1);
+      valid = false;
+      break;
+    }
+    if (saw_array_key) {
+      array_items.emplace_back(
+          static_cast<std::size_t>(lua_tointeger(state, -2)), std::move(item));
+    } else {
+      std::size_t key_length = 0;
+      const char* key = lua_tolstring(state, -2, &key_length);
+      object[std::string(key, key_length)] = std::move(item);
+    }
+    lua_pop(state, 1);
+  }
+  if (!valid) {
+    lua_settop(state, lua_gettop(state) - 1);
+    visiting.erase(identity);
+    return false;
+  }
+
+  if (saw_array_key) {
+    if (array_items.size() > kMaxArrayEntries) {
+      error = "telemetry arrays must not exceed 128 entries";
+      visiting.erase(identity);
+      return false;
+    }
+    std::sort(array_items.begin(), array_items.end(),
+              [](const auto& left, const auto& right) { return left.first < right.first; });
+    output = Json::array();
+    for (std::size_t item_index = 0; item_index < array_items.size(); ++item_index) {
+      if (array_items[item_index].first != item_index + 1) {
+        error = "telemetry arrays must not be sparse";
+        visiting.erase(identity);
+        return false;
+      }
+      output.push_back(std::move(array_items[item_index].second));
+    }
+  } else {
+    output = std::move(object);
+  }
+  visiting.erase(identity);
+  return true;
+}
+
+int LuaEmit(lua_State* state) {
+  if (lua_gettop(state) != 2 || lua_type(state, 1) != LUA_TSTRING) {
+    return luaL_error(state, "cfb.emit requires a telemetry type and payload");
+  }
+  std::size_t type_length = 0;
+  const char* type_value = lua_tolstring(state, 1, &type_length);
+  const std::string type(type_value, type_length);
+  if (!cfb27::telemetry::IsTelemetryTypeRegistered(type)) {
+    return luaL_error(state, "telemetry type is not registered");
+  }
+
+  cfb27::protocol::Json payload;
+  std::string error;
+  std::unordered_set<const void*> visiting;
+  std::size_t serialized_bytes = 0;
+  if (!LuaToTelemetryJson(state, 2, 1, visiting, serialized_bytes, payload, error) ||
+      !cfb27::telemetry::ValidateTelemetryPayload(payload, error)) {
+    return luaL_error(state, "%s", error.c_str());
+  }
+  AppendEvent(type, std::move(payload));
+  lua_pushboolean(state, 1);
+  return 1;
+}
+
 int LuaOn(lua_State* state) {
   const std::string event = luaL_checkstring(state, 1);
   luaL_checktype(state, 2, LUA_TFUNCTION);
@@ -350,6 +579,7 @@ void RegisterApi(lua_State* state) {
   lua_pushcfunction(state, LuaWriteU8); lua_setfield(state, -2, "write_u8");
   lua_pushcfunction(state, LuaAobScan); lua_setfield(state, -2, "aob_scan");
   lua_pushcfunction(state, LuaLog); lua_setfield(state, -2, "log");
+  lua_pushcfunction(state, LuaEmit); lua_setfield(state, -2, "emit");
   lua_pushcfunction(state, LuaOn); lua_setfield(state, -2, "on");
   lua_setglobal(state, "cfb");
 }
@@ -423,6 +653,108 @@ std::optional<std::size_t> ReadLimit(
   return std::nullopt;
 }
 
+bool HasOnlyKeys(const cfb27::protocol::Json& value,
+                 std::initializer_list<std::string_view> allowed) {
+  for (const auto& [key, unused] : value.items()) {
+    if (std::find(allowed.begin(), allowed.end(), key) == allowed.end()) return false;
+  }
+  return true;
+}
+
+std::optional<std::size_t> ReadUnsigned(
+    const cfb27::protocol::Json& params, std::string_view key,
+    std::size_t minimum, std::size_t maximum) {
+  const auto found = params.find(std::string(key));
+  if (found == params.end()) return std::nullopt;
+  std::uint64_t value = 0;
+  if (found->is_number_unsigned()) {
+    value = found->get<std::uint64_t>();
+  } else if (found->is_number_integer()) {
+    const auto signed_value = found->get<std::int64_t>();
+    if (signed_value < 0) return std::nullopt;
+    value = static_cast<std::uint64_t>(signed_value);
+  } else {
+    return std::nullopt;
+  }
+  if (value < minimum || value > maximum ||
+      value > std::numeric_limits<std::size_t>::max()) return std::nullopt;
+  return static_cast<std::size_t>(value);
+}
+
+std::optional<std::vector<std::uint8_t>> HexToBytes(
+    const cfb27::protocol::Json& value) {
+  if (!value.is_string()) return std::nullopt;
+  const auto& text = value.get_ref<const std::string&>();
+  if (text.empty() || text.size() % 2 != 0) return std::nullopt;
+  auto nibble = [](char character) -> std::optional<std::uint8_t> {
+    if (character >= '0' && character <= '9') {
+      return static_cast<std::uint8_t>(character - '0');
+    }
+    if (character >= 'A' && character <= 'F') {
+      return static_cast<std::uint8_t>(character - 'A' + 10);
+    }
+    return std::nullopt;
+  };
+  std::vector<std::uint8_t> bytes;
+  bytes.reserve(text.size() / 2);
+  for (std::size_t index = 0; index < text.size(); index += 2) {
+    const auto high = nibble(text[index]);
+    const auto low = nibble(text[index + 1]);
+    if (!high || !low) return std::nullopt;
+    bytes.push_back(static_cast<std::uint8_t>((*high << 4) | *low));
+  }
+  return bytes;
+}
+
+std::string BytesToHex(const std::vector<std::uint8_t>& bytes) {
+  constexpr char digits[] = "0123456789ABCDEF";
+  std::string encoded(bytes.size() * 2, '0');
+  for (std::size_t index = 0; index < bytes.size(); ++index) {
+    encoded[index * 2] = digits[bytes[index] >> 4];
+    encoded[index * 2 + 1] = digits[bytes[index] & 0x0F];
+  }
+  return encoded;
+}
+
+std::string FormatCanonicalAddress(std::uintptr_t address) {
+  char digits[sizeof(address) * 2]{};
+  const auto [end, error] = std::to_chars(
+      std::begin(digits), std::end(digits), address, 16);
+  if (error != std::errc{}) return {};
+  std::string result("0x");
+  result.reserve(2 + static_cast<std::size_t>(end - digits));
+  for (auto current = digits; current != end; ++current) {
+    result.push_back(*current >= 'a' && *current <= 'f'
+                         ? static_cast<char>(*current - 'a' + 'A')
+                         : *current);
+  }
+  return result;
+}
+
+std::optional<std::string> CanonicalAddress(std::string_view text) {
+  if (text.size() < 3 || text[0] != '0' || text[1] != 'x') return std::nullopt;
+  const auto parsed = cfb27::memory::ParseAddress(text);
+  if (!parsed) return std::nullopt;
+  const auto formatted = FormatCanonicalAddress(*parsed);
+  if (formatted != text) return std::nullopt;
+  return formatted;
+}
+
+cfb27::protocol::Json MemoryError(
+    const std::string& id, std::string_view code) {
+  using cfb27::protocol::ErrorResponse;
+  if (code == "MEMORY_ACCESS_DENIED") {
+    return ErrorResponse(id, "MEMORY_ACCESS_DENIED", "Requested memory is not readable");
+  }
+  if (code == "SCAN_LIMIT_EXCEEDED") {
+    return ErrorResponse(id, "SCAN_LIMIT_EXCEEDED", "Memory scan byte limit exceeded");
+  }
+  if (code == "TOO_MANY_MATCHES") {
+    return ErrorResponse(id, "TOO_MANY_MATCHES", "Memory scan found too many matches");
+  }
+  return ErrorResponse(id, "INVALID_REQUEST", "Invalid memory request");
+}
+
 cfb27::protocol::Json LogsResult(std::size_t limit) {
   cfb27::protocol::Json logs = cfb27::protocol::Json::array();
   std::lock_guard lock(g_event_mutex);
@@ -483,7 +815,8 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
         {"hostVersion", kHostVersion},
         {"supportedBuild", supported},
         {"writesAllowed", writes_allowed},
-        {"capabilities", {"status", "runScript", "evaluate", "logs", "events"}},
+        {"capabilities", {"status", "runScript", "evaluate", "logs", "events",
+                          "memoryScan", "memoryRead", "telemetry"}},
     });
   }
 
@@ -500,6 +833,163 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
         {"scriptsRun", g_scripts_run.load(std::memory_order_acquire)},
         {"ticks", g_ticks.load(std::memory_order_acquire)},
         {"lastError", std::move(last_error)},
+    });
+  }
+
+  if (command == "registerTelemetry") {
+    if (!HasOnlyKeys(params, {"types"}) || !params.contains("types") ||
+        !params["types"].is_array() || params["types"].empty() ||
+        params["types"].size() > 16) {
+      return ErrorResponse(id, "INVALID_REQUEST", "Invalid registerTelemetry params");
+    }
+    std::vector<std::string> types;
+    types.reserve(params["types"].size());
+    for (const auto& type : params["types"]) {
+      if (!type.is_string()) {
+        return ErrorResponse(id, "INVALID_REQUEST", "Telemetry types must be strings");
+      }
+      types.push_back(type.get<std::string>());
+    }
+    std::string error;
+    if (!cfb27::telemetry::RegisterTelemetryTypes(types, error)) {
+      return ErrorResponse(id, "INVALID_REQUEST", std::move(error));
+    }
+    return SuccessResponse(id, {{"types", std::move(types)}});
+  }
+
+  if (command == "scanMemory") {
+    if (params.contains("allowUnsupportedBuild") &&
+        !params["allowUnsupportedBuild"].is_boolean()) {
+      return ErrorResponse(id, "INVALID_REQUEST",
+                           "allowUnsupportedBuild must be a boolean");
+    }
+    const bool allow_unsupported = params.contains("allowUnsupportedBuild") &&
+        params["allowUnsupportedBuild"].get<bool>();
+    if (!supported && !allow_unsupported) {
+      return ErrorResponse(id, "UNSUPPORTED_BUILD",
+                           "Memory scanning requires a supported build or explicit override");
+    }
+    if (!HasOnlyKeys(params, {"patternHex", "maskHex", "maxMatches", "contextBefore",
+                              "contextAfter", "allowUnsupportedBuild", "cursor"}) ||
+        !params.contains("patternHex") || !params.contains("maskHex")) {
+      return ErrorResponse(id, "INVALID_REQUEST", "Invalid scanMemory params");
+    }
+    auto pattern = HexToBytes(params["patternHex"]);
+    auto mask = HexToBytes(params["maskHex"]);
+    const auto max_matches = ReadUnsigned(
+        params, "maxMatches", 1, cfb27::memory::kMaxMatches);
+    const auto context_before = ReadUnsigned(
+        params, "contextBefore", 0, cfb27::memory::kMaxContextBytes);
+    const auto context_after = ReadUnsigned(
+        params, "contextAfter", 0, cfb27::memory::kMaxContextBytes);
+    if (!pattern || pattern->size() < cfb27::memory::kMinPatternBytes ||
+        pattern->size() > cfb27::memory::kMaxPatternBytes || !mask ||
+        mask->size() != pattern->size() || !max_matches || !context_before ||
+        !context_after || *context_before > cfb27::memory::kMaxContextBytes - *context_after) {
+      return ErrorResponse(id, "INVALID_REQUEST", "Invalid scanMemory params");
+    }
+
+    std::optional<std::string> cursor;
+    if (params.contains("cursor")) {
+      if (!params["cursor"].is_string()) {
+        return ErrorResponse(id, "INVALID_REQUEST", "Invalid scanMemory params");
+      }
+      cursor = CanonicalAddress(params["cursor"].get_ref<const std::string&>());
+      if (!cursor) {
+        return ErrorResponse(id, "INVALID_REQUEST", "Invalid scanMemory params");
+      }
+    }
+
+    const auto scan = cfb27::memory::ScanPrivateMemory({
+        .pattern = std::move(*pattern),
+        .mask = std::move(*mask),
+        .max_matches = *max_matches,
+        .context_before = *context_before,
+        .context_after = *context_after,
+        .cursor = std::move(cursor),
+    });
+    if (!scan.code.empty()) return MemoryError(id, scan.code);
+
+    Json matches = Json::array();
+    for (const auto& match : scan.matches) {
+      const auto address = cfb27::memory::ParseAddress(match.address);
+      const auto region_base = cfb27::memory::ParseAddress(match.region_base);
+      const auto context_address = cfb27::memory::ParseAddress(match.context_address);
+      if (!address || !region_base || !context_address) {
+        return ErrorResponse(id, "MEMORY_ACCESS_DENIED", "Memory scan returned an invalid address");
+      }
+      matches.push_back({
+          {"address", FormatCanonicalAddress(*address)},
+          {"regionBase", FormatCanonicalAddress(*region_base)},
+          {"regionSize", match.region_size},
+          {"protection", match.protection},
+          {"contextAddress", FormatCanonicalAddress(*context_address)},
+          {"contextHex", BytesToHex(match.context)},
+      });
+    }
+    return SuccessResponse(id, {
+        {"supportedBuild", supported},
+        {"complete", scan.complete},
+        {"nextCursor", scan.next_cursor ? Json(*scan.next_cursor) : Json(nullptr)},
+        {"scannedBytes", scan.scanned_bytes},
+        {"matches", std::move(matches)},
+    });
+  }
+
+  if (command == "readMemory") {
+    if (params.contains("allowUnsupportedBuild") &&
+        !params["allowUnsupportedBuild"].is_boolean()) {
+      return ErrorResponse(id, "INVALID_REQUEST",
+                           "allowUnsupportedBuild must be a boolean");
+    }
+    const bool allow_unsupported = params.contains("allowUnsupportedBuild") &&
+        params["allowUnsupportedBuild"].get<bool>();
+    if (!supported && !allow_unsupported) {
+      return ErrorResponse(id, "UNSUPPORTED_BUILD",
+                           "Memory reads require a supported build or explicit override");
+    }
+    if (!HasOnlyKeys(params, {"ranges", "allowUnsupportedBuild"}) ||
+        !params.contains("ranges") || !params["ranges"].is_array() ||
+        params["ranges"].empty() ||
+        params["ranges"].size() > cfb27::memory::kMaxReadRanges) {
+      return ErrorResponse(id, "INVALID_REQUEST", "Invalid readMemory params");
+    }
+
+    std::vector<cfb27::memory::ReadRange> ranges;
+    ranges.reserve(params["ranges"].size());
+    std::size_t total_bytes = 0;
+    for (const auto& range : params["ranges"]) {
+      if (!range.is_object() || !HasOnlyKeys(range, {"address", "length"}) ||
+          !range.contains("address") || !range["address"].is_string()) {
+        return ErrorResponse(id, "INVALID_REQUEST", "Invalid readMemory range");
+      }
+      const auto address = CanonicalAddress(range["address"].get_ref<const std::string&>());
+      const auto length = ReadUnsigned(
+          range, "length", 1, cfb27::memory::kMaxReadRangeBytes);
+      if (!address || !length || total_bytes > cfb27::memory::kMaxReadBytes - *length) {
+        return ErrorResponse(id, "INVALID_REQUEST", "Invalid readMemory range");
+      }
+      total_bytes += *length;
+      ranges.push_back({*address, *length});
+    }
+
+    const auto read = cfb27::memory::ReadMemoryBatch(ranges);
+    if (!read.ok) return MemoryError(id, read.code);
+    Json results = Json::array();
+    for (const auto& range : read.ranges) {
+      const auto address = cfb27::memory::ParseAddress(range.address);
+      if (!address) {
+        return ErrorResponse(id, "MEMORY_ACCESS_DENIED", "Memory read returned an invalid address");
+      }
+      results.push_back({
+          {"address", FormatCanonicalAddress(*address)},
+          {"length", range.bytes.size()},
+          {"bytesHex", BytesToHex(range.bytes)},
+      });
+    }
+    return SuccessResponse(id, {
+        {"supportedBuild", supported},
+        {"ranges", std::move(results)},
     });
   }
 

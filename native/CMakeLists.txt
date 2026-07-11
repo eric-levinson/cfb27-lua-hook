@@ -45,7 +45,9 @@ set_target_properties(lua54 PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 add_library(cfb27_lua_host SHARED
   host/lua_host.cpp
+  host/memory_reader.cpp
   host/protocol.cpp
+  host/telemetry.cpp
 )
 target_compile_features(cfb27_lua_host PRIVATE cxx_std_20)
 target_compile_definitions(cfb27_lua_host PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -68,3 +70,20 @@ target_compile_features(cfb27_protocol_smoke PRIVATE cxx_std_20)
 target_compile_definitions(cfb27_protocol_smoke PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(cfb27_protocol_smoke PRIVATE nlohmann_json::nlohmann_json)
 target_link_options(cfb27_protocol_smoke PRIVATE /STACK:1048576)
+
+add_executable(cfb27_memory_reader_smoke
+  smoke/memory_reader_smoke.cpp
+  host/memory_reader.cpp
+)
+target_compile_features(cfb27_memory_reader_smoke PRIVATE cxx_std_20)
+target_compile_definitions(cfb27_memory_reader_smoke PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_options(cfb27_memory_reader_smoke PRIVATE /STACK:1048576)
+
+add_executable(cfb27_telemetry_smoke
+  smoke/telemetry_smoke.cpp
+  host/telemetry.cpp
+)
+target_compile_features(cfb27_telemetry_smoke PRIVATE cxx_std_20)
+target_compile_definitions(cfb27_telemetry_smoke PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(cfb27_telemetry_smoke PRIVATE nlohmann_json::nlohmann_json)
+target_link_options(cfb27_telemetry_smoke PRIVATE /STACK:1048576)

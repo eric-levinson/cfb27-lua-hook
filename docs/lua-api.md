@@ -17,6 +17,10 @@ local changed = cfb.write_u8(address, expected, replacement)
 
 cfb.log("script loaded")
 
+-- The trusted main-process client must register this type first with
+-- client.registerTelemetryTypes(["probe.snapshot"]).
+cfb.emit("probe.snapshot", { sequence = 1, stable = true })
+
 cfb.on("game_ready", function()
   cfb.log("game ready")
 end)
@@ -29,6 +33,24 @@ end)
 Supported callback names are `game_ready` and `tick`. The host runs `tick`
 callbacks approximately every 100 ms. The event protocol coalesces observable
 tick events to at most one per second.
+
+## Structured telemetry
+
+`cfb.emit(type, payload)` appends exactly one structured event to the existing
+cursor-paged event ring and returns `true`. It does not write to the host log.
+The type must first be registered for the host session through the
+`registerTelemetry` protocol command or SDK `registerTelemetryTypes(types)`.
+Custom types use `^[a-z][a-z0-9_.-]{0,63}$`; `game_ready`, `tick`, and `log` are
+reserved, and no more than 16 distinct custom types may be registered per
+session.
+
+Payloads may contain Lua nil, booleans, finite numbers, strings, dense arrays,
+and string-keyed objects. Tables are converted recursively and must not be
+cyclic, sparse, mixed between array and object keys, or contain unsupported Lua
+values. Limits are depth 4, 64 keys per object, 128 entries per array, 1,024
+bytes per string, and 16 KiB after JSON serialization. Address and raw-byte
+fields are rejected at every depth, including `address`, `addressHex`,
+`regionBase`, `bytesHex`, `contextAddress`, and `contextHex`.
 
 ## Script execution
 

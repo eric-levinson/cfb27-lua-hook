@@ -5,6 +5,8 @@ on: [push, pull_request]
 jobs:
   verify:
     runs-on: windows-latest
+    env:
+      CFB27_NATIVE_ARTIFACTS: ${{ github.workspace }}\native\build-release\Release
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -14,12 +16,14 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm test
-      - run: cmake -S native -B native/build-active -A x64
-      - run: cmake --build native/build-active --config Release
-      - run: native/build-active/Release/cfb27_startup_smoke.exe native/build-active/Release/cfb27_lua_host.dll
-      - run: native/build-active/Release/cfb27_protocol_smoke.exe native/build-active/Release/cfb27_lua_host.dll
+      - run: cmake -S native -B native/build-release -A x64
+      - run: cmake --build native/build-release --config Release
+      - run: native/build-release/Release/cfb27_startup_smoke.exe native/build-release/Release/cfb27_lua_host.dll
+      - run: native/build-release/Release/cfb27_memory_reader_smoke.exe
+      - run: native/build-release/Release/cfb27_telemetry_smoke.exe
+      - run: native/build-release/Release/cfb27_protocol_smoke.exe native/build-release/Release/cfb27_lua_host.dll
       - run: npm run pack:preview
       - uses: actions/upload-artifact@v4
         with:
-          name: cfb27-lua-hook-0.1.0-dev.1
+          name: cfb27-lua-hook-0.2.0-dev.1
           path: dist/

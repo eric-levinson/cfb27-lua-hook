@@ -29,3 +29,104 @@ a smoke executable with the same one-MiB stack reserve.
 
 Earlier request-detour and save-editor findings are retained separately in
 `legacy-hook-findings.md` and the repository archive.
+
+## Read-only discovery preview verified on July 11, 2026
+
+- The manually tested process was PID `21900`; `CollegeFB27.exe` matched the
+  supported SHA-256 above. The installed forwarding proxy SHA-256 was
+  `4638D7E54A6715538119254069B075C94EB7AB41A6914907AAD96750ABD0F756`;
+  the manually tested host SHA-256 was
+  `1420F4BCAA089153E671FD41D7B89F3162EFF8AAD94B4D1EFD18039E6590D3CE`.
+- The live hello response advertised `memoryScan`, `memoryRead`, and
+  `telemetry` capabilities. No memory write was attempted during this gate.
+- An initial automatic scan failed between pages with `ENOENT`. Retrying with
+  the corrected SDK-only continuation handling completed the scan; this was a
+  client retry correction, not a host reinstall.
+- The complete scan covered `10,670,854,144` eligible bytes in `69,379` ms and
+  returned three candidates. Under the 32 MiB page contract, that is exactly
+  319 pages: 318 full pages plus one 544,768-byte terminal page. This count is
+  derived from the retained completed-byte total rather than a separate live
+  page counter. Batch re-read confirmed the exact 16-byte
+  sentinel at `0x25DDC14D0` and `0x34CC50048`; the transient candidate at
+  `0x273FEB930` had changed and was correctly rejected.
+- Registered telemetry sequence `2` appeared exactly once while the event
+  cursor advanced from `718` to `720`.
+- After entering Recruiting and returning to the Dynasty hub, a 639-second
+  responsiveness watch retained PID `21900`. Tick count advanced from `8632`
+  to `14986`, the event cursor advanced from `871` to `1506`, and no error was
+  observed.
+
+The native version bump and final typed-parameter contract correction performed
+after this manual gate necessarily change the final host binary hash. That
+final packaged hash was verified by the automated release gate in the final
+section, but was not the binary exercised by this manual live session.
+
+### Retained manual commands
+
+The sentinel was allocated without embedding its byte sequence as a literal in
+the Lua source:
+
+```powershell
+node packages/cli/bin/cfb27lua.cjs eval "_G.__cfb27_manual_sentinel = string.char(199,91,39,161,14,210,76,147,184,6,253,113,42,229,56,143)" --json
+```
+
+The complete paged scan used the exact pattern, mask, match, context, page, and
+JSON controls below:
+
+```powershell
+$scan = node packages/cli/bin/cfb27lua.cjs memory scan `
+  --pattern C75B27A10ED24C93B806FD712AE5388F `
+  --mask FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF `
+  --max-matches 8 --context 8 --max-pages 4096 --json | ConvertFrom-Json
+```
+
+All three returned addresses were batch re-read in one SDK request (the CLI
+accepts one `--range` per address):
+
+```powershell
+node packages/cli/bin/cfb27lua.cjs memory read `
+  --range "0x25DDC14D0:16" `
+  --range "0x273FEB930:16" `
+  --range "0x34CC50048:16" --json
+```
+
+Telemetry was registered, emitted once, and read using cursor pagination:
+
+```powershell
+node packages/cli/bin/cfb27lua.cjs events --after 718 --json
+node packages/cli/bin/cfb27lua.cjs telemetry register probe.snapshot --json
+node packages/cli/bin/cfb27lua.cjs eval "cfb.emit('probe.snapshot', {sequence=2, stable=true})" --json
+node packages/cli/bin/cfb27lua.cjs events --after 718 --json
+```
+
+Responsiveness was checked by polling `status --json` and cursor-paged
+`events --after <lastCursor> --json` throughout the 639-second watch, while
+also confirming PID `21900` remained alive and the Dynasty UI remained usable:
+
+```powershell
+node packages/cli/bin/cfb27lua.cjs status --json
+node packages/cli/bin/cfb27lua.cjs events --after 871 --json
+```
+
+### Final automated release artifacts
+
+After the manual gate, the final native rebuild and typed-parameter contract
+correction passed the complete Node suite, Windows x64 release build, startup,
+memory-reader, telemetry, and framed-protocol smokes, package preview, checksum
+verification, and archive inspection. The packager was explicitly bound to that
+build's absolute `Release` directory. Its retained SHA-256 values are:
+
+- Forwarding proxy: `4638D7E54A6715538119254069B075C94EB7AB41A6914907AAD96750ABD0F756`
+- Final host: `72C4CF08BA19F526F9E89F5B54F7EE70C3B5B630D9C7BA4658523F862AF5CB98`
+- CLI tarball: `A8FA2C550FCC85A51070C3F937CB6CD3A6FC0DC0213037D55C0EDFABB6CB7494`
+- SDK tarball: `94527FC3D1D832001647E176FEB0CA5D025C4451CACCF750376B3309627A92A8`
+
+The ZIP checksum is generated externally in `dist/SHA256SUMS.txt` after the
+archive is complete. It cannot be embedded in this document because this file
+is itself included in the ZIP; embedding that value would change the archive
+being hashed.
+
+The final host above was automated- and smoke-tested after the version bump and
+final contract correction, but it was not manually live-tested in CFB27. The
+manual evidence in this document applies to host
+`1420F4BCAA089153E671FD41D7B89F3162EFF8AAD94B4D1EFD18039E6590D3CE`.
