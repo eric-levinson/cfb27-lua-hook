@@ -2,13 +2,72 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 
 using Json = nlohmann::json;
+
+namespace {
+
+constexpr char kSentinelHex[] = "CFB27A1100A1B2C3D4E5F60718293A4B";
+constexpr std::array<std::uint8_t, 16> kSentinel{
+    0xCF, 0xB2, 0x7A, 0x11, 0x00, 0xA1, 0xB2, 0xC3,
+    0xD4, 0xE5, 0xF6, 0x07, 0x18, 0x29, 0x3A, 0x4B,
+};
+
+class Allocation {
+ public:
+  explicit Allocation(std::size_t size)
+      : address_(VirtualAlloc(nullptr, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE)) {}
+  ~Allocation() {
+    if (address_) VirtualFree(address_, 0, MEM_RELEASE);
+  }
+  Allocation(const Allocation&) = delete;
+  Allocation& operator=(const Allocation&) = delete;
+  void* get() const { return address_; }
+
+ private:
+  void* address_{};
+};
+
+std::string FormatAddress(std::uintptr_t address) {
+  std::ostringstream out;
+  out << "0x" << std::uppercase << std::hex << address;
+  return out.str();
+}
+
+bool IsCanonicalAddress(const Json& value) {
+  if (!value.is_string()) return false;
+  const auto text = value.get<std::string>();
+  if (text.size() < 3 || text[0] != '0' || text[1] != 'x' || text[2] == '0') return false;
+  return std::all_of(text.begin() + 2, text.end(), [](unsigned char character) {
+    return (character >= '0' && character <= '9') ||
+           (character >= 'A' && character <= 'F');
+  });
+}
+
+bool IsUpperHex(const Json& value) {
+  if (!value.is_string()) return false;
+  const auto text = value.get<std::string>();
+  return text.size() % 2 == 0 &&
+         std::all_of(text.begin(), text.end(), [](unsigned char character) {
+           return (character >= '0' && character <= '9') ||
+                  (character >= 'A' && character <= 'F');
+         });
+}
+
+bool IsError(const Json& response, const char* code) {
+  return !response.value("ok", true) && response.contains("error") &&
+         response["error"].value("code", "") == code;
+}
+
+}  // namespace
 
 bool WriteAll(HANDLE pipe, const std::uint8_t* data, std::size_t size) {
   while (size) {
@@ -94,6 +153,10 @@ bool RequestOversizedFrame(const std::wstring& pipe_name, Json& response) {
 
 int wmain(int argc, wchar_t** argv) {
   if (argc != 2 || !LoadLibraryW(argv[1])) return 2;
+  Allocation allocation(64 * 1024);
+  if (!allocation.get()) return 23;
+  auto* sentinel_address = static_cast<std::uint8_t*>(allocation.get()) + 128;
+  std::memcpy(sentinel_address, kSentinel.data(), kSentinel.size());
   const std::wstring pipe = L"\\\\.\\pipe\\CFB27LuaHost.v1." +
       std::to_wstring(GetCurrentProcessId());
   Json response;
@@ -114,6 +177,162 @@ int wmain(int argc, wchar_t** argv) {
 
   if (!RequestOversizedFrame(pipe, response)) return 10;
   if (response.value("ok", true) || response["error"].value("code", "") != "INVALID_REQUEST") return 11;
+
+  const Json scan_params{
+      {"patternHex", kSentinelHex},
+      {"maskHex", "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"},
+      {"maxMatches", 2},
+      {"contextBefore", 4},
+      {"contextAfter", 4},
+  };
+  if (!Request(pipe, {{"protocol", 1}, {"id", "scan-gated"},
+                      {"command", "scanMemory"}, {"params", scan_params}}, response, false)) return 25;
+  if (!IsError(response, "UNSUPPORTED_BUILD")) return 26;
+  Json false_scan_params = scan_params;
+  false_scan_params["allowUnsupportedBuild"] = 1;
+  if (!Request(pipe, {{"protocol", 1}, {"id", "scan-exact-gate"},
+                      {"command", "scanMemory"}, {"params", false_scan_params}}, response, false) ||
+      !IsError(response, "UNSUPPORTED_BUILD")) return 40;
+
+  Json allowed_scan_params = scan_params;
+  allowed_scan_params["allowUnsupportedBuild"] = true;
+  if (!Request(pipe, {{"protocol", 1}, {"id", "scan-1"},
+                      {"command", "scanMemory"}, {"params", allowed_scan_params}}, response, false)) return 27;
+  if (!response.value("ok", false)) return 28;
+  if (std::find(capabilities.begin(), capabilities.end(), "memoryScan") == capabilities.end() ||
+      std::find(capabilities.begin(), capabilities.end(), "memoryRead") == capabilities.end()) return 24;
+  const auto& scan = response["result"];
+  if (scan.size() != 4 || scan.value("supportedBuild", true) || !scan.value("complete", false) ||
+      !scan.contains("scannedBytes") || !scan["scannedBytes"].is_number_unsigned() ||
+      !scan.contains("matches") || scan["matches"].size() != 1) {
+    std::cerr << "scan response: " << response.dump() << '\n';
+    return 29;
+  }
+  const auto& match = scan["matches"][0];
+  if (match.size() != 6 || !IsCanonicalAddress(match["address"]) ||
+      !IsCanonicalAddress(match["regionBase"]) ||
+      !IsCanonicalAddress(match["contextAddress"]) ||
+      match.value("address", "") != FormatAddress(reinterpret_cast<std::uintptr_t>(sentinel_address)) ||
+      match.value("contextAddress", "") !=
+          FormatAddress(reinterpret_cast<std::uintptr_t>(sentinel_address) - 4) ||
+      !match.contains("regionSize") || !match["regionSize"].is_number_unsigned() ||
+      !match.contains("protection") || !match["protection"].is_number_unsigned() ||
+      !IsUpperHex(match["contextHex"]) ||
+      match.value("contextHex", "") != std::string("00000000") + kSentinelHex + "00000000") return 30;
+
+  const auto address = FormatAddress(reinterpret_cast<std::uintptr_t>(sentinel_address));
+  const Json read_params{
+      {"allowUnsupportedBuild", true},
+      {"ranges", Json::array({{{"address", address}, {"length", 16}}})},
+  };
+  Json gated_read_params = read_params;
+  gated_read_params.erase("allowUnsupportedBuild");
+  if (!Request(pipe, {{"protocol", 1}, {"id", "read-gated"},
+                      {"command", "readMemory"}, {"params", gated_read_params}}, response, false) ||
+      !IsError(response, "UNSUPPORTED_BUILD")) return 41;
+  if (!Request(pipe, {{"protocol", 1}, {"id", "read-1"},
+                      {"command", "readMemory"}, {"params", read_params}}, response, false)) return 31;
+  if (!response.value("ok", false) || response["result"].size() != 2 ||
+      response["result"].value("supportedBuild", true) ||
+      response["result"]["ranges"].size() != 1 ||
+      response["result"]["ranges"][0].size() != 3 ||
+      response["result"]["ranges"][0].value("address", "") != address ||
+      response["result"]["ranges"][0].value("length", 0) != 16 ||
+      response["result"]["ranges"][0].value("bytesHex", "") != kSentinelHex) return 32;
+
+  Json invalid_params = allowed_scan_params;
+  invalid_params["patternHex"] = "CFB27A1Z";
+  if (!Request(pipe, {{"protocol", 1}, {"id", "scan-bad-hex"},
+                      {"command", "scanMemory"}, {"params", invalid_params}}, response, false) ||
+      !IsError(response, "INVALID_REQUEST")) return 33;
+  invalid_params = allowed_scan_params;
+  invalid_params["patternHex"] = "cfb27a1100a1b2c3d4e5f60718293a4b";
+  if (!Request(pipe, {{"protocol", 1}, {"id", "scan-lower-hex"},
+                      {"command", "scanMemory"}, {"params", invalid_params}}, response, false) ||
+      !IsError(response, "INVALID_REQUEST")) return 47;
+  invalid_params = allowed_scan_params;
+  invalid_params["patternHex"] = "CFB27A1100A1B2C3D4E5F60718293A4";
+  if (!Request(pipe, {{"protocol", 1}, {"id", "scan-odd-hex"},
+                      {"command", "scanMemory"}, {"params", invalid_params}}, response, false) ||
+      !IsError(response, "INVALID_REQUEST")) return 48;
+  invalid_params = allowed_scan_params;
+  invalid_params["maskHex"] = "FFFFFFFFFFFFFFFF";
+  if (!Request(pipe, {{"protocol", 1}, {"id", "scan-bad-mask"},
+                      {"command", "scanMemory"}, {"params", invalid_params}}, response, false) ||
+      !IsError(response, "INVALID_REQUEST")) return 34;
+  invalid_params = allowed_scan_params;
+  invalid_params["maxMatches"] = 65;
+  if (!Request(pipe, {{"protocol", 1}, {"id", "scan-limit"},
+                      {"command", "scanMemory"}, {"params", invalid_params}}, response, false) ||
+      !IsError(response, "INVALID_REQUEST")) return 35;
+  invalid_params = allowed_scan_params;
+  invalid_params["contextBefore"] = 513;
+  if (!Request(pipe, {{"protocol", 1}, {"id", "scan-context-limit"},
+                      {"command", "scanMemory"}, {"params", invalid_params}}, response, false) ||
+      !IsError(response, "INVALID_REQUEST")) return 43;
+  invalid_params = allowed_scan_params;
+  invalid_params["maxMatches"] = 2.5;
+  if (!Request(pipe, {{"protocol", 1}, {"id", "scan-integer"},
+                      {"command", "scanMemory"}, {"params", invalid_params}}, response, false) ||
+      !IsError(response, "INVALID_REQUEST")) return 44;
+  invalid_params = allowed_scan_params;
+  invalid_params["unexpected"] = 1;
+  if (!Request(pipe, {{"protocol", 1}, {"id", "scan-extra"},
+                      {"command", "scanMemory"}, {"params", invalid_params}}, response, false) ||
+      !IsError(response, "INVALID_REQUEST")) return 36;
+
+  Json invalid_read_params = read_params;
+  invalid_read_params["ranges"][0]["length"] = 65537;
+  if (!Request(pipe, {{"protocol", 1}, {"id", "read-limit"},
+                      {"command", "readMemory"}, {"params", invalid_read_params}}, response, false) ||
+      !IsError(response, "INVALID_REQUEST")) return 37;
+  invalid_read_params = read_params;
+  invalid_read_params["ranges"] = Json::array();
+  for (int index = 0; index < 65; ++index) {
+    invalid_read_params["ranges"].push_back({{"address", address}, {"length", 1}});
+  }
+  if (!Request(pipe, {{"protocol", 1}, {"id", "read-range-count"},
+                      {"command", "readMemory"}, {"params", invalid_read_params}}, response, false) ||
+      !IsError(response, "INVALID_REQUEST")) return 49;
+  invalid_read_params = read_params;
+  invalid_read_params["ranges"] = Json::array();
+  for (int index = 0; index < 5; ++index) {
+    invalid_read_params["ranges"].push_back({{"address", address}, {"length", 65536}});
+  }
+  if (!Request(pipe, {{"protocol", 1}, {"id", "read-aggregate"},
+                      {"command", "readMemory"}, {"params", invalid_read_params}}, response, false) ||
+      !IsError(response, "INVALID_REQUEST")) return 50;
+  invalid_read_params = read_params;
+  invalid_read_params["ranges"][0]["unexpected"] = true;
+  if (!Request(pipe, {{"protocol", 1}, {"id", "read-extra"},
+                      {"command", "readMemory"}, {"params", invalid_read_params}}, response, false) ||
+      !IsError(response, "INVALID_REQUEST")) return 38;
+  invalid_read_params = read_params;
+  invalid_read_params["allowUnsupportedBuild"] = 1;
+  if (!Request(pipe, {{"protocol", 1}, {"id", "read-exact-gate"},
+                      {"command", "readMemory"}, {"params", invalid_read_params}}, response, false) ||
+      !IsError(response, "UNSUPPORTED_BUILD")) return 39;
+  invalid_read_params = read_params;
+  invalid_read_params["ranges"][0]["address"] = "0xabcdef";
+  if (!Request(pipe, {{"protocol", 1}, {"id", "read-address"},
+                      {"command", "readMemory"}, {"params", invalid_read_params}}, response, false) ||
+      !IsError(response, "INVALID_REQUEST")) return 42;
+  invalid_read_params = read_params;
+  invalid_read_params["ranges"][0]["address"] = "0x1";
+  if (!Request(pipe, {{"protocol", 1}, {"id", "read-denied"},
+                      {"command", "readMemory"}, {"params", invalid_read_params}}, response, false) ||
+      !IsError(response, "MEMORY_ACCESS_DENIED") ||
+      !response["error"].value("details", Json::object()).empty()) return 45;
+
+  std::memcpy(static_cast<std::uint8_t*>(allocation.get()) + 256,
+              kSentinel.data(), kSentinel.size());
+  Json crowded_scan_params = allowed_scan_params;
+  crowded_scan_params["maxMatches"] = 1;
+  if (!Request(pipe, {{"protocol", 1}, {"id", "scan-crowded"},
+                      {"command", "scanMemory"}, {"params", crowded_scan_params}}, response, false) ||
+      !IsError(response, "TOO_MANY_MATCHES") ||
+      !response["error"].value("details", Json::object()).empty()) return 46;
+  SecureZeroMemory(static_cast<std::uint8_t*>(allocation.get()) + 256, kSentinel.size());
 
   const std::string source = "local x=40\nx=x+2\ncfb.log(\"protocol-smoke=\"..tostring(x))";
   if (!Request(pipe, {{"protocol", 1}, {"id", "eval-1"},

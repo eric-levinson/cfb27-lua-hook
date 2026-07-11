@@ -2,6 +2,7 @@
 #include <tlhelp32.h>
 #include <bcrypt.h>
 
+#include "memory_reader.h"
 #include "protocol.h"
 
 #include <array>
@@ -13,6 +14,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <initializer_list>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -423,6 +426,108 @@ std::optional<std::size_t> ReadLimit(
   return std::nullopt;
 }
 
+bool HasOnlyKeys(const cfb27::protocol::Json& value,
+                 std::initializer_list<std::string_view> allowed) {
+  for (const auto& [key, unused] : value.items()) {
+    if (std::find(allowed.begin(), allowed.end(), key) == allowed.end()) return false;
+  }
+  return true;
+}
+
+std::optional<std::size_t> ReadUnsigned(
+    const cfb27::protocol::Json& params, std::string_view key,
+    std::size_t minimum, std::size_t maximum) {
+  const auto found = params.find(std::string(key));
+  if (found == params.end()) return std::nullopt;
+  std::uint64_t value = 0;
+  if (found->is_number_unsigned()) {
+    value = found->get<std::uint64_t>();
+  } else if (found->is_number_integer()) {
+    const auto signed_value = found->get<std::int64_t>();
+    if (signed_value < 0) return std::nullopt;
+    value = static_cast<std::uint64_t>(signed_value);
+  } else {
+    return std::nullopt;
+  }
+  if (value < minimum || value > maximum ||
+      value > std::numeric_limits<std::size_t>::max()) return std::nullopt;
+  return static_cast<std::size_t>(value);
+}
+
+std::optional<std::vector<std::uint8_t>> HexToBytes(
+    const cfb27::protocol::Json& value) {
+  if (!value.is_string()) return std::nullopt;
+  const auto& text = value.get_ref<const std::string&>();
+  if (text.empty() || text.size() % 2 != 0) return std::nullopt;
+  auto nibble = [](char character) -> std::optional<std::uint8_t> {
+    if (character >= '0' && character <= '9') {
+      return static_cast<std::uint8_t>(character - '0');
+    }
+    if (character >= 'A' && character <= 'F') {
+      return static_cast<std::uint8_t>(character - 'A' + 10);
+    }
+    return std::nullopt;
+  };
+  std::vector<std::uint8_t> bytes;
+  bytes.reserve(text.size() / 2);
+  for (std::size_t index = 0; index < text.size(); index += 2) {
+    const auto high = nibble(text[index]);
+    const auto low = nibble(text[index + 1]);
+    if (!high || !low) return std::nullopt;
+    bytes.push_back(static_cast<std::uint8_t>((*high << 4) | *low));
+  }
+  return bytes;
+}
+
+std::string BytesToHex(const std::vector<std::uint8_t>& bytes) {
+  constexpr char digits[] = "0123456789ABCDEF";
+  std::string encoded(bytes.size() * 2, '0');
+  for (std::size_t index = 0; index < bytes.size(); ++index) {
+    encoded[index * 2] = digits[bytes[index] >> 4];
+    encoded[index * 2 + 1] = digits[bytes[index] & 0x0F];
+  }
+  return encoded;
+}
+
+std::string FormatCanonicalAddress(std::uintptr_t address) {
+  char digits[sizeof(address) * 2]{};
+  const auto [end, error] = std::to_chars(
+      std::begin(digits), std::end(digits), address, 16);
+  if (error != std::errc{}) return {};
+  std::string result("0x");
+  result.reserve(2 + static_cast<std::size_t>(end - digits));
+  for (auto current = digits; current != end; ++current) {
+    result.push_back(*current >= 'a' && *current <= 'f'
+                         ? static_cast<char>(*current - 'a' + 'A')
+                         : *current);
+  }
+  return result;
+}
+
+std::optional<std::string> CanonicalAddress(std::string_view text) {
+  if (text.size() < 3 || text[0] != '0' || text[1] != 'x') return std::nullopt;
+  const auto parsed = cfb27::memory::ParseAddress(text);
+  if (!parsed) return std::nullopt;
+  const auto formatted = FormatCanonicalAddress(*parsed);
+  if (formatted != text) return std::nullopt;
+  return formatted;
+}
+
+cfb27::protocol::Json MemoryError(
+    const std::string& id, std::string_view code) {
+  using cfb27::protocol::ErrorResponse;
+  if (code == "MEMORY_ACCESS_DENIED") {
+    return ErrorResponse(id, "MEMORY_ACCESS_DENIED", "Requested memory is not readable");
+  }
+  if (code == "SCAN_LIMIT_EXCEEDED") {
+    return ErrorResponse(id, "SCAN_LIMIT_EXCEEDED", "Memory scan byte limit exceeded");
+  }
+  if (code == "TOO_MANY_MATCHES") {
+    return ErrorResponse(id, "TOO_MANY_MATCHES", "Memory scan found too many matches");
+  }
+  return ErrorResponse(id, "INVALID_REQUEST", "Invalid memory request");
+}
+
 cfb27::protocol::Json LogsResult(std::size_t limit) {
   cfb27::protocol::Json logs = cfb27::protocol::Json::array();
   std::lock_guard lock(g_event_mutex);
@@ -483,7 +588,8 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
         {"hostVersion", kHostVersion},
         {"supportedBuild", supported},
         {"writesAllowed", writes_allowed},
-        {"capabilities", {"status", "runScript", "evaluate", "logs", "events"}},
+        {"capabilities", {"status", "runScript", "evaluate", "logs", "events",
+                          "memoryScan", "memoryRead"}},
     });
   }
 
@@ -500,6 +606,121 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
         {"scriptsRun", g_scripts_run.load(std::memory_order_acquire)},
         {"ticks", g_ticks.load(std::memory_order_acquire)},
         {"lastError", std::move(last_error)},
+    });
+  }
+
+  if (command == "scanMemory") {
+    const bool allow_unsupported = params.contains("allowUnsupportedBuild") &&
+        params["allowUnsupportedBuild"].is_boolean() &&
+        params["allowUnsupportedBuild"].get<bool>();
+    if (!supported && !allow_unsupported) {
+      return ErrorResponse(id, "UNSUPPORTED_BUILD",
+                           "Memory scanning requires a supported build or explicit override");
+    }
+    if (!HasOnlyKeys(params, {"patternHex", "maskHex", "maxMatches", "contextBefore",
+                              "contextAfter", "allowUnsupportedBuild"}) ||
+        !params.contains("patternHex") || !params.contains("maskHex")) {
+      return ErrorResponse(id, "INVALID_REQUEST", "Invalid scanMemory params");
+    }
+    auto pattern = HexToBytes(params["patternHex"]);
+    auto mask = HexToBytes(params["maskHex"]);
+    const auto max_matches = ReadUnsigned(
+        params, "maxMatches", 1, cfb27::memory::kMaxMatches);
+    const auto context_before = ReadUnsigned(
+        params, "contextBefore", 0, cfb27::memory::kMaxContextBytes);
+    const auto context_after = ReadUnsigned(
+        params, "contextAfter", 0, cfb27::memory::kMaxContextBytes);
+    if (!pattern || pattern->size() < cfb27::memory::kMinPatternBytes ||
+        pattern->size() > cfb27::memory::kMaxPatternBytes || !mask ||
+        mask->size() != pattern->size() || !max_matches || !context_before ||
+        !context_after || *context_before > cfb27::memory::kMaxContextBytes - *context_after) {
+      return ErrorResponse(id, "INVALID_REQUEST", "Invalid scanMemory params");
+    }
+
+    const auto scan = cfb27::memory::ScanPrivateMemory({
+        .pattern = std::move(*pattern),
+        .mask = std::move(*mask),
+        .max_matches = *max_matches,
+        .context_before = *context_before,
+        .context_after = *context_after,
+    });
+    if (!scan.complete) return MemoryError(id, scan.code);
+
+    Json matches = Json::array();
+    for (const auto& match : scan.matches) {
+      const auto address = cfb27::memory::ParseAddress(match.address);
+      const auto region_base = cfb27::memory::ParseAddress(match.region_base);
+      const auto context_address = cfb27::memory::ParseAddress(match.context_address);
+      if (!address || !region_base || !context_address) {
+        return ErrorResponse(id, "MEMORY_ACCESS_DENIED", "Memory scan returned an invalid address");
+      }
+      matches.push_back({
+          {"address", FormatCanonicalAddress(*address)},
+          {"regionBase", FormatCanonicalAddress(*region_base)},
+          {"regionSize", match.region_size},
+          {"protection", match.protection},
+          {"contextAddress", FormatCanonicalAddress(*context_address)},
+          {"contextHex", BytesToHex(match.context)},
+      });
+    }
+    return SuccessResponse(id, {
+        {"supportedBuild", supported},
+        {"complete", true},
+        {"scannedBytes", scan.scanned_bytes},
+        {"matches", std::move(matches)},
+    });
+  }
+
+  if (command == "readMemory") {
+    const bool allow_unsupported = params.contains("allowUnsupportedBuild") &&
+        params["allowUnsupportedBuild"].is_boolean() &&
+        params["allowUnsupportedBuild"].get<bool>();
+    if (!supported && !allow_unsupported) {
+      return ErrorResponse(id, "UNSUPPORTED_BUILD",
+                           "Memory reads require a supported build or explicit override");
+    }
+    if (!HasOnlyKeys(params, {"ranges", "allowUnsupportedBuild"}) ||
+        !params.contains("ranges") || !params["ranges"].is_array() ||
+        params["ranges"].empty() ||
+        params["ranges"].size() > cfb27::memory::kMaxReadRanges) {
+      return ErrorResponse(id, "INVALID_REQUEST", "Invalid readMemory params");
+    }
+
+    std::vector<cfb27::memory::ReadRange> ranges;
+    ranges.reserve(params["ranges"].size());
+    std::size_t total_bytes = 0;
+    for (const auto& range : params["ranges"]) {
+      if (!range.is_object() || !HasOnlyKeys(range, {"address", "length"}) ||
+          !range.contains("address") || !range["address"].is_string()) {
+        return ErrorResponse(id, "INVALID_REQUEST", "Invalid readMemory range");
+      }
+      const auto address = CanonicalAddress(range["address"].get_ref<const std::string&>());
+      const auto length = ReadUnsigned(
+          range, "length", 1, cfb27::memory::kMaxReadRangeBytes);
+      if (!address || !length || total_bytes > cfb27::memory::kMaxReadBytes - *length) {
+        return ErrorResponse(id, "INVALID_REQUEST", "Invalid readMemory range");
+      }
+      total_bytes += *length;
+      ranges.push_back({*address, *length});
+    }
+
+    const auto read = cfb27::memory::ReadMemoryBatch(ranges);
+    if (!read.ok) return MemoryError(id, read.code);
+    Json results = Json::array();
+    for (const auto& range : read.ranges) {
+      const auto address = cfb27::memory::ParseAddress(range.address);
+      if (!address) {
+        return ErrorResponse(id, "MEMORY_ACCESS_DENIED", "Memory read returned an invalid address");
+      }
+      results.push_back({
+          {"address", FormatCanonicalAddress(*address)},
+          {"length", range.bytes.size()},
+          {"bytesHex", BytesToHex(range.bytes)},
+      });
+    }
+    return SuccessResponse(id, {
+        {"supportedBuild", supported},
+        {"ranges", std::move(results)},
     });
   }
 

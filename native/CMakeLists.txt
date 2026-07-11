@@ -45,6 +45,7 @@ set_target_properties(lua54 PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 add_library(cfb27_lua_host SHARED
   host/lua_host.cpp
+  host/memory_reader.cpp
   host/protocol.cpp
 )
 target_compile_features(cfb27_lua_host PRIVATE cxx_std_20)
