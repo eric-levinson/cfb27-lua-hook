@@ -19,6 +19,18 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+from live_process import discover_live_player_objects, live_status, write_live_player_rating
+from live_dynasty import (
+    dynasty_unlock_monitor_status,
+    player_rating_patch,
+    start_dynasty_unlock_monitor,
+    unlock_dynasty_player_editing,
+)
+from native_hook import (
+    attach_hook, attach_response_guard, hook_command, hook_status, list_lua_scripts,
+    patch_record_at, queue_response_rating, response_guard_status, run_lua_script,
+)
+
 
 APP_DIR = Path(__file__).resolve().parent
 SAVE_DIR_ENV = "CFB27_SAVE_DIR"
@@ -26,10 +38,12 @@ STATIC_DIR = APP_DIR / "static"
 BACKUP_DIR = APP_DIR / "backups"
 SIDECAR_DIR = APP_DIR / "sidecars"
 REPORT_DIR = APP_DIR / "reports"
+HOME_DOGS_REPORT_DIR = REPORT_DIR / "home-dogs"
 SCHEMA_DIR = APP_DIR / "schema"
 RECRUITING_SCHEMA_INDEX = SCHEMA_DIR / "recruiting_schema_index.json"
 FRANCHISE_HELPER = APP_DIR / "franchise_helper.js"
 MADDEN_FRANCHISE_SCHEMA = SCHEMA_DIR / "CFB27_schema_for_madden_franchise.gz"
+HOME_DOGS_REPO_ENVS = ("CFB27_HOME_DOGS_REPO", "HOME_DOGS_REPO")
 
 MAGIC = b"FBCHUNKS"
 
@@ -2670,6 +2684,449 @@ def generate_recruit_preview_from_profiles(
         "fieldCapabilities": field_capabilities(),
     }
 
+
+def resolve_home_dogs_repo() -> Path | None:
+    candidates: list[Path] = []
+    for env_name in HOME_DOGS_REPO_ENVS:
+        value = os.environ.get(env_name)
+        if value:
+            candidates.append(Path(value).expanduser())
+    candidates.extend(
+        [
+            APP_DIR.parent / "cfb27-dynasty-modding",
+            Path(tempfile.gettempdir()) / "cfb27-dynasty-modding",
+        ]
+    )
+    for candidate in candidates:
+        preview_script = candidate / "franchise-lab" / "generator" / "preview.js"
+        if preview_script.is_file():
+            return candidate.resolve()
+    return None
+
+
+def home_dogs_status() -> dict:
+    repo = resolve_home_dogs_repo()
+    if repo is None:
+        return {
+            "available": False,
+            "engine": "home-dogs",
+            "repoPath": "",
+            "message": "Set CFB27_HOME_DOGS_REPO to a clone of brooksg357-a11y/cfb27-dynasty-modding.",
+        }
+    lab = repo / "franchise-lab"
+    node_modules = lab / "node_modules"
+    return {
+        "available": True,
+        "engine": "home-dogs",
+        "repoPath": str(repo),
+        "previewScript": str(lab / "generator" / "preview.js"),
+        "applyScript": str(lab / "generator" / "apply.js"),
+        "dependenciesInstalled": node_modules.is_dir(),
+        "message": "Home Dogs generator repo found.",
+    }
+
+
+def home_dogs_subprocess_env() -> dict[str, str]:
+    env = os.environ.copy()
+    python_dir = str(Path(sys.executable).resolve().parent)
+    path_key = "Path" if "Path" in env else "PATH"
+    current_path = env.get(path_key, "")
+    env[path_key] = python_dir if not current_path else f"{python_dir}{os.pathsep}{current_path}"
+    return env
+
+
+def snake_rating_key(name: str) -> str:
+    if not name:
+        return ""
+    base = name.removesuffix("Rating")
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", base).lower()
+
+
+def update_count(counter: dict, key: object) -> None:
+    if key is None or key == "":
+        return
+    text = str(key)
+    counter[text] = counter.get(text, 0) + 1
+
+
+def average_numeric_score(values: object, keys: tuple[str, ...] | None = None) -> float | None:
+    if not isinstance(values, dict):
+        return None
+    selected = []
+    source = keys if keys is not None else tuple(values.keys())
+    for key in source:
+        value = values.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            selected.append(float(value))
+    if not selected:
+        return None
+    return round(clamp_int(sum(selected) / len(selected), 0, 100) / 100, 4)
+
+
+def home_dogs_recruit_to_profile(assignment: dict, save_fingerprint: str, save_name: str = "") -> dict:
+    geo = assignment.get("geoBio") if isinstance(assignment.get("geoBio"), dict) else {}
+    frame = geo.get("frame") if isinstance(geo.get("frame"), dict) else {}
+    ratings: dict[str, int] = {}
+    for section in ("athletic", "skills", "background"):
+        values = assignment.get(section)
+        if not isinstance(values, dict):
+            continue
+        for key, value in values.items():
+            if key == "trace" or not isinstance(value, int):
+                continue
+            ratings[snake_rating_key(str(key))] = value
+    local_overall = assignment.get("localOverall")
+    if isinstance(local_overall, (int, float)) and not isinstance(local_overall, bool):
+        ratings["overall"] = clamp_int(round(float(local_overall)), 0, 100)
+
+    athletic_score = average_numeric_score(assignment.get("athletic"), ("Speed", "Acceleration", "Agility", "ChangeOfDirection", "Strength", "Jumping"))
+    technical_score = average_numeric_score(assignment.get("skills"))
+    mental_score = average_numeric_score(assignment.get("background"), ("Awareness", "PlayRecognition"))
+    readiness_score = average_numeric_score({"overall": ratings.get("overall") or local_overall})
+    latent_values = assignment.get("latents") if isinstance(assignment.get("latents"), dict) else {}
+    ceiling_score = None
+    projection = latent_values.get("projection")
+    if isinstance(projection, (int, float)) and not isinstance(projection, bool):
+        ceiling_score = round(max(0, min(1, float(projection))), 4)
+    if ceiling_score is None:
+        ceiling_score = readiness_score
+
+    appearance = assignment.get("appearance") if isinstance(assignment.get("appearance"), dict) else {}
+    appearance_token = {
+        "genericHeadAssetName": appearance.get("genericHeadAssetName") or appearance.get("head") or "",
+        "portrait": appearance.get("portrait"),
+    }
+
+    recruit_row = assignment.get("recruitRow")
+    player_row = assignment.get("playerRow")
+    recruit_id = f"Recruit:{recruit_row}" if recruit_row is not None else ""
+    player_id = f"Player:{player_row}" if player_row is not None else ""
+    return {
+        "recruitId": recruit_id,
+        "playerId": player_id,
+        "identity": {
+            "firstName": geo.get("firstName") or "",
+            "lastName": geo.get("lastName") or "",
+            "hometown": geo.get("homeTown") or "",
+            "homeState": geo.get("homeState") or "",
+            "homePipeline": geo.get("homePipeline") or "",
+        },
+        "footballProfile": {
+            "nationalRank": assignment.get("nationalRank"),
+            "positionRank": assignment.get("positionRank"),
+            "stateRank": assignment.get("stateRank"),
+            "rankBand": assignment.get("rankBand"),
+            "starRating": assignment.get("star"),
+            "position": assignment.get("position"),
+            "archetype": assignment.get("archetype"),
+            "archetypeDisplay": assignment.get("archetype"),
+            "profileType": assignment.get("profileType"),
+            "bodyComposition": frame.get("bodyComposition") or geo.get("bodyComposition"),
+            "readinessScore": readiness_score,
+            "physicalScore": athletic_score,
+            "technicalScore": technical_score,
+            "mentalScore": mental_score,
+            "ceilingScore": ceiling_score,
+            "evaluationConfidence": 100,
+        },
+        "gameFields": {
+            "ratings": ratings,
+            "developmentTrait": assignment.get("devTrait"),
+            "qualityModifier": assignment.get("qualityModifier"),
+            "heightInches": frame.get("height"),
+            "weightLbs": frame.get("weight"),
+            "encodedWeight": encode_weight_lbs(frame["weight"]) if isinstance(frame.get("weight"), int) else None,
+            "bodyType": assignment.get("bodyType"),
+            "abilities": assignment.get("abilities"),
+            "appearance": assignment.get("appearance"),
+            "appearanceToken": appearance_token,
+            "generatedWrites": {},
+            "generatedDiffs": [],
+        },
+        "generationIntent": {
+            "seed": assignment.get("seed"),
+            "engine": "home-dogs",
+            "profileType": assignment.get("profileType"),
+            "rankBand": assignment.get("rankBand"),
+            "starRating": assignment.get("star"),
+            "qualityModifier": assignment.get("qualityModifier"),
+            "previewOnly": True,
+        },
+        "source": {
+            "saveFingerprint": save_fingerprint,
+            "saveName": save_name,
+            "recruitRow": recruit_row,
+            "playerRow": player_row,
+        },
+        "sidecar": {
+            "recordId": f"{save_fingerprint}:R{recruit_row}:P{player_row}",
+            "engine": "home-dogs",
+        },
+        "homeDogs": assignment,
+    }
+
+
+def adapt_home_dogs_preview(
+    home_preview: dict,
+    home_report: dict,
+    save_fingerprint: str,
+    seed: str,
+    save_name: str,
+    repo: Path,
+) -> dict:
+    assignments = home_preview.get("recruits", [])
+    if not isinstance(assignments, list):
+        raise AppError("Home Dogs preview did not include a recruits list", 502)
+    profiles = [home_dogs_recruit_to_profile(item, save_fingerprint, save_name) for item in assignments if isinstance(item, dict)]
+    star_counts: dict[str, int] = {}
+    position_counts: dict[str, int] = {}
+    development_counts: dict[str, int] = {}
+    quality_counts: dict[str, int] = {}
+    for item in profiles:
+        football = item.get("footballProfile", {})
+        game = item.get("gameFields", {})
+        update_count(star_counts, football.get("starRating"))
+        update_count(position_counts, football.get("position"))
+        update_count(development_counts, game.get("developmentTrait"))
+        update_count(quality_counts, game.get("qualityModifier"))
+
+    checks = ((home_report.get("validation") or {}).get("checks") or []) if isinstance(home_report, dict) else []
+    errors = [
+        f"{check.get('name')}: {check.get('detail')}"
+        for check in checks
+        if isinstance(check, dict) and not check.get("passed", False)
+    ]
+    warnings = [
+        "Home Dogs preview is external-preview-only in this UI; use Home Dogs apply.js for writes until the adapter is explicitly wired.",
+    ]
+    config_versions = home_preview.get("configVersions") or {}
+    preview_material = {
+        "engine": "home-dogs",
+        "saveFingerprint": save_fingerprint,
+        "seed": seed,
+        "configVersions": config_versions,
+        "count": len(profiles),
+        "firstRows": [
+            {
+                "recruitRow": item.get("source", {}).get("recruitRow"),
+                "playerRow": item.get("source", {}).get("playerRow"),
+                "rank": item.get("footballProfile", {}).get("nationalRank"),
+            }
+            for item in profiles[:50]
+        ],
+    }
+    preview_id = hashlib.sha256(json.dumps(preview_material, sort_keys=True).encode("utf-8")).hexdigest().upper()
+    config_hash = hashlib.sha256(json.dumps(config_versions, sort_keys=True).encode("utf-8")).hexdigest().upper()
+    validation_report = {
+        "valid": not errors,
+        "errors": errors,
+        "warnings": [],
+        "checks": {
+            "homeDogsValidationPassed": not errors,
+        },
+        "counts": {
+            "homeDogsCheckCount": len(checks),
+            "homeDogsFailedCheckCount": len(errors),
+        },
+        "details": {
+            "homeDogs": home_report,
+        },
+        "samples": {"warnings": [], "errors": []},
+    }
+    return {
+        "previewId": preview_id,
+        "configHash": config_hash,
+        "saveFingerprint": save_fingerprint,
+        "seed": seed,
+        "engine": "home-dogs",
+        "applyMode": "external-preview-only",
+        "valid": not errors,
+        "errors": errors,
+        "warnings": warnings,
+        "summary": {
+            "count": len(profiles),
+            "classSize": home_preview.get("classSize", len(profiles)),
+            "stars": star_counts,
+            "positions": position_counts,
+            "development": development_counts,
+            "qualityModifier": quality_counts,
+            "diffFields": [],
+            "diffCount": 0,
+            "skippedFieldCount": 0,
+            "validationErrorCount": len(errors),
+            "validationWarningCount": len(warnings),
+            "engine": {
+                "id": "home-dogs",
+                "repoPath": str(repo),
+                "source": "brooksg357-a11y/cfb27-dynasty-modding",
+            },
+        },
+        "validationReport": validation_report,
+        "recruits": profiles,
+        "diffs": [],
+        "skippedFields": [],
+        "normalizedConfig": {"engine": "home-dogs", "configVersions": config_versions},
+        "fieldCapabilities": field_capabilities(),
+        "homeDogs": {
+            "configVersions": config_versions,
+            "report": home_report,
+        },
+    }
+
+
+def run_home_dogs_preview(save_path: Path, seed: str, save_fingerprint: str, save_name: str) -> dict:
+    repo = resolve_home_dogs_repo()
+    if repo is None:
+        raise AppError(
+            "Home Dogs generator repo was not found. Set CFB27_HOME_DOGS_REPO to brooksg357-a11y/cfb27-dynasty-modding.",
+            503,
+        )
+    lab = repo / "franchise-lab"
+    preview_script = lab / "generator" / "preview.js"
+    if not (lab / "node_modules").is_dir():
+        raise AppError(f"Home Dogs dependencies are not installed. Run npm install in {lab}", 503)
+    HOME_DOGS_REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    run_id = hashlib.sha256(f"{save_path}|{save_fingerprint}|{seed}|{time.time()}".encode("utf-8")).hexdigest()[:16]
+    out_dir = HOME_DOGS_REPORT_DIR / run_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    command = [
+        "node",
+        str(preview_script),
+        "--save",
+        str(save_path),
+        "--seed",
+        seed or "default",
+        "--out-dir",
+        str(out_dir),
+    ]
+    result = subprocess.run(
+        command,
+        cwd=str(lab),
+        env=home_dogs_subprocess_env(),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=240,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise AppError(f"Home Dogs preview failed: {detail}", 502)
+    preview_path = out_dir / "generator-preview.json"
+    report_path = out_dir / "generator-report.json"
+    if not preview_path.is_file() or not report_path.is_file():
+        raise AppError("Home Dogs preview finished without generator-preview.json and generator-report.json", 502)
+    home_preview = json.loads(preview_path.read_text(encoding="utf-8"))
+    home_report = json.loads(report_path.read_text(encoding="utf-8"))
+    adapted = adapt_home_dogs_preview(home_preview, home_report, save_fingerprint, seed, save_name, repo)
+    adapted["homeDogs"]["previewPath"] = str(preview_path)
+    adapted["homeDogs"]["reportPath"] = str(report_path)
+    return adapted
+
+
+def validated_home_dogs_preview_path(value: object) -> Path | None:
+    if not isinstance(value, str) or not value:
+        return None
+    path = Path(value).resolve()
+    root = HOME_DOGS_REPORT_DIR.resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise AppError("Home Dogs preview path must be under reports/home-dogs", 403) from exc
+    if path.name != "generator-preview.json" or not path.is_file():
+        raise AppError("Home Dogs preview artifact was not found; regenerate preview", 404)
+    return path
+
+
+def run_home_dogs_apply(
+    save_path: Path,
+    preview_path: Path,
+    target_path: Path,
+    backup: dict,
+) -> dict:
+    repo = resolve_home_dogs_repo()
+    if repo is None:
+        raise AppError(
+            "Home Dogs generator repo was not found. Set CFB27_HOME_DOGS_REPO to brooksg357-a11y/cfb27-dynasty-modding.",
+            503,
+        )
+    lab = repo / "franchise-lab"
+    apply_script = lab / "generator" / "apply.js"
+    if not apply_script.is_file():
+        raise AppError("Home Dogs apply.js was not found", 503)
+    if not (lab / "node_modules").is_dir():
+        raise AppError(f"Home Dogs dependencies are not installed. Run npm install in {lab}", 503)
+    HOME_DOGS_REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    command = [
+        "node",
+        str(apply_script),
+        "--save",
+        str(save_path),
+        "--preview",
+        str(preview_path),
+        "--out",
+        str(target_path),
+        "--report-dir",
+        str(HOME_DOGS_REPORT_DIR),
+    ]
+    result = subprocess.run(
+        command,
+        cwd=str(lab),
+        env=home_dogs_subprocess_env(),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=300,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise AppError(f"Home Dogs apply failed: {detail}", 502)
+    try:
+        apply_result = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError:
+        apply_result = {"stdout": result.stdout}
+    report_path_text = str(apply_result.get("reportPath") or "")
+    report_path = Path(report_path_text) if report_path_text else None
+    report_payload: dict = {}
+    if report_path and report_path.is_file():
+        report_payload = json.loads(report_path.read_text(encoding="utf-8"))
+    field_write_counts = report_payload.get("fieldWriteCounts", {}) if isinstance(report_payload, dict) else {}
+    changed_field_count = sum(value for value in field_write_counts.values() if isinstance(value, int))
+    mismatches = report_payload.get("mismatches", []) if isinstance(report_payload, dict) else []
+    class_size = report_payload.get("classSize") if isinstance(report_payload, dict) else None
+    return {
+        "applied": not mismatches,
+        "writeSucceeded": True,
+        "artifactWriteSucceeded": bool(report_path and report_path.is_file()),
+        "artifactError": "",
+        "appliedRecruitCount": class_size if isinstance(class_size, int) else 0,
+        "changedFieldCount": changed_field_count,
+        "backup": backup,
+        "sidecar": None,
+        "report": {
+            "path": str(report_path) if report_path else "",
+            "kind": "home-dogs-apply-report",
+            "summary": apply_result.get("summary", {}),
+        },
+        "readBackMismatches": mismatches,
+        "writeMode": "copy",
+        "sourceFile": save_path.name,
+        "targetFile": target_path.name,
+        "targetPath": str(target_path),
+        "sourceUnchanged": True,
+        "engine": "home-dogs",
+        "homeDogs": {
+            "previewPath": str(preview_path),
+            "reportPath": str(report_path) if report_path else "",
+            "summary": apply_result.get("summary", {}),
+            "fieldWriteCounts": field_write_counts,
+            "chunk2Preserved": report_payload.get("chunk2Preserved") if isinstance(report_payload, dict) else None,
+            "weightFloorClamps": report_payload.get("weightFloorClamps") if isinstance(report_payload, dict) else None,
+            "skippedPhantoms": report_payload.get("skippedPhantoms") if isinstance(report_payload, dict) else None,
+        },
+    }
+
 KEY_LABELS = {
     PLAYER_INTERNAL_KEY: "Internal ID",
     PLAYER_FIRST_KEY: "First Name",
@@ -3677,6 +4134,149 @@ def joined_recruit_profiles_from_payload(
     }
 
 
+def recruiting_board_from_payload(payload: bytes, save_fingerprint: str, save_name: str = "") -> dict:
+    with tempfile.TemporaryDirectory(prefix="cfb27-recruiting-board-") as temp_dir_name:
+        temp_dir = Path(temp_dir_name)
+        input_path = temp_dir / "input.frk"
+        input_path.write_bytes(payload)
+        result = run_franchise_helper(
+            ["recruiting-board", str(input_path)],
+            timeout=120,
+        )
+    result["saveName"] = save_name or result.get("saveName") or ""
+    result["saveFingerprint"] = save_fingerprint
+    result["readOnly"] = True
+    result.setdefault("previewOnly", True)
+    return result
+
+
+def search_players_from_payload(payload: bytes, query: str, limit: int = 100) -> dict:
+    with tempfile.TemporaryDirectory(prefix="cfb27-player-search-") as temp_dir_name:
+        input_path = Path(temp_dir_name) / "input.frk"
+        input_path.write_bytes(payload)
+        return run_franchise_helper(
+            ["player-search", str(input_path), str(query or ""), str(max(1, min(limit, 500)))],
+            timeout=120,
+        )
+
+
+RECRUITING_WEEKLY_ACTION_HOURS = {
+    "SearchSocialMedia": 5,
+    "ContactHighSchoolCoaches": 10,
+    "ContactFriendsAndFamily": 25,
+    "SendTheHouse": 50,
+}
+
+
+def preview_recruiting_plan(board: dict, plans: object, expected_fingerprint: str = "") -> dict:
+    normalized_plans = plans if isinstance(plans, list) else []
+    errors: list[dict] = []
+    warnings: list[dict] = []
+    if plans is not None and not isinstance(plans, list):
+        errors.append({"code": "plans-not-list", "message": "plans must be a list"})
+    if expected_fingerprint and expected_fingerprint != board.get("saveFingerprint"):
+        errors.append(
+            {
+                "code": "stale-save-fingerprint",
+                "message": "Save fingerprint changed; reload the recruiting board before previewing.",
+            }
+        )
+    if normalized_plans:
+        warnings.append(
+            {
+                "code": "write-gated",
+                "message": "Recruiting plans are preview-only until 017 enables copy-first applies.",
+            }
+        )
+    counters = board.get("counters", {}) if isinstance(board.get("counters"), dict) else {}
+    planned_hours = 0
+    planned_targets: list[dict] = []
+    targets_by_id = {
+        str(target.get("id")): target
+        for target in board.get("targets", [])
+        if isinstance(target, dict) and target.get("id") is not None
+    }
+    targets_by_user_row = {
+        int(((target.get("provenance") or {}).get("userRecruitTargetRow")))
+        : target
+        for target in board.get("targets", [])
+        if isinstance(target, dict)
+        and isinstance(target.get("provenance"), dict)
+        and isinstance((target.get("provenance") or {}).get("userRecruitTargetRow"), int)
+    }
+    for plan in normalized_plans:
+        if not isinstance(plan, dict):
+            errors.append({"code": "invalid-plan", "message": "Every plan item must be an object"})
+            continue
+        plan_type = str(plan.get("type") or "")
+        if plan_type == "add-prospect-to-board":
+            planned_targets.append(
+                {
+                    "type": plan_type,
+                    "name": plan.get("name"),
+                    "recruitRow": plan.get("recruitRow"),
+                    "playerRow": plan.get("playerRow"),
+                    "hoursDelta": 0,
+                    "status": "allocation-write-gated",
+                }
+            )
+            continue
+        if plan_type != "set-weekly-action":
+            errors.append({"code": "unsupported-plan", "message": f"Unsupported recruiting plan type: {plan_type or '<blank>'}"})
+            continue
+        action_field = str(plan.get("actionField") or "")
+        if action_field not in RECRUITING_WEEKLY_ACTION_HOURS:
+            errors.append({"code": "unsupported-action", "message": f"Unsupported weekly action field: {action_field or '<blank>'}"})
+            continue
+        target = targets_by_id.get(str(plan.get("targetId") or ""))
+        user_row = plan.get("userRecruitTargetRow")
+        if target is None and isinstance(user_row, int):
+            target = targets_by_user_row.get(user_row)
+        if target is None:
+            errors.append({"code": "target-not-found", "message": f"Recruiting target was not found for action {action_field}"})
+            continue
+        current_enabled = bool(((target.get("actionBooleans") or {}).get(action_field)))
+        enabled = bool(plan.get("enabled"))
+        expected_delta = RECRUITING_WEEKLY_ACTION_HOURS[action_field] * (1 if enabled else -1)
+        if current_enabled == enabled:
+            errors.append({"code": "no-action-change", "message": f"{action_field} is already {'enabled' if enabled else 'disabled'}"})
+            continue
+        supplied_delta = int(plan.get("hoursDelta") or 0)
+        if supplied_delta != expected_delta:
+            errors.append({"code": "invalid-hour-delta", "message": f"{action_field} expected hour delta {expected_delta}, got {supplied_delta}"})
+            continue
+        planned_hours += expected_delta
+        planned_targets.append(
+            {
+                "type": plan_type,
+                "targetId": target.get("id"),
+                "name": target.get("name"),
+                "userRecruitTargetRow": (target.get("provenance") or {}).get("userRecruitTargetRow"),
+                "actionField": action_field,
+                "enabled": enabled,
+                "hoursDelta": expected_delta,
+                "status": "validated-preview-write-gated",
+            }
+        )
+    hour_summary = {
+        "currentUsed": counters.get("hoursUsed"),
+        "currentMax": counters.get("hoursMax"),
+        "plannedDelta": planned_hours,
+        "projectedUsed": (counters.get("hoursUsed") or 0) + planned_hours,
+    }
+    return {
+        "valid": not errors,
+        "writeEnabled": False,
+        "readOnly": True,
+        "errors": errors,
+        "warnings": warnings,
+        "hourSummary": hour_summary,
+        "plannedTargets": planned_targets,
+        "writeGates": board.get("writeGates", {}),
+        "saveFingerprint": board.get("saveFingerprint"),
+    }
+
+
 def patch_recruit_payload(payload: bytes, row_id: str, changes: dict, mode: str = "manual") -> tuple[bytes, dict]:
     if not isinstance(changes, dict) or not changes:
         raise AppError("No changes supplied")
@@ -4229,6 +4829,78 @@ class SaveStore:
             ),
         }
 
+    def discover_live_player(self, name: str, query: str, player_row: int | None = None) -> dict:
+        path, container = self.load_container(name)
+        if not query.strip() and player_row is None:
+            raise AppError("query or playerRow is required", 400)
+        result = search_players_from_payload(container.decompressed_payload, query, limit=100)
+        players = result.get("players", [])
+        if player_row is not None:
+            players = [player for player in players if int(player.get("row", -1)) == player_row]
+        if not players:
+            raise AppError("No structured Dynasty player matched that search", 404)
+        if len(players) > 1:
+            exact = [
+                player for player in players
+                if query.casefold() in {
+                    str(player.get("firstName", "")).casefold(),
+                    str(player.get("lastName", "")).casefold(),
+                    f"{player.get('firstName', '')} {player.get('lastName', '')}".strip().casefold(),
+                    str(player.get("genericHeadAssetName", "")).casefold(),
+                }
+            ]
+            if len(exact) == 1:
+                players = exact
+        if len(players) != 1:
+            choices = [
+                {
+                    "row": player.get("row"),
+                    "firstName": player.get("firstName"),
+                    "lastName": player.get("lastName"),
+                    "position": player.get("position"),
+                    "genericHeadAssetName": player.get("genericHeadAssetName"),
+                }
+                for player in players[:25]
+            ]
+            raise AppError(f"Player search is ambiguous; choose a playerRow from: {json.dumps(choices)}", 409)
+        player = players[0]
+        asset_name = str(player.get("genericHeadAssetName") or "")
+        id_match = re.search(r"_(\d+)$", asset_name)
+        if not id_match:
+            raise AppError("Selected player does not have a numeric runtime asset ID", 422)
+        player_id = int(id_match.group(1))
+        ratings = {
+            key: int(value.get("value", 0))
+            for key, value in (player.get("ratings") or {}).items()
+            if isinstance(value, dict) and isinstance(value.get("value"), int)
+        }
+        status = live_status()
+        processes = status.get("gameProcesses", [])
+        if not processes:
+            raise AppError("CollegeFB27.exe is not running", 409)
+        discovery = discover_live_player_objects(
+            int(processes[0]["pid"]),
+            player_id,
+            ratings,
+            max_scan_bytes=3 * 1024 * 1024 * 1024,
+        )
+        return {
+            "file": self.describe_file(path, include_player_count=False),
+            "player": {
+                "row": player.get("row"),
+                "firstName": player.get("firstName"),
+                "lastName": player.get("lastName"),
+                "position": player.get("position"),
+                "jerseyNum": player.get("jerseyNum"),
+                "playerType": player.get("playerType"),
+                "development": player.get("development"),
+                "genericHeadAssetName": asset_name,
+                "playerId": player_id,
+                "ratings": ratings,
+            },
+            "discovery": discovery,
+        }
+
     def get_recruits(self, name: str, limit: int = 1000, offset: int = 0) -> dict:
         path, container = self.load_container(name)
         result = list_recruits_from_payload(
@@ -4256,9 +4928,33 @@ class SaveStore:
             **result,
         }
 
-    def preview_generator(self, name: str, config: dict, seed: str, locks: dict | None = None) -> dict:
+    def get_recruiting_board(self, name: str) -> dict:
         path, container = self.load_container(name)
         fingerprint = hashlib.sha256(container.decompressed_payload).hexdigest().upper()
+        result = recruiting_board_from_payload(
+            container.decompressed_payload,
+            save_fingerprint=fingerprint,
+            save_name=path.name,
+        )
+        return {
+            "file": self.describe_file(path, include_player_count=False),
+            **result,
+        }
+
+    def preview_recruiting(self, name: str, save_fingerprint: str, plans: object) -> dict:
+        board = self.get_recruiting_board(name)
+        return preview_recruiting_plan(board, plans, expected_fingerprint=save_fingerprint)
+
+    def preview_generator(self, name: str, config: dict, seed: str, locks: dict | None = None, engine: str = "local") -> dict:
+        path, container = self.load_container(name)
+        fingerprint = hashlib.sha256(container.decompressed_payload).hexdigest().upper()
+        if engine == "home-dogs":
+            return {
+                "file": self.describe_file(path, include_player_count=False),
+                **run_home_dogs_preview(path, seed, fingerprint, path.name),
+            }
+        if engine not in {"", "local"}:
+            raise AppError(f"Unsupported generator engine: {engine}", 400)
         joined = joined_recruit_profiles_from_payload(
             container.decompressed_payload,
             save_fingerprint=fingerprint,
@@ -4281,6 +4977,9 @@ class SaveStore:
         confirm: bool,
         locks: dict | None = None,
         write_mode: str = "copy",
+        engine: str = "local",
+        home_dogs_preview_path: object = None,
+        expected_save_fingerprint: str = "",
     ) -> dict:
         if confirm is not True:
             raise AppError("confirm must be true before applying generated recruits", 400)
@@ -4295,6 +4994,43 @@ class SaveStore:
 
         path, container = self.load_container(name)
         before_fingerprint = hashlib.sha256(container.decompressed_payload).hexdigest().upper()
+        if engine == "home-dogs":
+            if write_mode != "copy":
+                raise AppError("Home Dogs apply currently supports copy mode only", 400)
+            if expected_save_fingerprint and expected_save_fingerprint != before_fingerprint:
+                raise AppError("Save fingerprint changed while preparing Home Dogs apply; regenerate preview", 409)
+            preview_path = validated_home_dogs_preview_path(home_dogs_preview_path)
+            if preview_path is None:
+                regenerated = run_home_dogs_preview(path, seed, before_fingerprint, path.name)
+                preview_path = validated_home_dogs_preview_path(regenerated.get("homeDogs", {}).get("previewPath"))
+                preview = regenerated
+            else:
+                report_path = preview_path.with_name("generator-report.json")
+                if not report_path.is_file():
+                    raise AppError("Home Dogs report artifact was not found; regenerate preview", 404)
+                home_preview = json.loads(preview_path.read_text(encoding="utf-8"))
+                home_report = json.loads(report_path.read_text(encoding="utf-8"))
+                preview = adapt_home_dogs_preview(home_preview, home_report, before_fingerprint, seed, path.name, resolve_home_dogs_repo() or Path(""))
+            if preview.get("saveFingerprint") != before_fingerprint:
+                raise AppError("Save fingerprint changed while preparing Home Dogs apply; regenerate preview", 409)
+            if preview.get("previewId") != preview_id:
+                raise AppError("Home Dogs preview no longer matches this save/seed; regenerate preview", 409)
+            if preview.get("configHash") != config_hash_value:
+                raise AppError("Home Dogs config hash no longer matches this preview; regenerate preview", 409)
+            if not preview.get("valid") or preview.get("errors"):
+                raise AppError("Home Dogs preview has blocking validation errors and cannot be applied", 422)
+            backup = self.create_backup(name)
+            target_path = self.generator_output_path(path)
+            result = run_home_dogs_apply(path, preview_path, target_path, backup)
+            self.clear_file_caches(target_path.name)
+            read_back_container = FBChunks.parse(target_path.read_bytes())
+            result["previewId"] = preview.get("previewId")
+            result["configHash"] = preview.get("configHash")
+            result["saveFingerprintBefore"] = before_fingerprint
+            result["saveFingerprintAfter"] = hashlib.sha256(read_back_container.decompressed_payload).hexdigest().upper()
+            return result
+        if engine not in {"", "local"}:
+            raise AppError(f"Unsupported generator engine: {engine}", 400)
         joined = joined_recruit_profiles_from_payload(
             container.decompressed_payload,
             save_fingerprint=before_fingerprint,
@@ -4676,17 +5412,47 @@ class Handler(BaseHTTPRequestHandler):
         try:
             parsed = urlparse(self.path)
             query_params = parse_qs(parsed.query)
-            if self.path == "/" or self.path == "/index.html":
+            if parsed.path in {"/", "/index.html", "/recruiting"}:
                 self.serve_static("index.html")
                 return
             if self.path.startswith("/static/"):
                 self.serve_static(self.path.removeprefix("/static/"))
                 return
+            if parsed.path == "/api/health":
+                self.send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "app": "cfb27-save-editor",
+                        "saveDirectory": str(SAVE_DIR),
+                    },
+                )
+                return
+            if parsed.path == "/api/live/status":
+                self.send_json(200, live_status())
+                return
+            if parsed.path == "/api/live/hook/status":
+                status = live_status()
+                processes = status.get("gameProcesses", [])
+                if not processes:
+                    self.send_json(200, {"loaded": False, "ready": False, "reason": "CollegeFB27.exe is not running"})
+                    return
+                self.send_json(200, hook_status(int(processes[0]["pid"])))
+                return
+            if parsed.path == "/api/live/hook/unlock-status":
+                self.send_json(200, dynasty_unlock_monitor_status())
+                return
+            if parsed.path == "/api/live/scripts":
+                self.send_json(200, {"scripts": list_lua_scripts()})
+                return
             if self.path == "/api/files":
-                self.send_json(200, {"files": STORE.list_files()})
+                self.send_json(200, {"directory": str(STORE.base_dir), "files": STORE.list_files()})
                 return
             if parsed.path == "/api/generator/field-capabilities":
                 self.send_json(200, field_capabilities())
+                return
+            if parsed.path == "/api/generator/home-dogs/status":
+                self.send_json(200, home_dogs_status())
                 return
             if parsed.path == "/api/generator/default-configs":
                 self.send_json(200, default_generator_configs())
@@ -4706,6 +5472,11 @@ class Handler(BaseHTTPRequestHandler):
                     limit = int(query_params.get("limit", ["1000"])[0])
                     offset = int(query_params.get("offset", ["0"])[0])
                     self.send_json(200, STORE.get_joined_recruits(parts[4], limit=limit, offset=offset))
+                    return
+            if parsed.path.startswith("/api/recruiting/"):
+                parts = parsed.path.split("/")
+                if len(parts) == 4:
+                    self.send_json(200, STORE.get_recruiting_board(parts[3]))
                     return
             if self.path == "/api/tables" or self.path.startswith("/api/tables?"):
                 self.send_json(200, STORE.discover_tables(deep="deep=1" in self.path))
@@ -4773,7 +5544,227 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_error(exc)
 
     def do_POST(self) -> None:
+        global SAVE_DIR, STORE
         try:
+            if self.path == "/api/settings/save-directory":
+                body = self.read_json_body()
+                raw_directory = body.get("directory")
+                if not isinstance(raw_directory, str) or not raw_directory.strip():
+                    raise AppError("Choose a save folder first", 400)
+                directory = Path(raw_directory).expanduser().resolve()
+                if not directory.is_dir():
+                    raise AppError("That save folder does not exist", 400)
+                try:
+                    next_store = SaveStore(directory)
+                    files = next_store.list_files()
+                except OSError as exc:
+                    raise AppError(f"Cannot read that save folder: {exc}", 400) from exc
+                SAVE_DIR = directory
+                STORE = next_store
+                self.send_json(200, {"directory": str(directory), "files": files})
+                return
+            if self.path == "/api/live/discover-player":
+                body = self.read_json_body()
+                file_name = body.get("file")
+                query = body.get("query")
+                if isinstance(file_name, str) and file_name and isinstance(query, str):
+                    player_row = body.get("playerRow")
+                    if player_row is not None and not isinstance(player_row, int):
+                        raise AppError("playerRow must be an integer", 400)
+                    self.send_json(200, STORE.discover_live_player(file_name, query, player_row=player_row))
+                    return
+                player_id = body.get("playerId")
+                ratings = body.get("ratings")
+                if not isinstance(player_id, int):
+                    raise AppError("playerId must be an integer", 400)
+                if not isinstance(ratings, dict):
+                    raise AppError("ratings must be an object", 400)
+                status = live_status()
+                processes = status.get("gameProcesses", [])
+                if not processes:
+                    raise AppError("CollegeFB27.exe is not running", 409)
+                self.send_json(
+                    200,
+                    discover_live_player_objects(int(processes[0]["pid"]), player_id, ratings),
+                )
+                return
+            if self.path == "/api/live/hook/attach":
+                status = live_status()
+                processes = status.get("gameProcesses", [])
+                if not processes:
+                    raise AppError("CollegeFB27.exe is not running", 409)
+                if status.get("anticheatProcesses"):
+                    raise AppError("A real EA anticheat/Javelin process is running; hook loading is blocked", 403)
+                recognized = any(
+                    build.get("recognized") for build in status.get("builds", [])
+                    if str(build.get("path", "")).lower().endswith("collegefb27.exe")
+                )
+                if not recognized:
+                    raise AppError("The running CFB27 build is not recognized; hook loading is blocked", 409)
+                try:
+                    self.send_json(200, attach_hook(int(processes[0]["pid"])))
+                except (FileNotFoundError, RuntimeError, OSError, ValueError) as exc:
+                    raise AppError(str(exc), 409) from exc
+                return
+            if self.path == "/api/live/hook/queue-rating":
+                body = self.read_json_body()
+                status = live_status()
+                processes = status.get("gameProcesses", [])
+                if not processes:
+                    raise AppError("CollegeFB27.exe is not running", 409)
+                field = body.get("field")
+                expected = body.get("expected")
+                value = body.get("value")
+                if not isinstance(field, str) or not isinstance(expected, int) or not isinstance(value, int):
+                    raise AppError("field, expected, and value are required", 400)
+                try:
+                    player_id = body.get("playerId")
+                    if not isinstance(player_id, int):
+                        raise AppError("playerId is required", 400)
+                    result = queue_response_rating(int(processes[0]["pid"]), player_id, field, expected, value)
+                except (FileNotFoundError, RuntimeError, OSError, ValueError) as exc:
+                    raise AppError(str(exc), 409) from exc
+                if not result.get("ok"):
+                    raise AppError(str(result.get("error") or "The hook rejected the rating"), 409)
+                self.send_json(200, result)
+                return
+            if self.path == "/api/live/hook/unlock-editing":
+                body = self.read_json_body()
+                file_name = body.get("file")
+                if not isinstance(file_name, str) or not file_name:
+                    raise AppError("file is required", 400)
+                save_path = STORE.validate_filename(file_name)
+                status = live_status()
+                processes = status.get("gameProcesses", [])
+                if not processes:
+                    raise AppError("CollegeFB27.exe is not running", 409)
+                if status.get("anticheatProcesses"):
+                    raise AppError("A real EA anticheat/Javelin process is running; live writes are blocked", 403)
+                try:
+                    result = unlock_dynasty_player_editing(int(processes[0]["pid"]), save_path)
+                    result["monitor"] = start_dynasty_unlock_monitor(int(processes[0]["pid"]), save_path)
+                except (FileNotFoundError, RuntimeError, OSError, ValueError) as exc:
+                    raise AppError(str(exc), 409) from exc
+                self.send_json(200, result)
+                return
+            if self.path == "/api/live/hook/apply-rating":
+                body = self.read_json_body()
+                file_name = body.get("file")
+                row = body.get("row")
+                field = body.get("field")
+                expected = body.get("expected")
+                value = body.get("value")
+                if not isinstance(file_name, str) or not file_name:
+                    raise AppError("file is required", 400)
+                if not isinstance(row, int) or not isinstance(field, str):
+                    raise AppError("row and field are required", 400)
+                if not isinstance(expected, int) or not isinstance(value, int):
+                    raise AppError("expected and value are required", 400)
+                save_path = STORE.validate_filename(file_name)
+                status = live_status()
+                processes = status.get("gameProcesses", [])
+                if not processes:
+                    raise AppError("CollegeFB27.exe is not running", 409)
+                if status.get("anticheatProcesses"):
+                    raise AppError("A real EA anticheat/Javelin process is running; live writes are blocked", 403)
+                pid = int(processes[0]["pid"])
+                try:
+                    attach_hook(pid)
+                    patch = player_rating_patch(save_path, row, field, value)
+                    if int(patch["expectedBefore"]) != expected:
+                        raise ValueError(
+                            f"The selected save has {field}={patch['expectedBefore']}, not the expected {expected}"
+                        )
+                    player_id = int(patch.get("player", {}).get("playerId") or 0)
+                    if player_id <= 0:
+                        raise ValueError("The selected Player record does not have a PresentationId")
+                    attach_response_guard(pid)
+                    queued = queue_response_rating(pid, player_id, field, expected, value)
+                    unlocked = unlock_dynasty_player_editing(pid, save_path)
+                    monitor = start_dynasty_unlock_monitor(pid, save_path, extra_patches=[patch])
+                except (FileNotFoundError, RuntimeError, OSError, ValueError) as exc:
+                    raise AppError(str(exc), 409) from exc
+                self.send_json(200, {"ok": True, "queued": queued, "unlocked": unlocked, "patch": patch, "monitor": monitor})
+                return
+            if self.path == "/api/live/hook/run-script":
+                body = self.read_json_body()
+                script = body.get("script")
+                if not isinstance(script, str):
+                    raise AppError("script is required", 400)
+                status = live_status()
+                processes = status.get("gameProcesses", [])
+                if not processes:
+                    raise AppError("CollegeFB27.exe is not running", 409)
+                try:
+                    result = run_lua_script(int(processes[0]["pid"]), script)
+                except (FileNotFoundError, PermissionError, RuntimeError, OSError, ValueError) as exc:
+                    raise AppError(str(exc), 409) from exc
+                if not result.get("ok"):
+                    raise AppError(str(result.get("result") or result.get("error") or "Lua script failed"), 409)
+                self.send_json(200, result)
+                return
+            if self.path == "/api/live/hook/clear":
+                status = live_status()
+                processes = status.get("gameProcesses", [])
+                if not processes:
+                    raise AppError("CollegeFB27.exe is not running", 409)
+                try:
+                    pid = int(processes[0]["pid"])
+                    primary = hook_command(pid, "CLEAR")
+                    guard = response_guard_status(pid)
+                    if guard.get("loaded"):
+                        from native_hook import _hook_command_to_pipe, RESPONSE_GUARD_PIPE_PREFIX
+                        guard = _hook_command_to_pipe(pid, "CLEAR", pipe_prefix=RESPONSE_GUARD_PIPE_PREFIX)
+                    self.send_json(200, {"ok": True, "primary": primary, "responseGuard": guard})
+                except (FileNotFoundError, RuntimeError, OSError, ValueError) as exc:
+                    raise AppError(str(exc), 409) from exc
+                return
+            if self.path == "/api/live/write-rating":
+                body = self.read_json_body()
+                if body.get("confirm") is not True or body.get("confirmOffline") is not True:
+                    raise AppError("confirm and confirmOffline must both be true", 400)
+                status = live_status()
+                processes = status.get("gameProcesses", [])
+                if not processes:
+                    raise AppError("CollegeFB27.exe is not running", 409)
+                if status.get("anticheatProcesses"):
+                    raise AppError("A real EA anticheat/Javelin process is running; live writes are blocked", 403)
+                recognized = any(
+                    build.get("recognized") for build in status.get("builds", [])
+                    if str(build.get("path", "")).lower().endswith("collegefb27.exe")
+                )
+                if not recognized:
+                    raise AppError("The running CFB27 build is not recognized; live writes are blocked", 409)
+                player_id = body.get("playerId")
+                addresses = body.get("objectAddresses")
+                field = body.get("field")
+                before = body.get("expectedBefore")
+                value = body.get("value")
+                if not isinstance(player_id, int) or not isinstance(addresses, list):
+                    raise AppError("playerId and objectAddresses are required", 400)
+                if not isinstance(field, str) or not isinstance(before, int) or not isinstance(value, int):
+                    raise AppError("field, expectedBefore, and value are required", 400)
+                parsed_addresses = []
+                for address in addresses:
+                    if isinstance(address, int):
+                        parsed_addresses.append(address)
+                    elif isinstance(address, str):
+                        parsed_addresses.append(int(address, 0))
+                    else:
+                        raise AppError("objectAddresses must contain integers or hexadecimal strings", 400)
+                try:
+                    result = write_live_player_rating(
+                        int(processes[0]["pid"]),
+                        parsed_addresses,
+                        player_id,
+                        field,
+                        before,
+                        value,
+                    )
+                except (ValueError, RuntimeError, OSError) as exc:
+                    raise AppError(str(exc), 409) from exc
+                self.send_json(200, result)
+                return
             if self.path == "/api/generator/preview":
                 body = self.read_json_body()
                 file_name = body.get("file")
@@ -4782,9 +5773,10 @@ class Handler(BaseHTTPRequestHandler):
                 config = body.get("config")
                 seed = str(body.get("seed") or "default")
                 locks = body.get("locks")
+                engine = str(body.get("engine") or "local")
                 if locks is not None and not isinstance(locks, dict):
                     raise AppError("locks must be an object when supplied")
-                self.send_json(200, STORE.preview_generator(file_name, config, seed, locks=locks))
+                self.send_json(200, STORE.preview_generator(file_name, config, seed, locks=locks, engine=engine))
                 return
             if self.path == "/api/generator/apply":
                 body = self.read_json_body()
@@ -4805,6 +5797,9 @@ class Handler(BaseHTTPRequestHandler):
                         body.get("confirm") is True,
                         locks=locks,
                         write_mode=str(body.get("writeMode") or "copy"),
+                        engine=str(body.get("engine") or "local"),
+                        home_dogs_preview_path=body.get("homeDogsPreviewPath"),
+                        expected_save_fingerprint=str(body.get("saveFingerprint") or ""),
                     ),
                 )
                 return
@@ -4831,6 +5826,20 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/generator/config/validate":
                 body = self.read_json_body()
                 self.send_json(200, normalize_generator_config(body.get("config"), recruit_count=body.get("recruitCount")))
+                return
+            if self.path == "/api/recruiting/preview":
+                body = self.read_json_body()
+                file_name = body.get("file")
+                if not isinstance(file_name, str) or not file_name:
+                    raise AppError("file is required")
+                self.send_json(
+                    200,
+                    STORE.preview_recruiting(
+                        file_name,
+                        str(body.get("saveFingerprint") or ""),
+                        body.get("plans", []),
+                    ),
+                )
                 return
             if self.path == "/api/generator/artifacts/cleanup":
                 body = self.read_json_body()

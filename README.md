@@ -1,5 +1,7 @@
 # CFB27 Save Editor
 
+Reverse-engineering and live-hook findings are tracked in [docs/live-hook-research.md](docs/live-hook-research.md).
+
 Local web app for inspecting and editing EA SPORTS College Football 27 save files.
 
 The app runs entirely on your machine. The backend is a Python stdlib HTTP server, the frontend is vanilla HTML/CSS/JS, and structured dynasty table edits are handled with `madden-franchise` using a locally extracted CFB27 FranTk schema.
@@ -231,7 +233,7 @@ The generated schema files and save-derived payloads are not committed because t
 - Node.js
 - npm
 - Local CFB27 save files
-- Generated schema file: `schema/CFB27_schema_for_madden_franchise.gz`
+- Local schema file: `schema/CFB27_809_0.gz` (required for structured Dynasty editing and intentionally not committed)
 
 Install Node dependencies:
 
@@ -270,19 +272,32 @@ http://127.0.0.1:8765/
 
 ## Test
 
-Run:
+Run the fast default checks:
 
 ```powershell
 npm test
 ```
 
-Equivalent direct command:
+Useful focused commands:
+
+```powershell
+npm run check
+npm run test:recruiting
+```
+
+Run the full save-heavy suite only when you need full regression coverage:
+
+```powershell
+npm run test:full
+```
+
+Equivalent direct full-suite command:
 
 ```powershell
 python -m unittest -v test_editor.py
 ```
 
-The tests use temporary copies for write checks. They verify:
+The full suite takes several minutes on local dynasty fixtures. It uses temporary copies for write checks and verifies:
 
 - all top-level `FBCHUNKS` saves parse and decompress
 - no-edit rebuilds can be parsed again
@@ -313,7 +328,7 @@ The extracted schema identifies tables and fields such as:
 - `UserRecruitTarget`
 - `CharacterVisuals`
 
-The app currently uses the generated `CFB27_schema_for_madden_franchise.gz` file for `madden-franchise` schema override support.
+The app uses a local `schema/CFB27_809_0.gz` file for `madden-franchise` schema override support. This game-derived file is intentionally ignored by Git; provide it from your own local setup before using structured Dynasty editing.
 
 ## Safety Rules
 
@@ -409,7 +424,7 @@ python tools/recruiting_probe.py `
   --board-row 87
 ```
 
-The probe writer creates a new `*-MODDED-RECRUITING-PROBE-ACTION` save beside the source and refuses to overwrite an existing file. It supports one or more weekly action boolean toggles and can reconcile `RecruitingBoard.RecruitingHoursAssigned` for the known board row. `SendTheHouse` is open as an experimental action toggle.
+The probe writer creates a new `*-MODDED-RECRUITING-PROBE-ACTION` save beside the source and refuses to overwrite an existing file. It supports one or more weekly action boolean toggles and can reconcile `RecruitingBoard.RecruitingHoursAssigned` for the known board row. `SendTheHouse` is treated as a validated weekly action mapping based on local probes plus matching upstream/schema/tuning sources.
 
 ```powershell
 python tools/recruiting_probe.py `

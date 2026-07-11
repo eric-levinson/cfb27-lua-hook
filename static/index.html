@@ -3,43 +3,66 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>CFB27 Recruit Generator</title>
+    <title>CFB27 Dynasty Lab</title>
     <link rel="stylesheet" href="/static/styles.css">
   </head>
   <body>
     <main class="app-shell">
       <header class="topbar">
-        <div class="title-block">
-          <h1>CFB27 Recruit Generator</h1>
-          <p id="status">Loading save files...</p>
+        <div class="brand-lockup">
+          <span class="brand-mark" aria-hidden="true">27</span>
+          <div class="title-block">
+            <span class="brand-kicker">Dynasty Lab</span>
+            <h1>College Football 27</h1>
+            <p id="status">Loading save files...</p>
+          </div>
         </div>
         <div class="top-actions">
-          <select id="fileSelect" aria-label="Save file"></select>
+          <div class="save-source">
+            <span id="saveDirectoryLabel">Save folder: loading…</span>
+            <select id="fileSelect" aria-label="Save file"></select>
+          </div>
+          <button id="chooseSaveFolderBtn" type="button">Choose Folder</button>
           <button id="refreshBtn" type="button">Refresh</button>
           <button id="backupBtn" type="button">Backup</button>
-          <button id="artifactsBtn" type="button">Artifacts</button>
-          <button id="cleanupArtifactsBtn" type="button">Clean Artifacts</button>
+          <details class="header-more">
+            <summary>More</summary>
+            <div class="header-more-menu">
+              <button id="artifactsBtn" type="button">Open Artifacts</button>
+              <button id="cleanupArtifactsBtn" type="button">Clean Artifacts</button>
+            </div>
+          </details>
         </div>
       </header>
 
       <nav class="view-tabs" aria-label="Workbench views">
-        <button type="button" data-view-tab="generator">Generator</button>
-        <button type="button" data-view-tab="configs">Configs</button>
+        <button type="button" data-view-tab="live">Live Editor</button>
+        <button type="button" data-view-tab="recruiting">Recruiting</button>
         <button type="button" data-view-tab="recruit-editor">Recruit Editor</button>
         <button type="button" data-view-tab="save-tools">Save Tools</button>
-        <button type="button" data-view-tab="schema">Schema</button>
-        <button type="button" data-view-tab="tables">Tables</button>
-        <button type="button" data-view-tab="roster">Roster</button>
+        <details class="advanced-nav">
+          <summary>Advanced</summary>
+          <div class="advanced-nav-menu">
+            <button type="button" data-view-tab="generator">Generator</button>
+            <button type="button" data-view-tab="configs">Generator Config</button>
+            <button type="button" data-view-tab="schema">Schema</button>
+            <button type="button" data-view-tab="tables">Raw Tables</button>
+            <button type="button" data-view-tab="roster">Legacy Roster</button>
+          </div>
+        </details>
       </nav>
 
       <section class="metrics" id="metrics" data-view="generator save-tools"></section>
 
       <section class="toolbar" data-view="generator">
         <input id="profileSearch" type="search" autocomplete="off" placeholder="Search rank, name, position, archetype, profile">
-        <input id="seedInput" type="text" autocomplete="off" value="2026-class-1" aria-label="Preview seed">
-        <button id="generatePreviewBtn" type="button">Generate Preview</button>
-        <button id="applyPreviewBtn" type="button" disabled>Apply Preview</button>
-        <button id="exportPatchBtn" type="button" disabled>Dry Run Patch</button>
+        <input id="seedInput" type="text" autocomplete="off" placeholder="Auto seed" aria-label="Preview seed">
+        <select id="generatorEngineSelect" aria-label="Generator engine" hidden>
+          <option value="home-dogs">Home Dogs</option>
+        </select>
+        <button id="generatePreviewBtn" type="button">Generate Home Dogs Preview</button>
+        <button id="applyPreviewBtn" type="button" disabled>Apply Home Dogs</button>
+        <button id="exportPatchBtn" type="button" disabled hidden>Dry Run Patch</button>
         <button id="reloadProfilesBtn" type="button">Reload Profiles</button>
       </section>
 
@@ -47,7 +70,105 @@
 
       <section class="preview-browser" id="previewBrowser" data-view="generator"></section>
 
-      <section class="config-panel" data-view="generator configs">
+      <section class="recruiting-panel cfb-screen" data-view="recruiting">
+        <div class="cfb-topline">
+          <div class="cfb-title">
+            <span class="cfb-team-mark" data-cfb-program-mark>CFB</span>
+            <h2>Recruiting</h2>
+          </div>
+          <div class="cfb-tabs" role="tablist" aria-label="Recruiting views">
+            <button type="button" class="active" role="tab" aria-selected="true" data-recruiting-tab="board">Recruiting Board</button>
+            <button type="button" role="tab" aria-selected="false" data-recruiting-tab="prospects">Prospect List</button>
+            <button type="button" role="tab" aria-selected="false" data-recruiting-tab="portal">Transfer Portal</button>
+            <button type="button" role="tab" aria-selected="false" data-recruiting-tab="school">My School</button>
+            <button type="button" role="tab" aria-selected="false" data-recruiting-tab="classes">Top Classes</button>
+          </div>
+          <div class="cfb-save-tools">
+            <select id="recruitingSort" aria-label="Sort board targets">
+              <option value="rank">Rank</option>
+              <option value="hours">Hours</option>
+              <option value="position">Position</option>
+              <option value="name">Name</option>
+            </select>
+            <button id="desktopOpenSaveBtn" type="button" hidden>Open</button>
+            <button id="loadRecruitingBtn" type="button">Reload</button>
+            <button id="previewRecruitingPlanBtn" type="button" disabled>Preview</button>
+          </div>
+          <div class="recruiting-counters cfb-scorebug" id="recruitingCounters"></div>
+        </div>
+
+        <div class="recruiting-status cfb-status" id="recruitingStatus"></div>
+
+        <div class="recruiting-workbench cfb-board-layout">
+          <section class="recruiting-list-pane cfb-board-list">
+            <div class="cfb-filter-row">
+              <label for="recruitingSearch">Search</label>
+              <input id="recruitingSearch" type="search" autocomplete="off" placeholder="ANY">
+            </div>
+            <div class="cfb-scroll-list">
+              <table class="compact-table cfb-target-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Prospect</th>
+                    <th>Pos</th>
+                    <th>Nil</th>
+                    <th>Int</th>
+                    <th>Hours</th>
+                  </tr>
+                </thead>
+                <tbody id="recruitingTargetsBody"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="recruiting-detail cfb-main-card" id="recruitingDetail">
+            <div class="empty-state compact">Load a board and select a target.</div>
+          </section>
+
+          <aside class="recruiting-side cfb-side-card" id="recruitingSide">
+            <div class="empty-state compact">Write gates and provenance will appear here.</div>
+          </aside>
+        </div>
+      </section>
+
+      <section class="support-panel live-panel" data-view="live">
+        <div class="support-head">
+          <div>
+            <span class="section-kicker">Player editor</span>
+            <h2>Live Editor</h2>
+            <p>Find a player in your active offline Dynasty and edit their ratings.</p>
+          </div>
+          <div class="support-actions">
+            <input id="livePlayerQuery" type="search" autocomplete="off" placeholder="Player name, e.g. Chudzinski">
+            <button id="unlockDynastyBtn" type="button">Unlock Editing</button>
+            <button id="discoverLivePlayerBtn" type="button">Find Player</button>
+            <button id="refreshLiveBtn" class="secondary-action" type="button">Reconnect</button>
+          </div>
+        </div>
+        <div class="support-grid two-col">
+          <section class="support-detail" id="liveSessionPanel">
+            <div class="empty-state compact">Select Detect Game after entering an offline Dynasty.</div>
+          </section>
+          <aside class="support-detail" id="liveSafetyPanel">
+            <div class="empty-state compact">Runtime write safety gates will appear here.</div>
+          </aside>
+        </div>
+        <section class="support-detail" id="livePlayerPanel">
+          <div class="empty-state compact">Search for a player above to view their ratings.</div>
+        </section>
+        <details class="technical-details">
+          <summary>Technical details</summary>
+          <div class="support-table-wrap">
+            <table class="compact-table">
+              <thead><tr><th>Module</th><th>Base</th><th>Size</th><th>Path</th></tr></thead>
+              <tbody id="liveModulesBody"></tbody>
+            </table>
+          </div>
+        </details>
+      </section>
+
+      <section class="config-panel" data-view="configs">
         <div class="config-head">
           <div>
             <h2 id="configName">Config</h2>

@@ -526,6 +526,85 @@ h1 {
   background: #f8fafb;
 }
 
+.recruiting-panel {
+  min-height: 0;
+  padding: 14px 22px;
+  background: #f8fafb;
+}
+
+.recruiting-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.recruiting-status span {
+  padding: 4px 7px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.recruiting-status .warning {
+  color: var(--warn);
+}
+
+.recruiting-counters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.recruiting-workbench {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(300px, 0.95fr) minmax(360px, 1.2fr) minmax(310px, 0.85fr);
+  gap: 12px;
+}
+
+.recruiting-list-pane,
+.recruiting-detail,
+.recruiting-side {
+  min-width: 0;
+}
+
+.recruiting-filters {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 110px;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.recruiting-filters input,
+.recruiting-filters select {
+  width: 100%;
+  min-width: 0;
+}
+
+.recruiting-table-wrap {
+  max-height: calc(100vh - 315px);
+}
+
+.recruiting-detail,
+.recruiting-side {
+  max-height: calc(100vh - 268px);
+  overflow: auto;
+}
+
+.planner-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.planner-grid button {
+  min-width: 0;
+}
+
 .support-head {
   display: flex;
   align-items: flex-start;
@@ -1058,6 +1137,1364 @@ pre {
   font-size: 12px;
 }
 
+body.recruiting-active {
+  --team-primary: #202628;
+  --team-secondary: #d6b552;
+  --team-backdrop: #202628;
+  --team-hero: #9b1238;
+  --team-side: #9b1238;
+  --team-secondary-wash: rgba(214, 181, 82, 0.22);
+  --game-panel: rgba(22, 23, 23, 0.9);
+  --game-panel-soft: rgba(42, 44, 44, 0.84);
+  --game-line: rgba(255, 255, 255, 0.22);
+  --game-cream: #eceae1;
+  --game-muted: rgba(236, 234, 225, 0.62);
+  --game-hot: #c9003a;
+  min-height: 100vh;
+  background:
+    linear-gradient(115deg, rgba(0, 0, 0, 0.9) 0%, color-mix(in srgb, var(--team-backdrop) 76%, transparent) 42%, rgba(0, 0, 0, 0.88) 100%),
+    repeating-linear-gradient(157deg, rgba(255, 255, 255, 0.1) 0 2px, transparent 2px 34px),
+    var(--team-backdrop);
+  color: var(--game-cream);
+  overflow: hidden;
+}
+
+body.recruiting-active::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(100deg, transparent 0 64%, rgba(255, 255, 255, 0.14) 64% 66%, transparent 66%),
+    linear-gradient(165deg, transparent 0 78%, var(--team-secondary-wash) 78% 80%, transparent 80%),
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.025) 0 1px, transparent 1px 4px);
+  opacity: 0.9;
+}
+
+body.recruiting-active .app-shell {
+  position: relative;
+  z-index: 1;
+  display: block;
+  min-height: 100vh;
+}
+
+body.recruiting-active .topbar {
+  display: none;
+}
+
+body.recruiting-active .view-tabs {
+  position: relative;
+  z-index: 2;
+  display: flex;
+}
+
+/* Dynasty Lab shell: compact, deliberate, and game-tool focused. */
+body:not(.recruiting-active) {
+  --bg: #0b0e12;
+  --surface: #151a20;
+  --surface-raised: #1b2129;
+  --ink: #f2f0e9;
+  --muted: #98a1aa;
+  --line: #2a323b;
+  --accent: #b01f32;
+  --accent-dark: #881625;
+  --accent-soft: #32171d;
+  --warn: #e6a641;
+  --bar: #c72a3e;
+  --bar-bg: #242b33;
+  background:
+    radial-gradient(circle at 82% 0%, rgba(176, 31, 50, 0.12), transparent 34rem),
+    #0b0e12;
+}
+
+body:not(.recruiting-active) .app-shell {
+  background: transparent;
+}
+
+body:not(.recruiting-active) .topbar {
+  min-height: 86px;
+  padding: 14px 24px;
+  border-bottom: 1px solid #303740;
+  background: rgba(13, 17, 22, 0.96);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.28);
+}
+
+.brand-lockup {
+  min-width: 300px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.brand-mark {
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border: 1px solid #d6b552;
+  border-radius: 3px;
+  background: linear-gradient(145deg, #262d35, #11151a);
+  color: #e3c76e;
+  font-size: 19px;
+  font-weight: 900;
+  font-style: italic;
+  letter-spacing: -1px;
+  box-shadow: inset 0 0 0 3px rgba(214, 181, 82, 0.08);
+}
+
+.brand-kicker,
+.section-kicker {
+  display: block;
+  margin-bottom: 3px;
+  color: #d6b552;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+body:not(.recruiting-active) h1 {
+  color: #fff;
+  font-size: 18px;
+  font-weight: 750;
+  letter-spacing: 0.01em;
+}
+
+body:not(.recruiting-active) #status {
+  max-width: 520px;
+  margin-top: 3px;
+  color: #8e98a2;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+body:not(.recruiting-active) button,
+body:not(.recruiting-active) input,
+body:not(.recruiting-active) select {
+  min-height: 36px;
+  border-color: #343d47;
+  border-radius: 4px;
+  background: #171d23;
+  color: #e9ecef;
+}
+
+body:not(.recruiting-active) button {
+  border-color: #b01f32;
+  background: #b01f32;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+body:not(.recruiting-active) button:hover {
+  border-color: #d2374b;
+  background: #c5283d;
+}
+
+body:not(.recruiting-active) button:disabled {
+  border-color: #303842;
+  background: #242b32;
+  color: #68737d;
+}
+
+body:not(.recruiting-active) .top-actions {
+  gap: 6px;
+}
+
+.save-source {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+#saveDirectoryLabel {
+  max-width: 360px;
+  padding-left: 2px;
+  color: #7f8993;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+body:not(.recruiting-active) #chooseSaveFolderBtn {
+  border-color: #d6b552;
+  background: transparent;
+  color: #e0c66f;
+}
+
+body:not(.recruiting-active) #chooseSaveFolderBtn:hover {
+  border-color: #f0d77f;
+  background: rgba(214, 181, 82, 0.1);
+  color: #f5df95;
+}
+
+body:not(.recruiting-active) .top-actions button:not(#refreshBtn) {
+  border-color: #343d47;
+  background: transparent;
+  color: #aeb6be;
+}
+
+body:not(.recruiting-active) .top-actions button:not(#refreshBtn):hover {
+  border-color: #66727e;
+  background: #1e252d;
+  color: #fff;
+}
+
+body:not(.recruiting-active) #fileSelect {
+  min-width: 290px;
+  border-color: #3b4651;
+  background: #11161b;
+  color: #dfe3e6;
+}
+
+body:not(.recruiting-active) .view-tabs {
+  gap: 0;
+  padding: 0 24px;
+  border-bottom: 1px solid #2a3139;
+  background: #11161b;
+}
+
+body:not(.recruiting-active) .view-tabs button {
+  min-height: 44px;
+  padding: 0 14px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: #828d97;
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: 0.025em;
+}
+
+body:not(.recruiting-active) .view-tabs button:hover {
+  border-bottom-color: #5e6872;
+  background: rgba(255, 255, 255, 0.025);
+  color: #d5d9dd;
+}
+
+body:not(.recruiting-active) .view-tabs button.active {
+  border-color: #c82a3e;
+  background: linear-gradient(180deg, transparent, rgba(176, 31, 50, 0.09));
+  color: #fff;
+}
+
+body:not(.recruiting-active) .support-panel,
+body:not(.recruiting-active) .config-panel,
+body:not(.recruiting-active) .toolbar,
+body:not(.recruiting-active) .preview-browser {
+  background: transparent;
+}
+
+body:not(.recruiting-active) .support-panel {
+  padding: 24px;
+}
+
+body:not(.recruiting-active) .support-head {
+  align-items: end;
+  margin-bottom: 20px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid #2b333c;
+}
+
+body:not(.recruiting-active) .support-head h2 {
+  color: #fff;
+  font-size: 25px;
+  font-weight: 760;
+  letter-spacing: -0.025em;
+}
+
+body:not(.recruiting-active) .support-head p,
+body:not(.recruiting-active) .support-note {
+  max-width: 690px;
+  margin-top: 6px;
+  color: #89949e;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+body:not(.recruiting-active) .support-actions {
+  flex-wrap: nowrap;
+}
+
+body:not(.recruiting-active) .support-actions input[type="search"] {
+  width: clamp(260px, 30vw, 420px);
+  min-width: 260px;
+  margin: 0;
+  background: #11161b;
+}
+
+body:not(.recruiting-active) .support-detail,
+body:not(.recruiting-active) .support-table-wrap,
+body:not(.recruiting-active) .metric {
+  border-color: #2d3640;
+  border-radius: 5px;
+  background: rgba(21, 26, 32, 0.92);
+  box-shadow: 0 14px 28px rgba(0, 0, 0, 0.14);
+}
+
+body:not(.recruiting-active) .support-detail {
+  padding: 16px;
+}
+
+body:not(.recruiting-active) .support-detail h3 {
+  margin-bottom: 12px;
+  color: #f3f1eb;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+body:not(.recruiting-active) .live-panel .support-grid.two-col {
+  grid-template-columns: minmax(0, 1.35fr) minmax(300px, 0.65fr);
+  margin-bottom: 12px;
+}
+
+body:not(.recruiting-active) .live-panel #liveSafetyPanel {
+  border-left: 3px solid #b01f32;
+}
+
+body:not(.recruiting-active) .detail-list {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 7px 14px;
+}
+
+body:not(.recruiting-active) .detail-list dt {
+  color: #78848e;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+body:not(.recruiting-active) .detail-list dd {
+  min-width: 0;
+  margin: 0;
+  color: #dce1e5;
+  overflow-wrap: anywhere;
+}
+
+body:not(.recruiting-active) code {
+  color: #d6b552;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 0.92em;
+}
+
+body:not(.recruiting-active) th {
+  border-bottom-color: #343d46;
+  background: #1d242b;
+  color: #86919b;
+  font-size: 10px;
+  letter-spacing: 0.09em;
+}
+
+body:not(.recruiting-active) td {
+  border-bottom-color: #252d35;
+  color: #cbd1d6;
+}
+
+body:not(.recruiting-active) tbody tr:hover,
+body:not(.recruiting-active) tbody tr.selected {
+  background: rgba(176, 31, 50, 0.12);
+}
+
+body:not(.recruiting-active) .empty-state {
+  color: #77828c;
+}
+
+@media (max-width: 980px) {
+  body:not(.recruiting-active) .topbar,
+  body:not(.recruiting-active) .support-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  body:not(.recruiting-active) .top-actions,
+  body:not(.recruiting-active) .support-actions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  body:not(.recruiting-active) #fileSelect,
+  body:not(.recruiting-active) .support-actions input[type="search"] {
+    min-width: 220px;
+    flex: 1 1 260px;
+  }
+
+  .save-source {
+    flex: 1 1 300px;
+  }
+
+  #saveDirectoryLabel {
+    max-width: none;
+  }
+}
+
+body:not(.recruiting-active) .secondary-action {
+  border-color: #3a444e;
+  background: transparent;
+  color: #aeb6be;
+}
+
+body:not(.recruiting-active) .secondary-action:hover {
+  border-color: #697580;
+  background: #20272e;
+  color: #fff;
+}
+
+.header-more,
+.advanced-nav {
+  position: relative;
+}
+
+.header-more > summary,
+.advanced-nav > summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+.header-more > summary::-webkit-details-marker,
+.advanced-nav > summary::-webkit-details-marker {
+  display: none;
+}
+
+body:not(.recruiting-active) .header-more > summary {
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  border: 1px solid #343d47;
+  border-radius: 4px;
+  color: #aeb6be;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.header-more-menu,
+.advanced-nav-menu {
+  position: absolute;
+  right: 0;
+  z-index: 20;
+  min-width: 180px;
+  padding: 6px;
+  border: 1px solid #343d47;
+  border-radius: 5px;
+  background: #151a20;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.42);
+}
+
+.header-more-menu {
+  top: calc(100% + 6px);
+}
+
+.header-more-menu button,
+.advanced-nav-menu button {
+  width: 100%;
+  justify-content: flex-start;
+  text-align: left;
+}
+
+body:not(.recruiting-active) .advanced-nav > summary {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  border-bottom: 2px solid transparent;
+  color: #828d97;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+body:not(.recruiting-active) .advanced-nav > summary::after {
+  content: "⌄";
+  margin-left: 6px;
+  color: #5f6b75;
+}
+
+body:not(.recruiting-active) .advanced-nav:has(button.active) > summary,
+body:not(.recruiting-active) .advanced-nav[open] > summary {
+  border-bottom-color: #c82a3e;
+  color: #fff;
+}
+
+.advanced-nav-menu {
+  top: calc(100% + 1px);
+}
+
+body:not(.recruiting-active) .advanced-nav-menu button {
+  min-height: 36px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: #aeb6be;
+}
+
+body:not(.recruiting-active) .advanced-nav-menu button:hover,
+body:not(.recruiting-active) .advanced-nav-menu button.active {
+  background: #242b33;
+  color: #fff;
+}
+
+.technical-details,
+.inline-technical {
+  color: #828d97;
+  font-size: 11px;
+}
+
+.technical-details {
+  margin-top: 12px;
+}
+
+.technical-details > summary,
+.inline-technical > summary {
+  width: max-content;
+  padding: 6px 0;
+  color: #89949e;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.technical-details[open] > summary,
+.inline-technical[open] > summary {
+  color: #d6b552;
+}
+
+.technical-details .support-table-wrap {
+  margin-top: 5px;
+}
+
+.inline-technical {
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px solid #29313a;
+}
+
+.inline-technical code {
+  display: block;
+  margin-top: 6px;
+  overflow-wrap: anywhere;
+}
+
+.inline-technical ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  line-height: 1.5;
+}
+
+.editing-state {
+  margin-bottom: 6px;
+  color: #f0d989;
+  font-size: 15px;
+}
+
+.player-subtitle {
+  margin: -6px 0 14px;
+  color: #8f99a3;
+}
+
+.live-panel #livePlayerPanel {
+  max-height: none;
+  margin-top: 12px;
+}
+
+.live-panel #livePlayerPanel > .support-table-wrap {
+  max-height: calc(100vh - 390px);
+  margin-top: 14px;
+}
+
+.live-panel #livePlayerPanel input[type="number"] {
+  width: 82px;
+}
+
+.inline-player-details p {
+  margin: 4px 0 0;
+}
+
+body.recruiting-active .cfb-screen {
+  min-height: 100vh;
+  padding: 34px 4vw 82px;
+  background: transparent;
+}
+
+.cfb-topline {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(360px, 1fr) auto;
+  grid-template-areas:
+    "title scorebug"
+    "tabs tools";
+  align-items: center;
+  gap: 18px 24px;
+  margin-bottom: 28px;
+}
+
+.cfb-title {
+  grid-area: title;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  text-transform: uppercase;
+}
+
+.cfb-team-mark {
+  display: grid;
+  place-items: center;
+  width: 54px;
+  height: 54px;
+  color: var(--team-secondary);
+  font-family: Segoe UI, Inter, Arial, sans-serif;
+  font-size: clamp(24px, 2.4vw, 46px);
+  font-weight: 900;
+  line-height: 0.9;
+  text-shadow: 0 3px 0 rgba(0, 0, 0, 0.34);
+}
+
+.cfb-title h2 {
+  font-family: Segoe UI, Inter, Arial, sans-serif;
+  font-size: clamp(34px, 4vw, 56px);
+  line-height: 0.92;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  text-shadow: 0 3px 0 rgba(0, 0, 0, 0.32);
+}
+
+.cfb-tabs {
+  grid-area: tabs;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+  color: var(--game-muted);
+  font-size: 20px;
+  font-weight: 750;
+}
+
+.cfb-tabs span {
+  white-space: nowrap;
+}
+
+.cfb-tabs .active {
+  padding: 5px 9px;
+  border-radius: 3px;
+  background: var(--game-cream);
+  color: #242424;
+}
+
+.keycap {
+  display: inline-grid;
+  place-items: center;
+  min-width: 31px;
+  height: 31px;
+  padding: 0 7px;
+  border-radius: 3px;
+  background: var(--game-cream);
+  color: #151515;
+  font-size: 17px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.keycap.small {
+  min-width: 38px;
+  height: 25px;
+  font-size: 10px;
+}
+
+.cfb-save-tools {
+  grid-area: tools;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.cfb-save-tools select,
+.cfb-save-tools button,
+.cfb-filter-row input {
+  min-height: 38px;
+  border: 0;
+  border-radius: 4px;
+  background: var(--game-cream);
+  color: #242424;
+  font-size: 20px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.cfb-save-tools button {
+  padding: 0 14px;
+}
+
+.cfb-scorebug {
+  grid-area: scorebug;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  overflow: hidden;
+  border-radius: 3px;
+  background: rgba(18, 19, 19, 0.78);
+  box-shadow: 0 10px 22px rgba(0, 0, 0, 0.28);
+}
+
+.cfb-scorebug-item {
+  display: grid;
+  grid-template-columns: auto auto;
+  grid-template-rows: auto auto;
+  column-gap: 6px;
+  min-width: 118px;
+  padding: 8px 13px;
+  color: var(--game-cream);
+}
+
+.cfb-scorebug-item em {
+  grid-row: 1 / 3;
+  align-self: center;
+  color: #52c7ee;
+  font-style: normal;
+  font-size: 27px;
+}
+
+.cfb-scorebug-item span {
+  color: var(--game-muted);
+  font-size: 13px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.cfb-scorebug-item strong {
+  font-size: 21px;
+  line-height: 1;
+}
+
+.cfb-status {
+  position: fixed;
+  right: 4vw;
+  bottom: 20px;
+  z-index: 4;
+  max-width: 520px;
+  margin: 0;
+}
+
+.cfb-status span {
+  border: 0;
+  background: rgba(18, 19, 19, 0.72);
+  color: var(--game-muted);
+}
+
+.cfb-board-layout {
+  display: grid;
+  grid-template-columns: minmax(390px, 0.72fr) minmax(520px, 1.3fr) minmax(330px, 0.68fr);
+  gap: 22px;
+  align-items: stretch;
+}
+
+.cfb-board-list,
+.cfb-main-card,
+.cfb-side-card {
+  min-width: 0;
+}
+
+.cfb-filter-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.cfb-filter-row input {
+  width: 100%;
+  padding: 0 14px;
+}
+
+.cfb-add-prospect {
+  width: 100%;
+  height: 90px;
+  justify-content: space-between;
+  display: flex;
+  align-items: center;
+  margin-bottom: 10px;
+  padding: 0 22px;
+  border: 2px solid rgba(255, 255, 255, 0.16);
+  border-radius: 5px;
+  background: var(--game-panel-soft);
+  color: var(--game-cream);
+  font-family: Segoe UI, Inter, Arial, sans-serif;
+  font-size: 34px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.cfb-add-prospect strong {
+  color: rgba(255, 255, 255, 0.68);
+  font-family: Segoe UI, sans-serif;
+  font-size: 62px;
+}
+
+.cfb-scroll-list {
+  max-height: calc(100vh - 300px);
+  overflow: auto;
+  border-right: 3px solid rgba(255, 255, 255, 0.74);
+  padding-right: 18px;
+}
+
+.cfb-target-table {
+  min-width: 100%;
+  color: var(--game-cream);
+  table-layout: fixed;
+}
+
+.cfb-target-table th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 12px 9px;
+  border: 0;
+  background: rgba(14, 14, 14, 0.96);
+  color: var(--game-muted);
+  font-size: 14px;
+}
+
+.cfb-target-table td {
+  height: 58px;
+  padding: 7px 9px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(23, 24, 24, 0.82);
+  color: rgba(236, 234, 225, 0.74);
+  font-size: 18px;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.cfb-target-table tr.selected td {
+  background: var(--game-cream);
+  color: #1f1f1f;
+}
+
+.cfb-target-table tr.selected td:first-child {
+  box-shadow: inset 5px 0 0 var(--team-secondary);
+}
+
+.cfb-target-table td:nth-child(1) {
+  width: 44px;
+  text-align: center;
+  font-size: 24px;
+}
+
+.cfb-target-table td:nth-child(2) strong,
+.cfb-target-table td:nth-child(2) span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cfb-target-table td:nth-child(2) span {
+  margin-top: 2px;
+  color: inherit;
+  opacity: 0.68;
+  letter-spacing: 1px;
+}
+
+.cfb-recruit-hero,
+.cfb-detail-panel,
+.cfb-action-panel,
+.cfb-side-profile,
+.cfb-side-block,
+.cfb-dealbreaker {
+  border-radius: 6px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06), transparent 28%),
+    repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.025) 0 1px, transparent 1px 5px),
+    var(--game-panel);
+  box-shadow: 0 18px 34px rgba(0, 0, 0, 0.24);
+}
+
+.cfb-recruit-hero {
+  position: relative;
+  min-height: 240px;
+  display: grid;
+  grid-template-columns: 110px 210px minmax(260px, 1fr);
+  grid-template-rows: 1fr auto;
+  gap: 18px;
+  overflow: hidden;
+  padding: 28px 28px 22px;
+}
+
+.cfb-recruit-hero::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(92deg, rgba(0, 0, 0, 0.22), color-mix(in srgb, var(--team-hero) 82%, transparent));
+  opacity: 0.86;
+}
+
+.cfb-lock,
+.cfb-program-script,
+.cfb-player-silhouette,
+.cfb-hero-name,
+.cfb-hero-facts {
+  position: relative;
+  z-index: 1;
+}
+
+.cfb-lock {
+  position: absolute;
+  top: 20px;
+  left: 20px;
+  color: var(--game-cream);
+  font-size: 26px;
+}
+
+.cfb-program-script,
+.cfb-big-logo,
+.cfb-mini-logo {
+  font-family: Segoe UI, Inter, Arial, sans-serif;
+  color: var(--team-secondary);
+  text-shadow: 0 4px 0 rgba(0, 0, 0, 0.34);
+}
+
+.cfb-program-script {
+  align-self: start;
+  margin-top: 36px;
+  max-width: 110px;
+  overflow-wrap: anywhere;
+  font-size: clamp(54px, 5vw, 110px);
+  font-weight: 900;
+}
+
+.cfb-player-silhouette {
+  position: relative;
+  align-self: end;
+  width: 190px;
+  height: 180px;
+  border-radius: 44% 44% 4px 4px;
+  background:
+    linear-gradient(180deg, #8b604a 0 28%, transparent 28%),
+    linear-gradient(180deg, transparent 0 30%, #171717 30% 100%);
+  filter: drop-shadow(0 10px 16px rgba(0, 0, 0, 0.44));
+}
+
+.cfb-player-silhouette::before {
+  content: "";
+  position: absolute;
+  top: 18px;
+  left: 58px;
+  width: 74px;
+  height: 74px;
+  border-radius: 50%;
+  background: #7d533f;
+  box-shadow: 0 -22px 0 2px #3a271f;
+}
+
+.cfb-player-silhouette.small {
+  width: 150px;
+  height: 118px;
+  margin: 0 auto;
+}
+
+.cfb-player-silhouette.small::before {
+  left: 47px;
+  width: 56px;
+  height: 56px;
+}
+
+.cfb-hero-name {
+  align-self: center;
+  min-width: 0;
+}
+
+.cfb-hero-name span {
+  display: block;
+  color: rgba(236, 234, 225, 0.72);
+  font-family: Segoe UI, Inter, Arial, sans-serif;
+  font-size: 27px;
+  font-weight: 900;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+}
+
+.cfb-hero-name strong {
+  display: block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  color: var(--game-cream);
+  font-family: Segoe UI, Inter, Arial, sans-serif;
+  font-size: clamp(42px, 5vw, 68px);
+  line-height: 0.9;
+  text-transform: uppercase;
+}
+
+.cfb-hero-name em {
+  display: block;
+  margin-top: 8px;
+  color: rgba(236, 234, 225, 0.76);
+  font-style: normal;
+  font-size: 23px;
+  font-weight: 850;
+  letter-spacing: 1px;
+}
+
+.cfb-hero-facts {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px 18px;
+  padding-top: 18px;
+  border-top: 2px solid rgba(255, 255, 255, 0.66);
+}
+
+.cfb-hero-facts div {
+  min-width: 0;
+  padding-left: 13px;
+  border-left: 2px solid rgba(255, 255, 255, 0.42);
+}
+
+.cfb-hero-facts dt,
+.cfb-side-profile dt,
+.cfb-side-block h3,
+.cfb-detail-panel h3,
+.cfb-action-panel h3 {
+  color: var(--game-muted);
+  font-size: 15px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.cfb-hero-facts dd,
+.cfb-side-profile dd {
+  margin: 3px 0 0;
+  color: var(--game-cream);
+  font-size: 24px;
+  font-weight: 900;
+  text-transform: none;
+}
+
+.cfb-detail-panel,
+.cfb-action-panel {
+  margin-top: 12px;
+  padding: 18px 22px;
+}
+
+.cfb-panel-tabs {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  margin-bottom: 20px;
+  color: var(--game-muted);
+  font-size: 20px;
+  font-weight: 850;
+}
+
+.cfb-panel-tabs strong {
+  color: var(--game-cream);
+}
+
+.cfb-panel-tabs em {
+  color: var(--game-cream);
+  font-style: normal;
+}
+
+.cfb-panel-tabs em:first-of-type {
+  margin-left: auto;
+}
+
+.cfb-overview-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(250px, 0.7fr);
+  gap: 22px;
+  min-height: 320px;
+}
+
+.cfb-school-row {
+  display: grid;
+  grid-template-columns: 42px 72px minmax(160px, 1fr) 54px;
+  align-items: center;
+  gap: 10px;
+  margin-top: 18px;
+  font-size: 22px;
+  font-weight: 900;
+}
+
+.cfb-school-row > span {
+  color: var(--game-muted);
+  font-size: 14px;
+  text-transform: uppercase;
+}
+
+.cfb-mini-logo {
+  font-size: 30px;
+}
+
+.cfb-influence {
+  height: 25px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.cfb-influence i {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, #7b0026, var(--game-hot));
+}
+
+.cfb-commit-box {
+  align-self: stretch;
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  color: var(--game-muted);
+  text-align: center;
+}
+
+.cfb-big-logo {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  font-size: clamp(54px, 5vw, 110px);
+  line-height: 0.8;
+}
+
+.cfb-commit-box strong {
+  color: var(--game-cream);
+  font-family: Segoe UI, Inter, Arial, sans-serif;
+  font-size: 36px;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.cfb-planner-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.cfb-planner-grid button {
+  min-height: 52px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(236, 234, 225, 0.48);
+  font-size: 16px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.cfb-side-profile {
+  overflow: hidden;
+}
+
+.cfb-side-header {
+  position: relative;
+  padding: 18px 18px 0;
+  background: linear-gradient(160deg, color-mix(in srgb, var(--team-side) 96%, #000 4%), color-mix(in srgb, var(--team-side) 62%, #000 38%));
+}
+
+.cfb-online-dot {
+  position: absolute;
+  top: 18px;
+  right: 20px;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #10d111;
+  box-shadow: 0 0 12px rgba(16, 209, 17, 0.6);
+}
+
+.cfb-side-profile h3,
+.cfb-side-profile h2,
+.cfb-side-profile p,
+.cfb-side-profile dl {
+  margin: 0;
+  padding-inline: 22px;
+}
+
+.cfb-side-profile h3 {
+  padding-top: 14px;
+  color: var(--game-cream);
+  font-family: Segoe UI, Inter, Arial, sans-serif;
+  font-size: 25px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.cfb-side-profile h2 {
+  color: var(--game-cream);
+  font-family: Segoe UI, Inter, Arial, sans-serif;
+  font-size: 43px;
+  line-height: 0.92;
+  text-transform: uppercase;
+}
+
+.cfb-side-profile p {
+  padding-top: 8px;
+  padding-bottom: 14px;
+  border-bottom: 2px solid rgba(255, 255, 255, 0.66);
+  color: var(--game-cream);
+  font-size: 18px;
+  font-weight: 850;
+}
+
+.cfb-side-profile dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  padding-block: 16px 20px;
+}
+
+.cfb-side-profile dd {
+  font-size: 20px;
+}
+
+.cfb-side-block,
+.cfb-dealbreaker {
+  margin-top: 12px;
+  padding: 16px 18px;
+}
+
+.cfb-side-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.cfb-side-stats span,
+.cfb-pitch-list li {
+  min-width: 0;
+  color: var(--game-muted);
+  font-size: 15px;
+  font-weight: 850;
+}
+
+.cfb-side-stats strong,
+.cfb-pitch-list strong {
+  display: block;
+  color: var(--game-cream);
+  font-size: 21px;
+}
+
+.cfb-pitch-list {
+  display: grid;
+  gap: 9px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cfb-pitch-list span {
+  display: block;
+}
+
+.cfb-dealbreaker {
+  display: grid;
+  place-items: center;
+  gap: 5px;
+  min-height: 145px;
+  text-align: center;
+}
+
+.cfb-dealbreaker span {
+  color: var(--game-muted);
+  font-weight: 900;
+}
+
+.cfb-dealbreaker strong {
+  color: var(--game-cream);
+  font-family: Segoe UI, Inter, Arial, sans-serif;
+  font-size: 31px;
+  text-transform: uppercase;
+}
+
+.cfb-dealbreaker em {
+  color: var(--game-muted);
+  font-style: normal;
+  font-size: 20px;
+  font-weight: 900;
+}
+
+.cfb-side-block .state-chips span {
+  max-width: 100%;
+  border-color: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--game-muted);
+}
+
+.cfb-side-block .state-chips strong {
+  display: none;
+}
+
+.cfb-command-strip {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 30px;
+  min-height: 58px;
+  padding: 0 4vw;
+  background: rgba(14, 14, 14, 0.92);
+  color: var(--game-cream);
+  font-size: 20px;
+  font-weight: 750;
+}
+
+.cfb-command-strip b {
+  display: inline-grid;
+  place-items: center;
+  min-width: 24px;
+  height: 22px;
+  margin-right: 6px;
+  border-radius: 2px;
+  background: var(--game-cream);
+  color: #111;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+@media (max-width: 1320px) {
+  body.recruiting-active {
+    overflow: auto;
+  }
+
+  body.recruiting-active .cfb-screen {
+    padding-inline: 4vw;
+  }
+
+  .cfb-board-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .cfb-scroll-list {
+    max-height: 360px;
+  }
+
+  .cfb-recruit-hero {
+    grid-template-columns: 96px 170px minmax(0, 1fr);
+  }
+
+  .cfb-program-script {
+    max-width: 150px;
+    font-size: clamp(48px, 6vw, 82px);
+    white-space: nowrap;
+  }
+
+  .cfb-side-card {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  .cfb-side-card > * {
+    margin-top: 0;
+  }
+}
+
 @media (max-width: 1080px) {
   .topbar {
     align-items: stretch;
@@ -1130,6 +2567,61 @@ pre {
     grid-template-columns: 1fr;
   }
 
+  .recruiting-workbench {
+    grid-template-columns: 1fr;
+  }
+
+  .cfb-topline {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "title"
+      "scorebug"
+      "tabs"
+      "tools";
+  }
+
+  .cfb-scorebug,
+  .cfb-save-tools {
+    justify-content: flex-start;
+    overflow-x: auto;
+  }
+
+  .cfb-board-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .cfb-scroll-list {
+    max-height: 42vh;
+  }
+
+  .cfb-recruit-hero {
+    grid-template-columns: 86px minmax(130px, 0.5fr) minmax(0, 1fr);
+  }
+
+  .cfb-program-script {
+    font-size: 82px;
+  }
+
+  .cfb-player-silhouette {
+    width: 140px;
+    height: 140px;
+  }
+
+  .cfb-hero-facts,
+  .cfb-overview-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .cfb-planner-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .recruiting-detail,
+  .recruiting-side,
+  .recruiting-table-wrap {
+    max-height: none;
+  }
+
   .edit-form-grid {
     grid-template-columns: 1fr;
   }
@@ -1137,5 +2629,937 @@ pre {
   .inspector {
     border-left: 0;
     border-top: 1px solid var(--line);
+  }
+}
+
+/* Recruiting workbench refresh: cohesive app UI with game-inspired density. */
+body.recruiting-active {
+  --team-primary: #202628;
+  --team-secondary: #d6b552;
+  --team-backdrop: #11161a;
+  --team-hero: #9b1238;
+  --team-side: #9b1238;
+  --team-secondary-wash: rgba(214, 181, 82, 0.14);
+  --game-panel: rgba(18, 21, 24, 0.94);
+  --game-panel-soft: rgba(28, 32, 36, 0.88);
+  --game-line: rgba(255, 255, 255, 0.12);
+  --game-cream: #f1eee4;
+  --game-muted: rgba(241, 238, 228, 0.58);
+  --game-hot: #d2184d;
+  background:
+    radial-gradient(circle at 22% 8%, color-mix(in srgb, var(--team-primary) 30%, transparent), transparent 36%),
+    linear-gradient(135deg, #080a0d 0%, color-mix(in srgb, var(--team-backdrop) 54%, #0b0d10) 48%, #050608 100%);
+  color: var(--game-cream);
+  overflow: auto;
+}
+
+body.recruiting-active::before {
+  background:
+    linear-gradient(115deg, transparent 0 58%, rgba(255, 255, 255, 0.045) 58% 58.4%, transparent 58.4%),
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.018) 0 1px, transparent 1px 4px);
+  opacity: 1;
+}
+
+body.recruiting-active .cfb-screen {
+  min-height: 100vh;
+  padding: 32px clamp(24px, 4vw, 64px);
+  font-family: Segoe UI, Inter, Arial, sans-serif;
+}
+
+.cfb-topline {
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "title scorebug"
+    "tabs tools";
+  gap: 18px 24px;
+  margin-bottom: 18px;
+}
+
+.cfb-title {
+  gap: 12px;
+}
+
+.cfb-team-mark {
+  width: auto;
+  min-width: 56px;
+  height: 38px;
+  padding: 0 12px;
+  border: 1px solid color-mix(in srgb, var(--team-secondary) 60%, transparent);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.055);
+  color: var(--team-secondary);
+  font-family: Segoe UI, sans-serif;
+  font-size: 18px;
+  font-weight: 950;
+  letter-spacing: 0.06em;
+  text-shadow: none;
+}
+
+.cfb-title h2 {
+  font-family: Segoe UI, Inter, Arial, sans-serif;
+  font-size: clamp(42px, 4vw, 64px);
+  font-weight: 900;
+  letter-spacing: 0;
+}
+
+.cfb-tabs {
+  gap: 12px;
+  font-size: 16px;
+}
+
+.cfb-tabs button {
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--game-muted);
+  font: inherit;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.cfb-tabs button:hover {
+  color: var(--game-cream);
+}
+
+.cfb-tabs button.active {
+  background: var(--game-cream);
+  color: #151719;
+}
+
+.keycap {
+  min-width: 28px;
+  height: 28px;
+  font-size: 13px;
+}
+
+.cfb-save-tools {
+  align-items: center;
+}
+
+.cfb-save-tools select,
+.cfb-save-tools button,
+.cfb-filter-row input {
+  min-height: 42px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 5px;
+  background: rgba(16, 19, 22, 0.96);
+  color: var(--game-cream);
+  font-size: 15px;
+  letter-spacing: 0.01em;
+}
+
+.cfb-save-tools button {
+  background: #eee9df;
+  color: #181a1c;
+}
+
+.cfb-save-tools select option,
+.cfb-prospect-toolbar select option {
+  background: #11161a;
+  color: #f1eee4;
+}
+
+.cfb-scorebug {
+  gap: 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(12, 14, 16, 0.82);
+}
+
+.cfb-scorebug-item {
+  min-width: 122px;
+  padding: 9px 14px;
+  border-left: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.cfb-scorebug-item:first-child {
+  border-left: 0;
+}
+
+.cfb-scorebug-item em {
+  font-size: 18px;
+}
+
+.cfb-scorebug-item span {
+  font-size: 11px;
+}
+
+.cfb-scorebug-item strong {
+  font-size: 21px;
+}
+
+.cfb-status {
+  position: static;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: none;
+  margin: 0 0 14px;
+}
+
+.cfb-status span {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.055);
+  font-size: 12px;
+}
+
+.cfb-board-layout {
+  grid-template-columns: minmax(340px, 420px) minmax(0, 1fr) minmax(300px, 360px);
+  gap: 18px;
+  align-items: start;
+}
+
+.cfb-board-list,
+.cfb-main-card,
+.cfb-side-card {
+  min-width: 0;
+}
+
+.cfb-filter-row {
+  grid-template-columns: auto minmax(0, 1fr);
+  margin-bottom: 10px;
+}
+
+.cfb-filter-row label {
+  color: var(--game-muted);
+  font-size: 12px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.cfb-add-prospect {
+  height: 66px;
+  margin-bottom: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-left: 4px solid var(--team-secondary);
+  border-radius: 6px;
+  background: rgba(241, 238, 228, 0.92);
+  color: #272b2e;
+  font-family: Segoe UI, Inter, Arial, sans-serif;
+  font-size: 24px;
+}
+
+.cfb-add-prospect strong {
+  color: rgba(39, 43, 46, 0.35);
+  font-size: 40px;
+}
+
+.cfb-scroll-list {
+  max-height: calc(100vh - 330px);
+  padding-right: 8px;
+  border-right: 0;
+}
+
+.cfb-target-table {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-collapse: separate;
+  border-spacing: 0;
+  overflow: hidden;
+  border-radius: 6px;
+  background: rgba(12, 14, 16, 0.76);
+}
+
+.cfb-target-table th:nth-child(1),
+.cfb-target-table td:nth-child(1) {
+  width: 42px;
+}
+
+.cfb-target-table th:nth-child(2),
+.cfb-target-table td:nth-child(2) {
+  width: 128px;
+}
+
+.cfb-target-table th:nth-child(3),
+.cfb-target-table td:nth-child(3) {
+  width: 46px;
+}
+
+.cfb-target-table th:nth-child(4),
+.cfb-target-table td:nth-child(4) {
+  width: 58px;
+}
+
+.cfb-target-table th:nth-child(5),
+.cfb-target-table td:nth-child(5) {
+  width: 62px;
+}
+
+.cfb-target-table th:nth-child(6),
+.cfb-target-table td:nth-child(6) {
+  width: 62px;
+}
+
+.cfb-target-table th {
+  height: 42px;
+  padding: 10px 8px;
+  background: rgba(8, 9, 10, 0.96);
+  font-size: 12px;
+  text-align: left;
+}
+
+.cfb-target-table td {
+  height: 62px;
+  padding: 8px;
+  background: rgba(19, 22, 24, 0.9);
+  font-size: 15px;
+}
+
+.cfb-target-table tr.selected td {
+  background: #f1eee4;
+  color: #17191b;
+}
+
+.cfb-target-table tr.selected td:first-child {
+  box-shadow: inset 4px 0 0 var(--team-secondary);
+}
+
+.cfb-target-table td:nth-child(1) {
+  font-size: 22px;
+}
+
+.cfb-recruit-hero,
+.cfb-detail-panel,
+.cfb-action-panel,
+.cfb-side-profile,
+.cfb-side-block,
+.cfb-dealbreaker,
+.cfb-view-panel {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 7px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.045), transparent 34%),
+    rgba(18, 21, 24, 0.94);
+  box-shadow: 0 18px 34px rgba(0, 0, 0, 0.18);
+}
+
+.cfb-recruit-hero {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.9fr) minmax(340px, 1.1fr);
+  min-height: 0;
+  padding: 28px;
+  border-top: 4px solid var(--team-secondary);
+}
+
+.cfb-recruit-hero::before,
+.cfb-program-script,
+.cfb-player-silhouette,
+.cfb-lock {
+  display: none;
+}
+
+.cfb-hero-name {
+  align-self: center;
+}
+
+.cfb-hero-name span {
+  color: var(--game-muted);
+  font-size: 20px;
+  letter-spacing: 0.08em;
+}
+
+.cfb-hero-name strong {
+  font-size: clamp(42px, 4vw, 72px);
+  font-family: Segoe UI, Inter, Arial, sans-serif;
+  font-weight: 900;
+}
+
+.cfb-hero-name em {
+  font-size: 18px;
+  letter-spacing: 0;
+}
+
+.cfb-hero-facts {
+  grid-column: auto;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.cfb-hero-facts div {
+  padding-left: 12px;
+  border-left: 2px solid rgba(255, 255, 255, 0.18);
+}
+
+.cfb-hero-facts dd,
+.cfb-side-profile dd {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 20px;
+  white-space: nowrap;
+}
+
+.cfb-detail-panel,
+.cfb-action-panel {
+  margin-top: 14px;
+  padding: 18px;
+}
+
+.cfb-panel-tabs {
+  gap: 12px;
+  margin-bottom: 16px;
+  font-size: 16px;
+}
+
+.cfb-overview-grid {
+  min-height: 210px;
+}
+
+.cfb-school-row {
+  grid-template-columns: 34px 74px minmax(130px, 1fr) 48px;
+  font-size: 18px;
+}
+
+.cfb-mini-logo.wordmark,
+.cfb-big-logo.wordmark {
+  font-family: Segoe UI, sans-serif;
+  letter-spacing: 0.04em;
+}
+
+.cfb-big-logo {
+  color: color-mix(in srgb, var(--team-secondary) 82%, white);
+  font-size: clamp(42px, 5vw, 88px);
+}
+
+.cfb-big-logo.wordmark {
+  display: none;
+}
+
+.cfb-commit-box strong {
+  font-size: 28px;
+  font-family: Segoe UI, Inter, Arial, sans-serif;
+}
+
+.cfb-planner-grid {
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+}
+
+.cfb-planner-grid button {
+  min-height: 46px;
+  font-size: 13px;
+}
+
+.cfb-planner-grid button.active {
+  background: color-mix(in srgb, var(--team-secondary) 82%, white);
+  color: #151515;
+}
+
+.cfb-planner-grid button.staged {
+  outline: 2px solid #52c7ee;
+  outline-offset: 2px;
+}
+
+.cfb-planner-grid button span,
+.cfb-planner-grid button strong,
+.cfb-planner-grid button em {
+  display: block;
+}
+
+.cfb-planner-grid button em {
+  margin-top: 2px;
+  color: inherit;
+  font-size: 11px;
+  font-style: normal;
+  opacity: 0.78;
+}
+
+.cfb-staged-actions {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--game-line);
+  border-radius: 4px;
+  background: rgba(18, 19, 19, 0.38);
+}
+
+.cfb-staged-actions.empty {
+  color: var(--game-muted);
+}
+
+.cfb-staged-actions ul {
+  display: grid;
+  gap: 7px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cfb-staged-actions li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.cfb-staged-actions li em {
+  color: #52c7ee;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.cfb-side-card {
+  display: block;
+}
+
+.cfb-side-profile {
+  border-top: 4px solid color-mix(in srgb, var(--team-secondary) 82%, white);
+}
+
+.cfb-side-header {
+  min-height: 12px;
+  padding: 0;
+  background: linear-gradient(90deg, var(--team-hero), color-mix(in srgb, var(--team-hero) 45%, #11161a));
+}
+
+.cfb-online-dot {
+  top: 12px;
+  right: 14px;
+  width: 12px;
+  height: 12px;
+}
+
+.cfb-side-profile h3,
+.cfb-side-profile h2,
+.cfb-side-profile p,
+.cfb-side-profile dl {
+  padding-inline: 18px;
+}
+
+.cfb-side-profile h3 {
+  padding-top: 18px;
+  font-size: 18px;
+}
+
+.cfb-side-profile h2 {
+  font-size: 36px;
+  font-family: Segoe UI, Inter, Arial, sans-serif;
+}
+
+.cfb-side-profile p {
+  font-size: 15px;
+}
+
+.cfb-side-profile dl {
+  gap: 12px;
+}
+
+.cfb-side-profile dd {
+  font-size: 17px;
+}
+
+.cfb-side-block,
+.cfb-dealbreaker {
+  margin-top: 10px;
+  padding: 14px 16px;
+}
+
+.cfb-side-stats strong,
+.cfb-pitch-list strong {
+  font-size: 17px;
+}
+
+.cfb-dealbreaker {
+  min-height: 110px;
+}
+
+.cfb-dealbreaker strong {
+  font-size: 24px;
+  font-family: Segoe UI, Inter, Arial, sans-serif;
+}
+
+.cfb-dealbreaker em {
+  font-size: 16px;
+}
+
+.cfb-command-strip,
+.keycap {
+  display: none;
+}
+
+.cfb-view-panel {
+  grid-column: 1 / -1;
+  min-height: 520px;
+  padding: 22px;
+}
+
+.cfb-view-head {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 18px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+}
+
+.cfb-view-head h3 {
+  margin: 0;
+  color: var(--game-cream);
+  font-size: 28px;
+  font-weight: 900;
+}
+
+.cfb-view-head p {
+  max-width: 620px;
+  margin: 0;
+  color: var(--game-muted);
+  font-size: 14px;
+  line-height: 1.4;
+  text-align: right;
+}
+
+.cfb-data-table-wrap {
+  overflow: auto;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+}
+
+.cfb-data-table {
+  width: 100%;
+  min-width: 980px;
+  border-collapse: collapse;
+}
+
+.cfb-data-table th,
+.cfb-data-table td {
+  padding: 13px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  text-align: left;
+}
+
+.cfb-data-table th {
+  background: rgba(8, 9, 10, 0.94);
+  color: var(--game-muted);
+  font-size: 12px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.cfb-data-table td {
+  color: rgba(241, 238, 228, 0.84);
+  font-size: 14px;
+}
+
+.cfb-data-table tr:hover td {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.cfb-virtual-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 10px;
+  color: var(--game-muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.cfb-prospect-toolbar {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(130px, 180px)) minmax(360px, 1fr) auto;
+  align-items: end;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.cfb-prospect-toolbar label {
+  display: grid;
+  gap: 5px;
+}
+
+.cfb-prospect-toolbar label span {
+  color: var(--game-muted);
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.cfb-prospect-toolbar select {
+  min-height: 34px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 5px;
+  background: rgba(16, 19, 22, 0.96);
+  color: var(--game-cream);
+  font: inherit;
+  font-size: 13px;
+}
+
+.cfb-prospect-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.cfb-prospect-actions button,
+.cfb-staged-adds button,
+.cfb-virtual-row button,
+.cfb-virtual-row.header button {
+  min-height: 30px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.075);
+  color: var(--game-cream);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.cfb-prospect-actions button:disabled,
+.cfb-staged-adds button:disabled,
+.cfb-virtual-row button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.cfb-prospect-counts {
+  display: grid;
+  gap: 4px;
+  color: var(--game-muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-align: right;
+}
+
+.cfb-staged-adds {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) auto;
+  gap: 10px 16px;
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px solid rgba(214, 181, 82, 0.22);
+  border-radius: 6px;
+  background: rgba(214, 181, 82, 0.06);
+}
+
+.cfb-staged-adds.empty {
+  display: block;
+  color: var(--game-muted);
+  font-size: 13px;
+}
+
+.cfb-staged-adds strong,
+.cfb-staged-adds span {
+  display: block;
+}
+
+.cfb-staged-adds span,
+.cfb-staged-adds em {
+  color: var(--game-muted);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.cfb-staged-adds ul {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cfb-staged-adds li {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) minmax(120px, auto) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.cfb-staged-preview {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.cfb-staged-preview em {
+  color: #e7cf78;
+}
+
+.cfb-staged-preview em.error {
+  color: #ff8f8f;
+}
+
+.cfb-virtual-table {
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  background: rgba(10, 12, 14, 0.76);
+}
+
+.cfb-virtual-row {
+  box-sizing: border-box;
+  display: grid;
+  grid-template-columns: 38px 72px minmax(210px, 1.4fr) 64px 110px minmax(170px, 1fr) 70px minmax(120px, 0.8fr) minmax(110px, 0.8fr) 92px 90px;
+  align-items: center;
+  gap: 12px;
+  min-width: 1320px;
+  padding: 0 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  color: rgba(241, 238, 228, 0.82);
+  font-size: 14px;
+}
+
+.cfb-virtual-row.selected {
+  background: rgba(214, 181, 82, 0.08);
+}
+
+.cfb-virtual-row.header {
+  height: 44px;
+  background: rgba(8, 9, 10, 0.96);
+  color: var(--game-muted);
+  font-size: 12px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.cfb-virtual-row.header button {
+  justify-self: start;
+  min-height: 24px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-transform: uppercase;
+}
+
+.cfb-virtual-row.header button.active {
+  color: var(--game-cream);
+}
+
+.cfb-virtual-row input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+}
+
+.cfb-virtual-row:not(.header):hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.cfb-virtual-row span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cfb-virtual-body {
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.cfb-virtual-spacer {
+  position: relative;
+  min-width: 1320px;
+}
+
+.cfb-virtual-window {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  will-change: transform;
+}
+
+.cfb-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.cfb-summary-grid div,
+.cfb-split-panels section {
+  padding: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.cfb-summary-grid span {
+  display: block;
+  color: var(--game-muted);
+  font-size: 12px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.cfb-summary-grid strong {
+  display: block;
+  margin-top: 5px;
+  color: var(--game-cream);
+  font-size: 26px;
+}
+
+.cfb-split-panels {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.cfb-split-panels h4 {
+  margin: 0 0 12px;
+  color: var(--game-cream);
+  font-size: 16px;
+}
+
+.cfb-position-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.cfb-position-grid span {
+  padding: 7px 9px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--game-muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+@media (max-width: 1320px) {
+  .cfb-board-layout {
+    grid-template-columns: minmax(330px, 420px) minmax(0, 1fr);
+  }
+
+  .cfb-scroll-list {
+    max-height: calc(100vh - 360px);
+  }
+
+  .cfb-recruit-hero {
+    grid-template-columns: 1fr;
+  }
+
+  .cfb-hero-facts {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .cfb-side-card {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .cfb-side-card > * {
+    margin-top: 0;
+  }
+}
+
+@media (max-width: 900px) {
+  .cfb-board-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .cfb-scroll-list {
+    max-height: 420px;
+  }
+
+  .cfb-side-card {
+    grid-template-columns: 1fr;
   }
 }

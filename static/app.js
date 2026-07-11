@@ -1,5 +1,5 @@
 const state = {
-  activeView: "generator",
+  activeView: "recruiting",
   files: [],
   selectedFile: "",
   profiles: [],
@@ -16,10 +16,26 @@ const state = {
   previewContext: null,
   lastApplyResult: null,
   lastPatchExport: null,
+  live: { status: null, loading: false, playerResult: null },
   recruitEditor: { columns: [], rows: [], selectedId: "", dirty: {}, offset: 0, pageSize: 250, total: 0 },
   tableBrowser: { summaries: [], selected: null, rowOffset: 0, rowPageSize: 50, rowCount: 0 },
   artifactBrowser: { artifacts: [], selected: null, detail: null, loaded: false },
   roster: { players: [], selectedId: "", dirty: {}, file: "", offset: 0, pageSize: 500 },
+  recruiting: {
+    board: null,
+    selectedId: "",
+    filter: "",
+    sort: "rank",
+    preview: null,
+    activeTab: "board",
+    prospectScrollTop: 0,
+    prospectRenderPending: false,
+    prospectSort: { key: "rank", direction: "asc" },
+    prospectFilters: { position: "all", stars: "all", board: "all" },
+    selectedProspectIds: [],
+    stagedAdds: [],
+    stagedActions: [],
+  },
 };
 
 const CONFIG_STORAGE_KEY = "cfb27.generator.config.current";
@@ -69,9 +85,79 @@ const PROFILE_SCORE_KEYS = [
   ["ceiling", "Ceiling"],
 ];
 
+const RECRUITING_THEME_STORAGE_KEY = "cfb27.recruiting.theme";
+const RECRUITING_TAB_STORAGE_KEY = "cfb27.recruiting.activeTab";
+const RECRUITING_TAB_IDS = new Set(["board", "prospects", "portal", "school", "classes"]);
+const RECRUITING_DEFAULT_THEME = {
+  key: "neutral",
+  name: "College Football",
+  mark: "CFB",
+  primary: "#202628",
+  secondary: "#d6b552",
+  backdrop: "#202628",
+  hero: "#9b1238",
+  side: "#9b1238",
+  secondaryWash: "rgba(214, 181, 82, 0.22)",
+};
+const RECRUITING_TEAM_THEMES = {
+  alabama: {
+    key: "alabama",
+    name: "Alabama",
+    mark: "A",
+    primary: "#9b1238",
+    secondary: "#ffffff",
+    backdrop: "#3c1a24",
+    hero: "#9b1238",
+    side: "#9b1238",
+    secondaryWash: "rgba(255, 255, 255, 0.18)",
+  },
+  georgia: {
+    key: "georgia",
+    name: "Georgia",
+    mark: "G",
+    primary: "#ba0c2f",
+    secondary: "#ffffff",
+    backdrop: "#2a1a1d",
+    hero: "#ba0c2f",
+    side: "#ba0c2f",
+    secondaryWash: "rgba(255, 255, 255, 0.18)",
+  },
+  ohiostate: {
+    key: "ohiostate",
+    name: "Ohio State",
+    mark: "OSU",
+    primary: "#bb0000",
+    secondary: "#a7b1b7",
+    backdrop: "#2a2023",
+    hero: "#bb0000",
+    side: "#bb0000",
+    secondaryWash: "rgba(167, 177, 183, 0.22)",
+  },
+  oregon: {
+    key: "oregon",
+    name: "Oregon",
+    mark: "O",
+    primary: "#006f3d",
+    secondary: "#ffe100",
+    backdrop: "#006f3d",
+    hero: "#0f7d45",
+    side: "#0f7d45",
+    secondaryWash: "rgba(255, 225, 0, 0.24)",
+  },
+};
+
+const RECRUITING_WEEKLY_ACTIONS = [
+  { field: "SearchSocialMedia", label: "Search Social Media", shortLabel: "Social", hours: 5 },
+  { field: "ContactHighSchoolCoaches", label: "DM the Player", shortLabel: "DM", hours: 10 },
+  { field: "ContactFriendsAndFamily", label: "Friends & Family", shortLabel: "Family", hours: 25 },
+  { field: "SendTheHouse", label: "Send the House", shortLabel: "House", hours: 50 },
+];
+
 const els = {
   status: document.querySelector("#status"),
   fileSelect: document.querySelector("#fileSelect"),
+  saveDirectoryLabel: document.querySelector("#saveDirectoryLabel"),
+  chooseSaveFolderBtn: document.querySelector("#chooseSaveFolderBtn"),
   refreshBtn: document.querySelector("#refreshBtn"),
   backupBtn: document.querySelector("#backupBtn"),
   artifactsBtn: document.querySelector("#artifactsBtn"),
@@ -79,6 +165,7 @@ const els = {
   metrics: document.querySelector("#metrics"),
   profileSearch: document.querySelector("#profileSearch"),
   seedInput: document.querySelector("#seedInput"),
+  generatorEngineSelect: document.querySelector("#generatorEngineSelect"),
   generatePreviewBtn: document.querySelector("#generatePreviewBtn"),
   applyPreviewBtn: document.querySelector("#applyPreviewBtn"),
   exportPatchBtn: document.querySelector("#exportPatchBtn"),
@@ -112,6 +199,25 @@ const els = {
   profileInspector: document.querySelector("#profileInspector"),
   viewTabs: Array.from(document.querySelectorAll("[data-view-tab]")),
   viewSections: Array.from(document.querySelectorAll("[data-view]")),
+  desktopOpenSaveBtn: document.querySelector("#desktopOpenSaveBtn"),
+  refreshLiveBtn: document.querySelector("#refreshLiveBtn"),
+  livePlayerQuery: document.querySelector("#livePlayerQuery"),
+  unlockDynastyBtn: document.querySelector("#unlockDynastyBtn"),
+  discoverLivePlayerBtn: document.querySelector("#discoverLivePlayerBtn"),
+  liveSessionPanel: document.querySelector("#liveSessionPanel"),
+  liveSafetyPanel: document.querySelector("#liveSafetyPanel"),
+  liveModulesBody: document.querySelector("#liveModulesBody"),
+  livePlayerPanel: document.querySelector("#livePlayerPanel"),
+  loadRecruitingBtn: document.querySelector("#loadRecruitingBtn"),
+  previewRecruitingPlanBtn: document.querySelector("#previewRecruitingPlanBtn"),
+  recruitingStatus: document.querySelector("#recruitingStatus"),
+  recruitingCounters: document.querySelector("#recruitingCounters"),
+  recruitingSearch: document.querySelector("#recruitingSearch"),
+  recruitingSort: document.querySelector("#recruitingSort"),
+  recruitingTabs: Array.from(document.querySelectorAll("[data-recruiting-tab]")),
+  recruitingTargetsBody: document.querySelector("#recruitingTargetsBody"),
+  recruitingDetail: document.querySelector("#recruitingDetail"),
+  recruitingSide: document.querySelector("#recruitingSide"),
   loadRecruitEditorBtn: document.querySelector("#loadRecruitEditorBtn"),
   saveRecruitEditorBtn: document.querySelector("#saveRecruitEditorBtn"),
   recruitEditorSearch: document.querySelector("#recruitEditorSearch"),
@@ -177,13 +283,92 @@ function numberFmt(value) {
   return new Intl.NumberFormat().format(value);
 }
 
+function normalizeThemeKey(value) {
+  return String(value || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function recruitingTheme(board) {
+  const payloadTheme = board?.theme && typeof board.theme === "object" ? board.theme : {};
+  const candidates = [
+    payloadTheme.key,
+    payloadTheme.name,
+    board?.team?.name,
+    board?.schoolName,
+    board?.programName,
+    localStorage.getItem(RECRUITING_THEME_STORAGE_KEY),
+  ];
+  const base = candidates
+    .map(normalizeThemeKey)
+    .map((key) => RECRUITING_TEAM_THEMES[key])
+    .find(Boolean) || RECRUITING_DEFAULT_THEME;
+  return { ...base, ...payloadTheme };
+}
+
+function programMarkClass(theme) {
+  return String(theme.mark || "").trim().length > 1 ? "wordmark" : "";
+}
+
+function applyRecruitingTheme(board) {
+  const theme = recruitingTheme(board);
+  const markClass = programMarkClass(theme);
+  const root = document.body;
+  root.style.setProperty("--team-primary", theme.primary || RECRUITING_DEFAULT_THEME.primary);
+  root.style.setProperty("--team-secondary", theme.secondary || RECRUITING_DEFAULT_THEME.secondary);
+  root.style.setProperty("--team-backdrop", theme.backdrop || theme.primary || RECRUITING_DEFAULT_THEME.backdrop);
+  root.style.setProperty("--team-hero", theme.hero || theme.primary || RECRUITING_DEFAULT_THEME.hero);
+  root.style.setProperty("--team-side", theme.side || theme.hero || theme.primary || RECRUITING_DEFAULT_THEME.side);
+  root.style.setProperty("--team-secondary-wash", theme.secondaryWash || RECRUITING_DEFAULT_THEME.secondaryWash);
+  for (const mark of document.querySelectorAll("[data-cfb-program-mark]")) {
+    mark.textContent = theme.mark || RECRUITING_DEFAULT_THEME.mark;
+    mark.setAttribute("title", theme.name || RECRUITING_DEFAULT_THEME.name);
+    mark.classList.toggle("wordmark", markClass === "wordmark");
+  }
+  return theme;
+}
+
 function dateFmt(seconds) {
   if (!seconds) return "-";
   return new Date(seconds * 1000).toLocaleString();
 }
 
 function currentViewFromStorage() {
-  return "generator";
+  if (window.location.pathname === "/recruiting") return "recruiting";
+  const storedView = localStorage.getItem(VIEW_STORAGE_KEY);
+  if (storedView) return storedView;
+  return "recruiting";
+}
+
+function normalizeRecruitingTab(value) {
+  const tab = String(value || "").trim().toLowerCase();
+  return RECRUITING_TAB_IDS.has(tab) ? tab : "board";
+}
+
+function currentRecruitingTabFromLocation() {
+  const params = new URLSearchParams(window.location.search || "");
+  const tab = params.get("tab");
+  if (RECRUITING_TAB_IDS.has(String(tab || "").toLowerCase())) return normalizeRecruitingTab(tab);
+  return "board";
+}
+
+function recruitingTabPath(tab) {
+  const normalized = normalizeRecruitingTab(tab);
+  const params = new URLSearchParams(window.location.search || "");
+  if (normalized === "board") params.delete("tab");
+  else params.set("tab", normalized);
+  const query = params.toString();
+  return `/recruiting${query ? `?${query}` : ""}`;
+}
+
+function setRecruitingTab(tab, persist = true) {
+  state.recruiting.activeTab = normalizeRecruitingTab(tab);
+  localStorage.setItem(RECRUITING_TAB_STORAGE_KEY, state.recruiting.activeTab);
+  if (persist && window.history && state.activeView === "recruiting") {
+    const nextPath = recruitingTabPath(state.recruiting.activeTab);
+    if (`${window.location.pathname}${window.location.search}` !== nextPath) {
+      window.history.pushState({}, "", nextPath);
+    }
+  }
+  renderRecruitingWorkbench();
 }
 
 function sectionMatchesView(section, view) {
@@ -193,6 +378,13 @@ function sectionMatchesView(section, view) {
 function setActiveView(view, persist = true) {
   state.activeView = els.viewTabs.some((tab) => tab.dataset.viewTab === view) ? view : "generator";
   if (persist) localStorage.setItem(VIEW_STORAGE_KEY, state.activeView);
+  if (persist && window.history && window.location.pathname !== "/recruiting" && state.activeView === "recruiting") {
+    window.history.pushState({}, "", recruitingTabPath(state.recruiting.activeTab));
+  } else if (persist && window.history && window.location.pathname === "/recruiting" && state.activeView !== "recruiting") {
+    window.history.pushState({}, "", "/");
+  }
+  document.body.classList.toggle("recruiting-active", state.activeView === "recruiting");
+  if (state.activeView === "recruiting") applyRecruitingTheme(state.recruiting.board);
   for (const tab of els.viewTabs) {
     const active = tab.dataset.viewTab === state.activeView;
     tab.classList.toggle("active", active);
@@ -202,6 +394,9 @@ function setActiveView(view, persist = true) {
     section.hidden = !sectionMatchesView(section, state.activeView);
   }
   if (state.activeView === "save-tools") renderSaveTools();
+  if (state.activeView === "live" && !state.live.status && !state.live.loading) {
+    loadLiveStatus().catch((error) => setStatus(error.message, true));
+  }
   if (state.activeView === "recruit-editor" && !state.recruitEditor.rows.length) {
     loadRecruitEditor().catch((error) => setStatus(error.message, true));
   }
@@ -210,6 +405,184 @@ function setActiveView(view, persist = true) {
   }
   if (state.activeView === "tables" && !state.tableBrowser.summaries.length) {
     discoverTables().catch((error) => setStatus(error.message, true));
+  }
+  if (state.activeView === "recruiting" && state.selectedFile && !state.recruiting.board) {
+    loadRecruitingBoard().catch((error) => setStatus(error.message, true));
+  }
+}
+
+function renderLiveStatus() {
+  const status = state.live.status;
+  if (!status) {
+    els.liveSessionPanel.innerHTML = '<div class="empty-state compact">Checking for your running game…</div>';
+    els.liveSafetyPanel.innerHTML = '<div class="empty-state compact">Editing status will appear here.</div>';
+    els.liveModulesBody.innerHTML = "";
+    return;
+  }
+  const build = (status.builds || []).find((item) => String(item.path || "").toLowerCase().endsWith("collegefb27.exe"));
+  const process = (status.gameProcesses || [])[0];
+  const attach = process?.readOnlyAttach || {};
+  els.liveSessionPanel.innerHTML = `
+    <h3>Game Connection</h3>
+    <dl class="detail-list">
+      <dt>Status</dt><dd><strong>${attach.attached ? "Connected" : "Game not found"}</strong></dd>
+      <dt>Game</dt><dd>${process ? "College Football 27" : "Launch CFB27 in offline mode"}</dd>
+      <dt>Version</dt><dd>${build?.recognized ? "Supported" : "Not yet supported"}</dd>
+    </dl>
+    <details class="inline-technical"><summary>Connection info</summary><code>${escapeHtml(build?.sha256 || "-")}</code></details>`;
+  const blockers = status.writeBlockers || [];
+  els.liveSafetyPanel.innerHTML = `
+    <h3>Editing Status</h3>
+    <p class="editing-state"><strong>${status.writeEligible ? "Ready to edit" : "Preview only"}</strong></p>
+    <p>${status.writeEligible ? "Player changes are available." : "Player search works, but changes are temporarily disabled while this build is being verified."}</p>
+    <details class="inline-technical"><summary>Why?</summary><ul>${blockers.map((item) => `<li>${escapeHtml(item)}</li>`).join("") || "<li>No issues found.</li>"}</ul></details>`;
+  const modules = process?.modules || [];
+  els.liveModulesBody.innerHTML = modules.map((module) => `
+    <tr>
+      <td>${escapeHtml(module.name)}</td>
+      <td><code>0x${Number(module.base || 0).toString(16).toUpperCase()}</code></td>
+      <td>${numberFmt(module.size)}</td>
+      <td>${escapeHtml(module.path)}</td>
+    </tr>`).join("");
+}
+
+function liveRatingSummary(objects, field, fallback) {
+  const counts = new Map();
+  for (const object of objects || []) {
+    const value = Number(object?.ratings?.[field]);
+    if (!Number.isInteger(value)) continue;
+    counts.set(value, (counts.get(value) || 0) + 1);
+  }
+  const values = [...counts.entries()].sort((left, right) => right[1] - left[1] || left[0] - right[0]);
+  return {
+    value: values.length ? values[0][0] : Number(fallback),
+    matchingCount: values.length ? values[0][1] : 0,
+    values,
+    conflicted: values.length > 1,
+  };
+}
+
+function renderLivePlayer() {
+  const result = state.live.playerResult;
+  if (!result) {
+    els.livePlayerPanel.innerHTML = '<div class="empty-state compact">Search for a player above to view their ratings.</div>';
+    return;
+  }
+  const player = result.player || {};
+  const discovery = result.discovery || {};
+  const objects = discovery.objects || [];
+  const ratingFields = Object.keys(player.ratings || objects[0]?.ratings || {});
+  const conflicts = ratingFields.filter((field) => liveRatingSummary(objects, field, player.ratings?.[field]).conflicted);
+  els.livePlayerPanel.innerHTML = `
+    <h3>${escapeHtml(`${player.firstName || ""} ${player.lastName || ""}`.trim())}</h3>
+    <p class="player-subtitle">${escapeHtml(player.position || "-")} · Player ID ${numberFmt(player.playerId)}</p>
+    <p class="support-note">Apply holds the Dynasty record at the new value and arms the verified player-response guard. Reopen the player page once to refresh the game UI.</p>
+    <div class="support-table-wrap">
+      <table class="compact-table">
+        <thead><tr><th>Rating</th><th>Detected runtime</th><th>Saved value</th><th>Action</th></tr></thead>
+        <tbody>${ratingFields.map((field) => {
+          const summary = liveRatingSummary(objects, field, player.ratings?.[field]);
+          const distribution = summary.values.map(([value, count]) => `${value} × ${count}`).join(", ");
+          return `
+          <tr>
+            <td>${escapeHtml(field)}</td>
+            <td><input type="number" min="0" max="${field === "overall" ? 100 : 99}" value="${numberFmt(summary.value)}" data-live-rating-value="${escapeHtml(field)}" data-live-rating-before="${numberFmt(summary.value)}" aria-label="${escapeHtml(field)} runtime value" title="${escapeHtml(distribution || "No runtime copy detected")}"></td>
+            <td>${numberFmt(player.ratings?.[field])}</td>
+            <td>
+              <button type="button" data-live-write-rating="${escapeHtml(field)}">Apply</button>
+              <button class="secondary-action" type="button" data-live-restore-rating="${escapeHtml(field)}">Reset</button>
+            </td>
+          </tr>`;
+        }).join("")}</tbody>
+      </table>
+    </div>
+    <details class="technical-details inline-player-details"><summary>Technical details</summary><p>${numberFmt(discovery.count)} matching object(s) · ${numberFmt(conflicts.length)} field conflict(s) · layout ${escapeHtml(discovery.ratingLayoutVersion || "-")}</p></details>`;
+}
+
+async function writeLiveRating(field, value) {
+  const result = state.live.playerResult;
+  const discovery = result?.discovery;
+  const player = result?.player;
+  const objects = discovery?.objects || [];
+  if (!player) throw new Error("Find a player before writing.");
+  const summary = liveRatingSummary(objects, field, player.ratings?.[field]);
+  const before = summary.value;
+  const next = Number(value);
+  const maximum = field === "overall" ? 100 : 99;
+  if (!Number.isInteger(next) || next < 0 || next > maximum) {
+    throw new Error(`${field} must be an integer from 0 to ${maximum}.`);
+  }
+  if (next === before) {
+    setStatus(`${field} is already ${next}.`);
+    return;
+  }
+  const confirmed = window.confirm(`Change ${player.firstName} ${player.lastName} ${field} from ${before} to ${next} in the active offline Dynasty?`);
+  if (!confirmed) return;
+  const response = await api("/api/live/hook/apply-rating", {
+    method: "POST",
+    body: JSON.stringify({
+      file: state.selectedFile,
+      row: player.row,
+      field,
+      expected: Number(player.ratings?.[field]),
+      value: next,
+    }),
+  });
+  setStatus(
+    `${player.firstName} ${player.lastName} ${field} ${before} → ${next} is armed and held in the live Dynasty record. Reopen the player screen to verify.`,
+  );
+}
+
+async function discoverLivePlayer() {
+  const query = els.livePlayerQuery.value.trim();
+  if (!state.selectedFile) throw new Error("Select a Dynasty save first.");
+  if (!query) throw new Error("Enter a player name.");
+  els.discoverLivePlayerBtn.disabled = true;
+  setStatus(`Discovering live player ${query}...`);
+  try {
+    state.live.playerResult = await api("/api/live/discover-player", {
+      method: "POST",
+      body: JSON.stringify({ file: state.selectedFile, query }),
+    });
+    renderLivePlayer();
+    const count = state.live.playerResult.discovery?.count || 0;
+    setStatus(`Found ${count} verified live object(s) for ${query}.`, count === 0);
+  } finally {
+    els.discoverLivePlayerBtn.disabled = false;
+  }
+}
+
+async function loadLiveStatus() {
+  state.live.loading = true;
+  els.refreshLiveBtn.disabled = true;
+  try {
+    state.live.status = await api("/api/live/status");
+    renderLiveStatus();
+    const process = state.live.status.gameProcesses?.[0];
+    setStatus(process ? "Connected to College Football 27." : "College Football 27 is not running.", !process);
+  } finally {
+    state.live.loading = false;
+    els.refreshLiveBtn.disabled = false;
+  }
+}
+
+async function unlockDynastyEditing() {
+  if (!state.selectedFile) throw new Error("Select the active Dynasty autosave first.");
+  els.unlockDynastyBtn.disabled = true;
+  setStatus("Unlocking Dynasty editing controls...");
+  try {
+    await api("/api/live/hook/attach", { method: "POST" });
+    const result = await api("/api/live/hook/unlock-editing", {
+      method: "POST",
+      body: JSON.stringify({ file: state.selectedFile }),
+    });
+    setStatus(
+      result.monitor?.running
+        ? "Dynasty editing is unlocked and will stay unlocked while the game is open. Back out and reopen the player screen."
+        : "Dynasty editing is unlocked. Back out and reopen the player screen.",
+    );
+  } finally {
+    els.unlockDynastyBtn.disabled = false;
   }
 }
 
@@ -392,6 +765,9 @@ function renderFiles() {
     .map((file) => `<option value="${escapeHtml(file.name)}">${escapeHtml(file.name)}</option>`)
     .join("");
   els.fileSelect.value = state.selectedFile;
+  const directory = state.saveDirectory || "No save folder selected";
+  els.saveDirectoryLabel.textContent = `Save folder: ${directory}`;
+  els.saveDirectoryLabel.title = directory;
   renderSaveTools();
 }
 
@@ -410,6 +786,997 @@ function renderMetrics(file = selectedFileInfo()) {
   els.metrics.innerHTML = items
     .map(([label, value]) => `<div class="metric"><span>${label}</span><strong>${value}</strong></div>`)
     .join("");
+}
+
+function starString(count) {
+  const stars = starCountFromValue(count);
+  if (!stars) return "------";
+  return `${"★".repeat(Math.max(0, Math.min(5, stars)))}${"☆".repeat(Math.max(0, 5 - stars))}`;
+}
+
+function starCountFromValue(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  const normalized = String(value || "").trim().toLowerCase().replace(/[_\s-]/g, "");
+  if (!normalized) return 0;
+  if (/^\d+$/.test(normalized)) return Number(normalized);
+  if (normalized.includes("five") || normalized === "5star") return 5;
+  if (normalized.includes("four") || normalized === "4star") return 4;
+  if (normalized.includes("three") || normalized === "3star") return 3;
+  if (normalized.includes("two") || normalized === "2star") return 2;
+  if (normalized.includes("one") || normalized === "1star") return 1;
+  return 0;
+}
+
+function compactName(name) {
+  const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
+  if (parts.length < 2) return String(name || "-");
+  return `${parts[0][0]}. ${parts.slice(1).join(" ")}`;
+}
+
+function lastNameFirstInitial(name) {
+  const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
+  if (parts.length < 2) return String(name || "-").toUpperCase();
+  return `${parts[0][0]}. ${parts.slice(1).join(" ")}`.toUpperCase();
+}
+
+function offerShort(target) {
+  return target.offerState === "Offered" ? "Y" : "N";
+}
+
+function interestLabel(target) {
+  if (target.interestRank) return `${target.interestRank}${target.interestRank === 1 ? "st" : "th"}`;
+  if (target.prospectInfluenceTotal > 0) return "Top 3";
+  return target.offerState === "Offered" ? "10th" : "--";
+}
+
+function stageLabel(target) {
+  if (target.offerState === "Offered" && target.currentNilOffer > 0) return "Top 3";
+  if (target.offerState === "Offered") return "Committed";
+  return "Open";
+}
+
+function archetypeLabel(value) {
+  return String(value || "Unknown")
+    .replace(/^[A-Z]{1,3}_/, "")
+    .replace(/_/g, " ")
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .trim();
+}
+
+function recruitingTargets() {
+  const board = state.recruiting.board || {};
+  const query = (state.recruiting.filter || "").trim().toLowerCase();
+  const targets = (board.targets || []).filter((target) => {
+    if (!query) return true;
+    return [
+      target.name,
+      target.position,
+      target.nationalRank,
+      target.offerState,
+      target.stage,
+      (target.selectedActions || []).join(" "),
+    ].join(" ").toLowerCase().includes(query);
+  });
+  const sort = state.recruiting.sort || "rank";
+  targets.sort((left, right) => {
+    if (sort === "hours") return Number(right.activeHours || 0) - Number(left.activeHours || 0);
+    if (sort === "position") return String(left.position || "").localeCompare(String(right.position || ""));
+    if (sort === "name") return String(left.name || "").localeCompare(String(right.name || ""));
+    return Number(left.nationalRank || Number.MAX_SAFE_INTEGER) - Number(right.nationalRank || Number.MAX_SAFE_INTEGER);
+  });
+  return targets;
+}
+
+function selectedRecruitingTarget() {
+  const targets = state.recruiting.board?.targets || [];
+  return targets.find((target) => target.id === state.recruiting.selectedId) || null;
+}
+
+function stagedActionKey(targetId, field) {
+  return `${targetId || ""}:${field || ""}`;
+}
+
+function stagedActionForTarget(targetId, field) {
+  const key = stagedActionKey(targetId, field);
+  return (state.recruiting.stagedActions || []).find((item) => stagedActionKey(item.targetId, item.actionField) === key) || null;
+}
+
+function projectedActionEnabled(target, action) {
+  const staged = stagedActionForTarget(target?.id, action.field);
+  if (staged) return Boolean(staged.enabled);
+  return Boolean((target?.actionBooleans || {})[action.field]);
+}
+
+function stagedActionHourDelta(action, beforeEnabled, afterEnabled) {
+  if (beforeEnabled === afterEnabled) return 0;
+  return afterEnabled ? action.hours : -action.hours;
+}
+
+function targetStagedActionPlans(targetId = "") {
+  const actions = state.recruiting.stagedActions || [];
+  return targetId ? actions.filter((item) => item.targetId === targetId) : actions;
+}
+
+function totalStagedActionHourDelta() {
+  return (state.recruiting.stagedActions || []).reduce((total, item) => total + Number(item.hoursDelta || 0), 0);
+}
+
+function stageRecruitingWeeklyAction(target, action) {
+  if (!target || !action) return;
+  const beforeEnabled = Boolean((target.actionBooleans || {})[action.field]);
+  const afterEnabled = !projectedActionEnabled(target, action);
+  const hoursDelta = stagedActionHourDelta(action, beforeEnabled, afterEnabled);
+  const key = stagedActionKey(target.id, action.field);
+  const next = (state.recruiting.stagedActions || []).filter((item) => stagedActionKey(item.targetId, item.actionField) !== key);
+  if (hoursDelta !== 0) {
+    next.push({
+      type: "set-weekly-action",
+      targetId: target.id,
+      userRecruitTargetRow: target.provenance?.userRecruitTargetRow,
+      boardRow: target.provenance?.boardRow,
+      recruitRow: target.provenance?.recruitRow,
+      playerRow: target.provenance?.playerRow,
+      name: target.name,
+      actionField: action.field,
+      actionLabel: action.label,
+      enabled: afterEnabled,
+      hoursDelta,
+    });
+  }
+  state.recruiting.stagedActions = next;
+  state.recruiting.preview = null;
+  renderRecruitingWorkbench();
+  setStatus(
+    hoursDelta
+      ? `Staged ${action.label} ${afterEnabled ? "on" : "off"} for ${target.name || target.id}`
+      : `Cleared staged ${action.label} change`
+  );
+}
+
+function renderStagedRecruitingActions(target = null) {
+  const staged = targetStagedActionPlans(target?.id || "");
+  if (!staged.length) return '<div class="cfb-staged-actions empty">No weekly action changes staged.</div>';
+  return `
+    <div class="cfb-staged-actions">
+      <strong>Staged Weekly Actions</strong>
+      <ul>
+        ${staged.map((item) => `
+          <li>
+            <span>${escapeHtml(item.actionLabel || item.actionField)} ${item.enabled ? "on" : "off"}</span>
+            <em>${item.hoursDelta > 0 ? "+" : ""}${numberFmt(item.hoursDelta)}h</em>
+            <button type="button" data-recruiting-clear-action="${escapeHtml(stagedActionKey(item.targetId, item.actionField))}">Clear</button>
+          </li>
+        `).join("")}
+      </ul>
+    </div>
+  `;
+}
+
+function renderRecruitingCounters() {
+  if (!els.recruitingCounters) return;
+  const board = state.recruiting.board;
+  if (!board) {
+    els.recruitingCounters.innerHTML = "";
+    return;
+  }
+  const counters = board.counters || {};
+  const stagedDelta = totalStagedActionHourDelta();
+  const projectedHours = (Number(counters.hoursUsed || 0) + stagedDelta);
+  const items = [
+    ["Remaining", counters.remainingPoints, "◆"],
+    ["Targets", `${numberFmt(counters.targetsUsed)}/${numberFmt(counters.targetsMax)}`, "⌖"],
+    ["Hours", `${numberFmt(projectedHours)}/${numberFmt(counters.hoursMax)}${stagedDelta ? ` (${stagedDelta > 0 ? "+" : ""}${numberFmt(stagedDelta)})` : ""}`, "◴"],
+    ["Scholarships", `${numberFmt(counters.scholarshipsUsed)}/${numberFmt(counters.scholarshipsMax)}`, "▣"],
+  ];
+  els.recruitingCounters.innerHTML = items
+    .map(([label, value, icon]) => `
+      <div class="cfb-scorebug-item">
+        <em>${escapeHtml(icon)}</em>
+        <span>${escapeHtml(label)}</span>
+        <strong title="${escapeHtml(value)}">${escapeHtml(value ?? "-")}</strong>
+      </div>
+    `)
+    .join("");
+}
+
+function gateChips(gates) {
+  return Object.entries(gates || {})
+    .map(([label, value]) => `<span title="${escapeHtml(value)}">${escapeHtml(label)} <strong>${escapeHtml(value)}</strong></span>`)
+    .join("");
+}
+
+function renderRecruitingTargets() {
+  if (!els.recruitingTargetsBody) return;
+  const targets = recruitingTargets();
+  if (!targets.length) {
+    els.recruitingTargetsBody.innerHTML = '<tr class="empty-row"><td colspan="6">No board targets</td></tr>';
+    return;
+  }
+  els.recruitingTargetsBody.innerHTML = targets
+    .map((target, index) => `
+      <tr class="${target.id === state.recruiting.selectedId ? "selected" : ""}" data-recruiting-target-id="${escapeHtml(target.id)}">
+        <td>${numberFmt(index + 1)}</td>
+        <td title="${escapeHtml(target.name || "")}">
+          <strong>${escapeHtml(lastNameFirstInitial(target.name))}</strong>
+          <span>${escapeHtml(starString(target.stars))}</span>
+        </td>
+        <td>${escapeHtml(target.position || "-")}</td>
+        <td>◆ ${numberFmt(target.currentNilOffer || target.nilExpectation || 0)}</td>
+        <td>${escapeHtml(interestLabel(target))}</td>
+        <td>${numberFmt(target.activeHours)}/${numberFmt(target.maxHours)}</td>
+      </tr>
+    `)
+    .join("");
+}
+
+function targetSummaryCards(targets) {
+  const offered = targets.filter((target) => target.offerState === "Offered").length;
+  const fiveStars = targets.filter((target) => Number(target.stars || 0) >= 5).length;
+  const hours = targets.reduce((total, target) => total + Number(target.activeHours || 0), 0);
+  return [
+    ["Board Targets", targets.length],
+    ["Scholarships", offered],
+    ["5 Star Targets", fiveStars],
+    ["Assigned Hours", hours],
+  ];
+}
+
+function renderRecruitingDataTable(targets) {
+  if (!targets.length) return '<div class="empty-state compact">No targets match the current filter.</div>';
+  return `
+    <div class="cfb-data-table-wrap">
+      <table class="cfb-data-table">
+        <thead>
+          <tr>
+            <th>Rank</th>
+            <th>Name</th>
+            <th>Pos</th>
+            <th>Rating</th>
+            <th>Archetype</th>
+            <th>NIL</th>
+            <th>Interest</th>
+            <th>Hours</th>
+            <th>Offer</th>
+            <th>Visit</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${targets.map((target) => `
+            <tr data-recruiting-target-id="${escapeHtml(target.id)}">
+              <td>${numberFmt(target.nationalRank)}</td>
+              <td><strong>${escapeHtml(target.name || "-")}</strong></td>
+              <td>${escapeHtml(target.position || "-")}</td>
+              <td>${escapeHtml(starString(target.stars))}</td>
+              <td>${escapeHtml(archetypeLabel(target.archetype))}</td>
+              <td>◆ ${numberFmt(target.currentNilOffer || target.nilExpectation || 0)}</td>
+              <td>${escapeHtml(interestLabel(target))}</td>
+              <td>${numberFmt(target.activeHours)}/${numberFmt(target.maxHours)}</td>
+              <td>${escapeHtml(offerShort(target))}</td>
+              <td>${target.visit?.scheduledVisit ? `Week ${escapeHtml(target.visit.scheduledVisit.weekNumber ?? "-")}` : "-"}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function prospectPoolProfiles() {
+  const query = (state.recruiting.filter || "").trim().toLowerCase();
+  const filters = state.recruiting.prospectFilters || {};
+  const boardRows = boardRecruitRows();
+  const stagedIds = stagedAddIdSet();
+  const profiles = state.profiles.filter((profile) => {
+    if (!profileMatches(profile, query)) return false;
+    const football = profile.footballProfile || {};
+    if (filters.position && filters.position !== "all" && String(football.position || "") !== filters.position) return false;
+    if (filters.stars && filters.stars !== "all" && starCountForProfile(profile) !== Number(filters.stars)) return false;
+    if (filters.board && filters.board !== "all") {
+      const onBoard = boardRows.has(Number((profile.source || {}).recruitRow));
+      const staged = stagedIds.has(profile.recruitId);
+      if (filters.board === "board" && !onBoard) return false;
+      if (filters.board === "available" && (onBoard || staged)) return false;
+      if (filters.board === "staged" && !staged) return false;
+    }
+    return true;
+  });
+  const sort = state.recruiting.prospectSort || { key: state.recruiting.sort || "rank", direction: "asc" };
+  const direction = sort.direction === "desc" ? -1 : 1;
+  profiles.sort((left, right) => {
+    const leftFootball = left.footballProfile || {};
+    const rightFootball = right.footballProfile || {};
+    const leftGame = left.gameFields || {};
+    const rightGame = right.gameFields || {};
+    const leftName = profileName(left);
+    const rightName = profileName(right);
+    let result = 0;
+    if (sort.key === "position") result = String(leftFootball.position || "").localeCompare(String(rightFootball.position || "")) || leftName.localeCompare(rightName);
+    else if (sort.key === "name") result = leftName.localeCompare(rightName);
+    else if (sort.key === "stars") result = starCountForProfile(left) - starCountForProfile(right);
+    else if (sort.key === "overall") result = Number((leftGame.ratings || {}).overall || 0) - Number((rightGame.ratings || {}).overall || 0);
+    else if (sort.key === "dev") result = String(leftGame.developmentTrait || "").localeCompare(String(rightGame.developmentTrait || ""));
+    else result = Number(leftFootball.nationalRank || Number.MAX_SAFE_INTEGER) - Number(rightFootball.nationalRank || Number.MAX_SAFE_INTEGER);
+    return result * direction;
+  });
+  return profiles;
+}
+
+function boardRecruitRows() {
+  return new Set((state.recruiting.board?.targets || [])
+    .map((target) => Number(target.provenance?.recruitRow))
+    .filter((row) => Number.isFinite(row)));
+}
+
+function stagedAddIdSet() {
+  return new Set((state.recruiting.stagedAdds || []).map((item) => item.recruitId));
+}
+
+function selectedProspectIdSet() {
+  return new Set(state.recruiting.selectedProspectIds || []);
+}
+
+function starCountForProfile(profile) {
+  const football = profile.footballProfile || {};
+  const game = profile.gameFields || {};
+  return starCountFromValue(football.starRating || game.starRating || 0);
+}
+
+function profileStarString(profile) {
+  return starString(starCountForProfile(profile));
+}
+
+function prospectFilterOptions(profiles) {
+  const positions = [...new Set(profiles.map((profile) => profile.footballProfile?.position).filter(Boolean))].sort();
+  return { positions };
+}
+
+const PROSPECT_VIRTUAL_ROW_HEIGHT = 48;
+const PROSPECT_VIRTUAL_VIEWPORT_HEIGHT = 620;
+const PROSPECT_VIRTUAL_BUFFER_ROWS = 6;
+
+function prospectVirtualWindow(profiles, scrollTop) {
+  const rowHeight = PROSPECT_VIRTUAL_ROW_HEIGHT;
+  const viewportHeight = PROSPECT_VIRTUAL_VIEWPORT_HEIGHT;
+  const total = profiles.length;
+  const maxScrollTop = Math.max(0, total * rowHeight - viewportHeight);
+  const clampedScrollTop = Math.min(Math.max(0, Number(scrollTop || 0)), maxScrollTop);
+  const start = Math.max(0, Math.floor(clampedScrollTop / rowHeight) - PROSPECT_VIRTUAL_BUFFER_ROWS);
+  const visibleCount = Math.ceil(viewportHeight / rowHeight) + (PROSPECT_VIRTUAL_BUFFER_ROWS * 2) + 2;
+  const end = Math.min(total, start + visibleCount);
+  return { rowHeight, viewportHeight, total, start, end, visible: profiles.slice(start, end) };
+}
+
+function prospectVirtualRowsHtml(profiles) {
+  const boardRows = boardRecruitRows();
+  const selectedIds = selectedProspectIdSet();
+  const stagedIds = stagedAddIdSet();
+  return profiles.map((profile) => {
+    const football = profile.footballProfile || {};
+    const game = profile.gameFields || {};
+    const identity = profile.identity || {};
+    const source = profile.source || {};
+    const ratings = game.ratings || {};
+    const onBoard = boardRows.has(Number(source.recruitRow));
+    const staged = stagedIds.has(profile.recruitId);
+    const selected = selectedIds.has(profile.recruitId);
+    const canAdd = !onBoard && !staged;
+    return `
+      <div class="cfb-virtual-row ${selected ? "selected" : ""}" data-profile-id="${escapeHtml(profile.recruitId || "")}" style="height:${PROSPECT_VIRTUAL_ROW_HEIGHT}px">
+        <span><input type="checkbox" data-prospect-select="${escapeHtml(profile.recruitId || "")}" ${selected ? "checked" : ""} ${canAdd ? "" : "disabled"}></span>
+        <span>${numberFmt(football.nationalRank || 0)}</span>
+        <span title="${escapeHtml(profileName(profile))}"><strong>${escapeHtml(profileName(profile) || "-")}</strong></span>
+        <span>${escapeHtml(football.position || "-")}</span>
+        <span>${escapeHtml(profileStarString(profile))}</span>
+        <span title="${escapeHtml(football.archetypeDisplay || football.archetype || "")}">${escapeHtml(football.archetypeDisplay || football.archetype || "-")}</span>
+        <span>${numberFmt(ratings.overall)}</span>
+        <span>${escapeHtml(game.developmentTrait || "-")}</span>
+        <span title="${escapeHtml([identity.hometown, identity.homeState].filter(Boolean).join(", "))}">${escapeHtml(identity.homeState || identity.hometown || "-")}</span>
+        <span>${onBoard ? "On board" : (staged ? "Staged" : "Available")}</span>
+        <span><button type="button" data-prospect-add="${escapeHtml(profile.recruitId || "")}" ${canAdd ? "" : "disabled"}>${staged ? "Staged" : (onBoard ? "On Board" : "Add")}</button></span>
+      </div>
+    `;
+  }).join("");
+}
+
+function sortHeader(key, label) {
+  const sort = state.recruiting.prospectSort || {};
+  const active = sort.key === key;
+  const indicator = active ? ` ${sort.direction === "desc" ? "desc" : "asc"}` : "";
+  return `<button type="button" data-prospect-sort="${escapeHtml(key)}" class="${active ? "active" : ""}">${escapeHtml(label)}${indicator}</button>`;
+}
+
+function updateProspectVirtualWindow() {
+  if (state.recruiting.activeTab !== "prospects") return;
+  const body = els.recruitingDetail?.querySelector("[data-prospect-virtual-body]");
+  const windowEl = els.recruitingDetail?.querySelector("[data-prospect-virtual-window]");
+  const spacer = els.recruitingDetail?.querySelector("[data-prospect-virtual-spacer]");
+  const meta = els.recruitingDetail?.querySelector("[data-prospect-virtual-meta]");
+  if (!body || !windowEl || !spacer || !meta) return;
+  const profiles = prospectPoolProfiles();
+  const view = prospectVirtualWindow(profiles, body.scrollTop);
+  state.recruiting.prospectScrollTop = body.scrollTop;
+  spacer.style.height = `${view.total * view.rowHeight}px`;
+  windowEl.style.transform = `translateY(${view.start * view.rowHeight}px)`;
+  windowEl.innerHTML = prospectVirtualRowsHtml(view.visible);
+  meta.innerHTML = `
+    <span>Showing ${numberFmt(view.total)} decoded recruit profiles</span>
+    <span>Rows ${numberFmt(view.start + 1)}-${numberFmt(view.end)} rendered</span>
+  `;
+}
+
+function renderProspectVirtualTable(profiles) {
+  const rowHeight = 48;
+  const viewportHeight = 620;
+  const view = prospectVirtualWindow(profiles, state.recruiting.prospectScrollTop);
+  if (!view.total) return '<div class="empty-state compact">No prospects match the current filter.</div>';
+  return `
+    <div class="cfb-virtual-meta" data-prospect-virtual-meta>
+      <span>Showing ${numberFmt(view.total)} decoded recruit profiles</span>
+      <span>Rows ${numberFmt(view.start + 1)}-${numberFmt(view.end)} rendered</span>
+    </div>
+      <div class="cfb-virtual-table">
+      <div class="cfb-virtual-row header">
+        <span></span>
+        <span>${sortHeader("rank", "Rank")}</span>
+        <span>${sortHeader("name", "Name")}</span>
+        <span>${sortHeader("position", "Pos")}</span>
+        <span>${sortHeader("stars", "Stars")}</span>
+        <span>Archetype</span>
+        <span>${sortHeader("overall", "OVR")}</span>
+        <span>${sortHeader("dev", "Dev")}</span>
+        <span>Home</span>
+        <span>Status</span>
+        <span>Board</span>
+      </div>
+      <div class="cfb-virtual-body" data-prospect-virtual-body style="height:${viewportHeight}px">
+        <div class="cfb-virtual-spacer" data-prospect-virtual-spacer style="height:${view.total * rowHeight}px">
+          <div class="cfb-virtual-window" data-prospect-virtual-window style="transform:translateY(${view.start * rowHeight}px)">
+            ${prospectVirtualRowsHtml(view.visible)}
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderProspectControls(allProfiles, filteredProfiles) {
+  const options = prospectFilterOptions(allProfiles);
+  const filters = state.recruiting.prospectFilters || {};
+  const selectedCount = (state.recruiting.selectedProspectIds || []).length;
+  const stagedCount = (state.recruiting.stagedAdds || []).length;
+  const boardCount = (state.recruiting.board?.targets || []).length;
+  const boardMax = Number(state.recruiting.board?.counters?.targetsMax || 35);
+  return `
+    <div class="cfb-prospect-toolbar">
+      <label>
+        <span>Position</span>
+        <select data-prospect-filter="position">
+          <option value="all">All</option>
+          ${options.positions.map((position) => `<option value="${escapeHtml(position)}" ${filters.position === position ? "selected" : ""}>${escapeHtml(position)}</option>`).join("")}
+        </select>
+      </label>
+      <label>
+        <span>Stars</span>
+        <select data-prospect-filter="stars">
+          <option value="all">All</option>
+          ${[5, 4, 3, 2, 1].map((stars) => `<option value="${stars}" ${String(filters.stars) === String(stars) ? "selected" : ""}>${stars} Star</option>`).join("")}
+        </select>
+      </label>
+      <label>
+        <span>Board</span>
+        <select data-prospect-filter="board">
+          ${[
+            ["all", "All"],
+            ["available", "Available"],
+            ["board", "On Board"],
+            ["staged", "Staged"],
+          ].map(([value, label]) => `<option value="${value}" ${filters.board === value ? "selected" : ""}>${label}</option>`).join("")}
+        </select>
+      </label>
+      <div class="cfb-prospect-actions">
+        <button type="button" data-prospect-select-visible>Select Visible</button>
+        <button type="button" data-prospect-clear-selection ${selectedCount ? "" : "disabled"}>Clear Selection</button>
+        <button type="button" data-prospect-stage-selected ${selectedCount ? "" : "disabled"}>Add Selected to Board</button>
+        <button type="button" data-prospect-clear-staged ${stagedCount ? "" : "disabled"}>Clear Staged</button>
+      </div>
+      <div class="cfb-prospect-counts">
+        <span>${numberFmt(filteredProfiles.length)} shown</span>
+        <span>${numberFmt(selectedCount)} selected</span>
+        <span>${numberFmt(stagedCount)} staged</span>
+        <span>${numberFmt(boardCount)}/${numberFmt(boardMax)} board</span>
+      </div>
+    </div>
+  `;
+}
+
+function renderStagedBoardAdds() {
+  const staged = state.recruiting.stagedAdds || [];
+  const preview = state.recruiting.preview;
+  if (!staged.length) {
+    return '<div class="cfb-staged-adds empty">No prospects staged for board add.</div>';
+  }
+  return `
+    <div class="cfb-staged-adds">
+      <div>
+        <strong>Staged Board Adds</strong>
+        <span>${numberFmt(staged.length)} prospect(s). Preview-only until board allocation writes are proven.</span>
+      </div>
+      <button type="button" data-prospect-preview-staged>Preview Add Plan</button>
+      <ul>
+        ${staged.slice(0, 12).map((item) => `
+          <li>
+            <span>${escapeHtml(item.name)}</span>
+            <em>${escapeHtml(item.position || "-")} | #${numberFmt(item.nationalRank)}</em>
+            <button type="button" data-prospect-unstage="${escapeHtml(item.recruitId)}">Remove</button>
+          </li>
+        `).join("")}
+        ${staged.length > 12 ? `<li><span>+${numberFmt(staged.length - 12)} more</span></li>` : ""}
+      </ul>
+      ${preview ? `
+        <div class="cfb-staged-preview">
+          <strong>${preview.valid ? "Preview valid" : "Preview has errors"}</strong>
+          <span>${preview.writeEnabled ? "Write enabled" : "Write gated"} | Planned hour delta ${numberFmt(preview.hourSummary?.plannedDelta || 0)}</span>
+          ${(preview.warnings || []).map((warning) => `<em>${escapeHtml(warning.message || warning.code || warning)}</em>`).join("")}
+          ${(preview.errors || []).map((error) => `<em class="error">${escapeHtml(error.message || error.code || error)}</em>`).join("")}
+        </div>
+      ` : ""}
+    </div>
+  `;
+}
+
+function profileByRecruitId(recruitId) {
+  return state.profiles.find((profile) => profile.recruitId === recruitId) || null;
+}
+
+function stagedAddFromProfile(profile) {
+  const football = profile.footballProfile || {};
+  const source = profile.source || {};
+  return {
+    recruitId: profile.recruitId,
+    playerId: profile.playerId,
+    recruitRow: source.recruitRow,
+    playerRow: source.playerRow,
+    name: profileName(profile),
+    position: football.position || "",
+    nationalRank: football.nationalRank || 0,
+  };
+}
+
+function canStageProfile(profile) {
+  if (!profile) return false;
+  const boardCount = (state.recruiting.board?.targets || []).length;
+  const boardMax = Number(state.recruiting.board?.counters?.targetsMax || 35);
+  if (boardCount + (state.recruiting.stagedAdds || []).length >= boardMax) return false;
+  const source = profile.source || {};
+  if (boardRecruitRows().has(Number(source.recruitRow))) return false;
+  if (stagedAddIdSet().has(profile.recruitId)) return false;
+  return true;
+}
+
+function stageProspectsForBoard(recruitIds) {
+  const next = state.recruiting.stagedAdds.slice();
+  const seen = new Set(next.map((item) => item.recruitId));
+  for (const recruitId of recruitIds) {
+    const profile = profileByRecruitId(recruitId);
+    if (!canStageProfile(profile) || seen.has(recruitId)) continue;
+    next.push(stagedAddFromProfile(profile));
+    seen.add(recruitId);
+  }
+  state.recruiting.stagedAdds = next;
+  state.recruiting.selectedProspectIds = [];
+  state.recruiting.preview = null;
+  renderRecruitingWorkbench();
+  setStatus(next.length ? `Staged ${numberFmt(next.length)} prospect(s) for board add preview` : "No eligible prospects selected", !next.length);
+}
+
+function updateProspectSelection(recruitId, selected) {
+  const ids = new Set(state.recruiting.selectedProspectIds || []);
+  const profile = profileByRecruitId(recruitId);
+  if (selected && canStageProfile(profile)) ids.add(recruitId);
+  else ids.delete(recruitId);
+  state.recruiting.selectedProspectIds = [...ids];
+}
+
+function visibleProspectIds() {
+  const profiles = prospectPoolProfiles();
+  const view = prospectVirtualWindow(profiles, state.recruiting.prospectScrollTop);
+  return view.visible.map((profile) => profile.recruitId).filter(Boolean);
+}
+
+function renderRecruitingSchoolView(board, targets) {
+  const counters = board.counters || {};
+  return `
+    <section class="cfb-view-panel">
+      <div class="cfb-view-head">
+        <h3>My School</h3>
+        <p>Save-level recruiting state decoded from the current board row.</p>
+      </div>
+      <div class="cfb-summary-grid">
+        ${[
+          ["Remaining Points", counters.remainingPoints],
+          ["Targets", `${numberFmt(counters.targetsUsed)}/${numberFmt(counters.targetsMax)}`],
+          ["Hours", `${numberFmt(counters.hoursUsed)}/${numberFmt(counters.hoursMax)}`],
+          ["Scholarships", `${numberFmt(counters.scholarshipsUsed)}/${numberFmt(counters.scholarshipsMax)}`],
+          ["Board Row", board.boardRow],
+          ["Visible Hours Used", counters.boardVisibleHoursUsed],
+        ].map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value ?? "-")}</strong></div>`).join("")}
+      </div>
+      <div class="cfb-split-panels">
+        <section>
+          <h4>Position Load</h4>
+          <div class="cfb-position-grid">
+            ${Object.entries(targets.reduce((acc, target) => {
+              const key = target.position || "-";
+              acc[key] = (acc[key] || 0) + 1;
+              return acc;
+            }, {})).sort((a, b) => a[0].localeCompare(b[0])).map(([position, count]) => `
+              <span>${escapeHtml(position)} <strong>${numberFmt(count)}</strong></span>
+            `).join("") || "<em>No targets</em>"}
+          </div>
+        </section>
+        <section>
+          <h4>Write Gates</h4>
+          <div class="state-chips">${gateChips(board.writeGates)}</div>
+        </section>
+      </div>
+    </section>
+  `;
+}
+
+function renderRecruitingClassesView(board, targets) {
+  const cards = targetSummaryCards(targets);
+  return `
+    <section class="cfb-view-panel">
+      <div class="cfb-view-head">
+        <h3>Top Classes</h3>
+        <p>Class rankings are not decoded yet; this view shows the current save's board summary until school-class tables are proven.</p>
+      </div>
+      <div class="cfb-summary-grid">
+        ${cards.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${numberFmt(value)}</strong></div>`).join("")}
+      </div>
+      ${renderRecruitingDataTable(targets.slice(0, 12))}
+    </section>
+  `;
+}
+
+function renderRecruitingPortalView() {
+  return `
+    <section class="cfb-view-panel">
+      <div class="cfb-view-head">
+        <h3>Transfer Portal</h3>
+        <p>Transfer portal tables are not decoded in the current 017 scope. This tab is wired so it can become a real decoded view once the data path exists.</p>
+      </div>
+      <div class="empty-state compact">No transfer portal data is available from the recruiting board payload.</div>
+    </section>
+  `;
+}
+
+function renderRecruitingTabContent() {
+  const board = state.recruiting.board;
+  const targets = recruitingTargets();
+  if (!els.recruitingDetail || !els.recruitingSide) return false;
+  if (!board) return false;
+  if (state.recruiting.activeTab === "board") return false;
+  els.recruitingSide.innerHTML = "";
+  if (state.recruiting.activeTab === "prospects") {
+    const allProfiles = state.profiles.slice();
+    const profiles = prospectPoolProfiles();
+    els.recruitingDetail.innerHTML = `
+      <section class="cfb-view-panel">
+        <div class="cfb-view-head">
+          <h3>Prospect List</h3>
+          <p>Full decoded recruit pool from the selected save. The table only renders the visible rows.</p>
+        </div>
+        ${renderProspectControls(allProfiles, profiles)}
+        ${renderStagedBoardAdds()}
+        ${renderProspectVirtualTable(profiles)}
+      </section>
+    `;
+    requestAnimationFrame(() => {
+      const body = els.recruitingDetail.querySelector("[data-prospect-virtual-body]");
+      if (body && Math.abs(body.scrollTop - (state.recruiting.prospectScrollTop || 0)) > 1) {
+        body.scrollTo(0, state.recruiting.prospectScrollTop || 0);
+      }
+    });
+    return true;
+  }
+  if (state.recruiting.activeTab === "portal") {
+    els.recruitingDetail.innerHTML = renderRecruitingPortalView();
+    return true;
+  }
+  if (state.recruiting.activeTab === "school") {
+    els.recruitingDetail.innerHTML = renderRecruitingSchoolView(board, targets);
+    return true;
+  }
+  if (state.recruiting.activeTab === "classes") {
+    els.recruitingDetail.innerHTML = renderRecruitingClassesView(board, targets);
+    return true;
+  }
+  return false;
+}
+
+function renderRecruitingDetail() {
+  if (!els.recruitingDetail || !els.recruitingSide) return;
+  const board = state.recruiting.board;
+  const target = selectedRecruitingTarget();
+  if (!board) {
+    els.recruitingDetail.innerHTML = '<div class="empty-state compact">Load a board and select a target.</div>';
+    els.recruitingSide.innerHTML = '<div class="empty-state compact">Write gates and provenance will appear here.</div>';
+    return;
+  }
+  if (renderRecruitingTabContent()) return;
+  if (!target) {
+    els.recruitingDetail.innerHTML = '<div class="empty-state compact">Select a target from the board.</div>';
+    els.recruitingSide.innerHTML = `<section class="inspector-section"><h3>Write Gates</h3><div class="state-chips">${gateChips(board.writeGates)}</div></section>`;
+    return;
+  }
+  const profile = target.recruitingProfile || {};
+  const visit = target.visit || {};
+  const actions = target.selectedActions || [];
+  const stagedActions = targetStagedActionPlans(target.id);
+  const nilValue = target.currentNilOffer || target.nilExpectation || 0;
+  const heightWeight = `${target.heightDisplay || "-"} | ${target.weightLbs ? `${numberFmt(target.weightLbs)} lbs` : "-"}`;
+  const theme = recruitingTheme(board);
+  const markClass = programMarkClass(theme);
+  els.recruitingDetail.innerHTML = `
+    <section class="cfb-recruit-hero">
+      <div class="cfb-program-script ${markClass}" data-cfb-program-mark>${escapeHtml(theme.mark)}</div>
+      <div class="cfb-player-silhouette"></div>
+      <div class="cfb-hero-name">
+        <span>${escapeHtml(String(target.name || "").split(/\s+/)[0] || "")}</span>
+        <strong>${escapeHtml(String(target.name || target.id).split(/\s+/).slice(1).join(" ") || target.name || target.id)}</strong>
+        <em>${escapeHtml(starString(target.stars))} | NAT: ${numberFmt(target.nationalRank)} | STA: ${numberFmt(target.stateRank)} | POS: ${numberFmt(target.positionRank)}</em>
+      </div>
+      <dl class="cfb-hero-facts">
+        <div><dt>Position</dt><dd>${escapeHtml(target.position || "-")}</dd></div>
+        <div><dt>Class</dt><dd>High School</dd></div>
+        <div><dt>Height & Weight</dt><dd>${escapeHtml(heightWeight)}</dd></div>
+        <div><dt>Archetype</dt><dd>${escapeHtml(archetypeLabel(target.archetype))}</dd></div>
+        <div><dt>Expected NIL</dt><dd>◆ ${numberFmt(nilValue)}</dd></div>
+        <div><dt>Hometown</dt><dd>${escapeHtml([target.hometown, target.homeState].filter(Boolean).join(", ") || "-")}</dd></div>
+      </dl>
+    </section>
+
+    <section class="cfb-detail-panel">
+      <div class="cfb-panel-tabs">
+        <strong>Overview</strong>
+        <span>Recruiting</span>
+        <span>Scouting</span>
+        <em>◆ ${numberFmt(target.currentNilOffer || 0)}</em>
+        <em>◴ ${numberFmt(target.activeHours)}/${numberFmt(target.maxHours)}</em>
+      </div>
+      <div class="cfb-overview-grid">
+        <section>
+          <h3>Top Schools</h3>
+          <div class="cfb-school-row">
+            <span>#</span>
+            <span>School</span>
+            <span>Influence</span>
+            <span>Offer</span>
+            <strong>1</strong>
+            <b class="cfb-mini-logo ${markClass}" data-cfb-program-mark>${escapeHtml(theme.mark)}</b>
+            <div class="cfb-influence"><i style="width:${Math.max(12, Math.min(100, Number(target.prospectInfluenceTotal || 65)))}%"></i></div>
+            <b>${offerShort(target)}</b>
+          </div>
+        </section>
+        <section class="cfb-commit-box">
+          <div class="cfb-big-logo ${markClass}" data-cfb-program-mark>${escapeHtml(theme.mark)}</div>
+          <strong>${escapeHtml(stageLabel(target))}</strong>
+          <span>${escapeHtml(target.name || "This prospect")} ${stageLabel(target) === "Committed" ? "has committed." : "is still available."}</span>
+        </section>
+      </div>
+    </section>
+
+    <section class="cfb-action-panel">
+      <h3>Planning</h3>
+      <div class="planner-grid cfb-planner-grid">
+        ${RECRUITING_WEEKLY_ACTIONS.map((action) => {
+          const current = Boolean((target.actionBooleans || {})[action.field]);
+          const projected = projectedActionEnabled(target, action);
+          const staged = stagedActionForTarget(target.id, action.field);
+          return `
+          <button type="button" class="${projected ? "active" : ""} ${staged ? "staged" : ""}" data-recruiting-action="${escapeHtml(action.field)}" title="${escapeHtml(action.label)} (${numberFmt(action.hours)}h)">
+            <span>${escapeHtml(action.shortLabel)}</span>
+            <strong>${numberFmt(action.hours)}h</strong>
+            <em>${projected ? "On" : "Off"}${staged ? ` | ${current ? "was on" : "was off"}` : ""}</em>
+          </button>
+        `;
+        }).join("")}
+        ${[
+          ["Scholarship", "Offer writes still need coupled ProspectInteraction/feedback validation"],
+          ["Visit", "Visit allocation and ProspectInteraction bit windows remain read-only"],
+          ["Sell/Sway", "Use existing active-pitch rows only; allocation remains blocked"],
+        ].map(([label, title]) => `
+          <button type="button" disabled title="${escapeHtml(title)}"><span>${escapeHtml(label)}</span><strong>Gated</strong><em>Needs recipe</em></button>
+        `).join("")}
+      </div>
+      ${renderStagedRecruitingActions(target)}
+      <p class="support-note">Weekly action toggles are mapping-validated and previewable. Apply remains copy-write gated until the board write path is enabled.</p>
+    </section>
+  `;
+  const pitches = (target.activePitches || [])
+    .map((pitch) => `<li>${escapeHtml(pitch.field)} <strong>Row ${numberFmt(pitch.row)}</strong> <span>Pitch ${escapeHtml(pitch.pitch ?? "-")} / ${escapeHtml(pitch.intensity ?? "-")}</span></li>`)
+    .join("");
+  els.recruitingSide.innerHTML = `
+    <section class="cfb-side-profile">
+      <div class="cfb-side-header">
+        <span class="cfb-online-dot"></span>
+      </div>
+      <h3>${escapeHtml(String(target.name || "").split(/\s+/)[0] || "")}</h3>
+      <h2>${escapeHtml(String(target.name || target.id).split(/\s+/).slice(1).join(" ") || target.name || target.id)}</h2>
+      <p>${escapeHtml(starString(target.stars))} | NAT: ${numberFmt(target.nationalRank)} | STA: ${numberFmt(target.stateRank)} | POS: ${numberFmt(target.positionRank)}</p>
+      <dl>
+        <div><dt>Position</dt><dd>${escapeHtml(target.position || "-")}</dd></div>
+        <div><dt>Archetype</dt><dd>${escapeHtml(archetypeLabel(target.archetype))}</dd></div>
+        <div><dt>Class & NIL</dt><dd>HS | ◆ ${numberFmt(nilValue)}</dd></div>
+        <div><dt>Height & Weight</dt><dd>${escapeHtml(heightWeight)}</dd></div>
+        <div><dt>Hometown</dt><dd>${escapeHtml([target.hometown, target.homeState].filter(Boolean).join(", ") || "-")}</dd></div>
+      </dl>
+    </section>
+
+    <section class="cfb-side-block">
+      <h3>Visit</h3>
+      <div class="cfb-side-stats">
+        <span>Scheduled <strong>${visit.scheduledVisit ? "Yes" : "No"}</strong></span>
+        <span>Week <strong>${escapeHtml(visit.scheduledVisit?.weekNumber ?? visit.prospectVisitState?.visitWeekNumber ?? "-")}</strong></span>
+        <span>Offer <strong>${visit.prospectVisitState?.hasOfferedScholarship ? "Yes" : offerShort(target)}</strong></span>
+      </div>
+    </section>
+
+    <section class="cfb-side-block">
+      <h3>Active Pitches</h3>
+      <ul class="cfb-pitch-list">${pitches || "<li>No active pitch rows</li>"}</ul>
+      <p class="support-note">Existing rows are valid patch targets; missing row allocation stays blocked.</p>
+    </section>
+
+    <section class="cfb-dealbreaker">
+      <span>Dealbreaker</span>
+      <strong>${escapeHtml(profile.dealbreakerRaw ? "Coach Prestige" : "Unknown")}</strong>
+      <em>Have A+ | Need B</em>
+    </section>
+
+    <section class="cfb-side-block debug">
+      <h3>Rows</h3>
+      <div class="cfb-side-stats">
+        <span>Recruit <strong>${numberFmt(target.provenance?.recruitRow)}</strong></span>
+        <span>Player <strong>${numberFmt(target.provenance?.playerRow)}</strong></span>
+        <span>Target <strong>${numberFmt(target.provenance?.userRecruitTargetRow)}</strong></span>
+        <span>Board <strong>${numberFmt(target.provenance?.boardRow)}</strong></span>
+      </div>
+    </section>
+
+    <section class="cfb-side-block">
+      <h3>Write Gates</h3>
+      <div class="state-chips">${gateChips(board.writeGates)}</div>
+    </section>
+  `;
+}
+
+function renderRecruitingWorkbench() {
+  const board = state.recruiting.board;
+  applyRecruitingTheme(board);
+  for (const tab of els.recruitingTabs) {
+    const active = tab.dataset.recruitingTab === state.recruiting.activeTab;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-current", active ? "page" : "false");
+    tab.setAttribute("aria-selected", active ? "true" : "false");
+    tab.tabIndex = active ? 0 : -1;
+  }
+  if (els.recruitingStatus) {
+    const warnings = board?.warnings || [];
+    els.recruitingStatus.innerHTML = board
+      ? `
+        <span>${board.readOnly ? "Read-only board" : "Writable board"}</span>
+        <span>${escapeHtml(board.saveName || state.selectedFile || "-")}</span>
+        <span>Board Row ${numberFmt(board.boardRow)}</span>
+        <span>${escapeHtml((board.saveFingerprint || "").slice(0, 12))}</span>
+        ${warnings.map((warning) => `<span class="warning">${escapeHtml(warning)}</span>`).join("")}
+      `
+      : '<span>Loading recruiting board...</span>';
+  }
+  if (els.previewRecruitingPlanBtn) {
+    els.previewRecruitingPlanBtn.disabled = !board || !((state.recruiting.stagedAdds || []).length || (state.recruiting.stagedActions || []).length);
+  }
+  renderRecruitingCounters();
+  renderRecruitingTargets();
+  renderRecruitingDetail();
+}
+
+async function loadRecruitingBoard() {
+  if (!state.selectedFile) return;
+  setStatus("Loading recruiting board...");
+  const payload = await api(`/api/recruiting/${encodeURIComponent(state.selectedFile)}`);
+  state.recruiting.board = payload;
+  state.recruiting.preview = null;
+  state.recruiting.stagedActions = [];
+  state.recruiting.selectedId = payload.targets?.[0]?.id || "";
+  renderRecruitingWorkbench();
+  setStatus(`Loaded recruiting board with ${numberFmt((payload.targets || []).length)} target(s)`);
+}
+
+async function previewRecruitingPlan() {
+  const board = state.recruiting.board;
+  if (!board || !state.selectedFile) return;
+  setStatus("Previewing recruiting plan...");
+  const plans = (state.recruiting.stagedAdds || []).map((item) => ({
+    type: "add-prospect-to-board",
+    recruitId: item.recruitId,
+    playerId: item.playerId,
+    recruitRow: item.recruitRow,
+    playerRow: item.playerRow,
+    name: item.name,
+    position: item.position,
+    hoursDelta: 0,
+  })).concat((state.recruiting.stagedActions || []).map((item) => ({
+    type: "set-weekly-action",
+    targetId: item.targetId,
+    userRecruitTargetRow: item.userRecruitTargetRow,
+    boardRow: item.boardRow,
+    recruitRow: item.recruitRow,
+    playerRow: item.playerRow,
+    name: item.name,
+    actionField: item.actionField,
+    actionLabel: item.actionLabel,
+    enabled: item.enabled,
+    hoursDelta: item.hoursDelta,
+  })));
+  const payload = await api("/api/recruiting/preview", {
+    method: "POST",
+    body: JSON.stringify({
+      file: state.selectedFile,
+      saveFingerprint: board.saveFingerprint,
+      plans,
+    }),
+  });
+  state.recruiting.preview = payload;
+  renderRecruitingWorkbench();
+  setStatus(payload.valid ? "Recruiting plan preview is read-only and write-gated" : "Recruiting plan preview has errors", !payload.valid);
+}
+
+async function setSaveDirectory(directory, persist = false) {
+  const payload = await api("/api/settings/save-directory", {
+    method: "POST",
+    body: JSON.stringify({ directory }),
+  });
+  if (persist && window.cfb27Desktop?.persistSaveDirectory) {
+    await window.cfb27Desktop.persistSaveDirectory(payload.directory);
+  }
+  state.saveDirectory = payload.directory;
+  state.selectedFile = "";
+  await loadFiles();
+  setStatus(`Using saves from ${payload.directory}`);
+}
+
+async function chooseSaveDirectory() {
+  let directory = "";
+  let persist = false;
+  if (window.cfb27Desktop?.selectSaveDirectory) {
+    const result = await window.cfb27Desktop.selectSaveDirectory();
+    if (!result || result.canceled) return;
+    directory = result.path;
+    persist = true;
+  } else {
+    directory = window.prompt("Enter the full path to your CFB27 save folder:", state.saveDirectory || "") || "";
+    if (!directory) return;
+  }
+  await setSaveDirectory(directory, persist);
+}
+
+async function syncDesktopSaveDirectory() {
+  if (!window.cfb27Desktop?.getSaveDirectory) return false;
+  const directory = await window.cfb27Desktop.getSaveDirectory();
+  if (!directory) return false;
+  await setSaveDirectory(directory, false);
+  return true;
+}
+
+async function initializeFiles() {
+  try {
+    if (await syncDesktopSaveDirectory()) return;
+  } catch (error) {
+    setStatus(`Saved folder could not be opened: ${error.message}`, true);
+  }
+  await loadFiles();
 }
 
 function summaryChips(items) {
@@ -463,8 +1830,9 @@ function renderPreviewSummary() {
   const validationCounts = preview.validationReport?.counts || {};
   const apply = state.lastApplyResult;
   const staleReason = previewStaleReason(preview);
+  const externalPreviewOnly = preview.applyMode === "external-preview-only";
   els.applyPreviewBtn.disabled = !preview.valid || Boolean(apply) || Boolean(staleReason);
-  els.exportPatchBtn.disabled = !preview.valid || Boolean(staleReason);
+  els.exportPatchBtn.disabled = !preview.valid || Boolean(staleReason) || externalPreviewOnly;
   els.previewSummary.classList.add("active");
   els.previewSummary.innerHTML = `
     <div class="preview-head">
@@ -478,6 +1846,8 @@ function renderPreviewSummary() {
         <span>${numberFmt(summary.skippedFieldCount || 0)} skipped</span>
         <span>${numberFmt(summary.validationErrorCount || 0)} validation errors</span>
         <span>${numberFmt(summary.validationWarningCount || 0)} validation warnings</span>
+        ${preview.engine ? `<span>${escapeHtml(preview.engine)}</span>` : ""}
+        ${externalPreviewOnly ? '<span>Apply uses Home Dogs writer</span>' : ""}
         ${staleReason ? `<span class="stale-preview">Stale: ${escapeHtml(staleReason)}</span>` : ""}
       </div>
     </div>
@@ -1121,7 +2491,8 @@ function profileMatches(profile, query) {
 
 function renderProfiles() {
   const query = els.profileSearch.value.trim().toLowerCase();
-  const visible = state.profiles.filter((profile) => profileMatches(profile, query)).slice(0, 700);
+  const profileLimit = state.currentPreview?.engine === "home-dogs" ? state.profiles.length : 700;
+  const visible = state.profiles.filter((profile) => profileMatches(profile, query)).slice(0, profileLimit);
   if (!visible.length) {
     els.profilesBody.innerHTML = '<tr class="empty-row"><td colspan="11">No profiles</td></tr>';
     return;
@@ -1806,6 +3177,16 @@ async function saveRosterPlayer() {
 async function loadProfiles() {
   if (!state.selectedFile) return;
   setStatus(`Loading ${state.selectedFile}...`);
+  state.profiles = [];
+  state.currentPreview = null;
+  state.previewContext = null;
+  state.lastApplyResult = null;
+  state.lastPatchExport = null;
+  state.selectedProfileId = "";
+  renderPreviewSummary();
+  renderPreviewBrowser();
+  renderProfiles();
+  renderInspector(null);
   try {
     const payload = await api(`/api/generator/recruits/${encodeURIComponent(state.selectedFile)}?limit=5000`);
     state.profiles = payload.recruits || [];
@@ -1852,14 +3233,25 @@ async function generatePreview() {
   if (!state.selectedFile || !state.currentConfig) return;
   setStatus("Generating preview...");
   try {
-    const normalizedConfig = await validateConfigObject(state.currentConfig);
+    const engine = els.generatorEngineSelect?.value || "home-dogs";
+    if (engine === "home-dogs" && els.seedInput?.value.trim() === "2026-class-1") {
+      els.seedInput.value = "";
+    }
+    const rawSeed = els.seedInput?.value.trim() || "";
+    const seed = engine === "home-dogs" && !rawSeed
+      ? `home-dogs-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+      : (rawSeed || "default");
+    const normalizedConfig = engine === "home-dogs"
+      ? state.currentConfig
+      : await validateConfigObject(state.currentConfig);
     const payload = await api("/api/generator/preview", {
       method: "POST",
       body: JSON.stringify({
         file: state.selectedFile,
         config: normalizedConfig,
-        seed: els.seedInput.value.trim() || "default",
+        seed,
         locks: state.lockMap,
+        engine,
       }),
     });
     state.currentPreview = payload;
@@ -1884,9 +3276,12 @@ async function generatePreview() {
     renderProfiles();
     renderInspector(state.profiles[0] || null);
     const warningCount = (payload.warnings || []).length;
+    const isHomeDogsPreview = payload.engine === "home-dogs";
     setStatus(
       payload.valid
-        ? `Generated preview with ${numberFmt(payload.summary?.diffCount || 0)} writable diff(s)`
+        ? isHomeDogsPreview
+          ? `Generated Home Dogs preview with ${numberFmt(payload.summary?.count || payload.recruits?.length || 0)} recruit(s)`
+          : `Generated ${payload.engine || "local"} preview with ${numberFmt(payload.summary?.diffCount || 0)} writable diff(s)`
         : (payload.errors || ["Preview failed"])[0],
       !payload.valid || warningCount > 0,
     );
@@ -1904,15 +3299,22 @@ async function applyPreview() {
     renderPreviewSummary();
     return;
   }
-  const diffCount = preview.summary?.diffCount || 0;
+  const engine = preview.engine || els.generatorEngineSelect?.value || "local";
+  const diffCount = engine === "home-dogs"
+    ? (preview.summary?.count || preview.recruits?.length || 0)
+    : (preview.summary?.diffCount || 0);
   const confirmed = window.confirm(
-    `Write ${numberFmt(diffCount)} generated field changes to a new modded save copy based on ${state.selectedFile}? The selected save stays unchanged and a backup will be created first.`,
+    engine === "home-dogs"
+      ? `Run Home Dogs apply for ${numberFmt(diffCount)} generated recruit(s) and write a new modded save copy based on ${state.selectedFile}? The selected save stays unchanged and a backup will be created first.`
+      : `Write ${numberFmt(diffCount)} generated field changes to a new modded save copy based on ${state.selectedFile}? The selected save stays unchanged and a backup will be created first.`,
   );
   if (!confirmed) return;
   els.applyPreviewBtn.disabled = true;
-  setStatus("Applying generated preview...");
+  setStatus(engine === "home-dogs" ? "Applying Home Dogs generated preview..." : "Applying generated preview...");
   try {
-    const normalizedConfig = await validateConfigObject(state.currentConfig);
+    const normalizedConfig = engine === "home-dogs"
+      ? state.currentConfig
+      : await validateConfigObject(state.currentConfig);
     const payload = await api("/api/generator/apply", {
       method: "POST",
       body: JSON.stringify({
@@ -1924,15 +3326,23 @@ async function applyPreview() {
         confirm: true,
         writeMode: "copy",
         locks: state.lockMap,
+        engine,
+        homeDogsPreviewPath: preview.homeDogs?.previewPath || "",
+        saveFingerprint: preview.saveFingerprint || state.saveFingerprint || "",
       }),
     });
     state.lastApplyResult = payload;
+    const isHomeDogsApply = payload.engine === "home-dogs";
     setStatus(
-      payload.applied && payload.artifactWriteSucceeded
+      isHomeDogsApply && payload.applied && payload.artifactWriteSucceeded
+        ? `Applied Home Dogs class to ${payload.targetFile || "new modded save copy"}`
+        : payload.applied && payload.artifactWriteSucceeded
         ? `Wrote ${numberFmt(payload.changedFieldCount || 0)} field change(s) to ${payload.targetFile || "new modded save copy"}`
-        : payload.applied
+        : isHomeDogsApply && payload.applied
+          ? `Home Dogs apply wrote ${payload.targetFile || "the target save"}, but artifact writing failed: ${payload.artifactError || "unknown error"}`
+          : payload.applied
           ? `Apply wrote ${payload.targetFile || "the target save"}, but artifact writing failed: ${payload.artifactError || "unknown error"}`
-        : `Apply wrote ${payload.targetFile || "the target save"} but reported ${numberFmt((payload.readBackMismatches || []).length)} read-back mismatch(es)`,
+          : `Apply wrote ${payload.targetFile || "the target save"} but reported ${numberFmt((payload.readBackMismatches || []).length)} read-back mismatch(es)`,
       !payload.applied || !payload.artifactWriteSucceeded,
     );
     renderPreviewSummary();
@@ -1958,6 +3368,11 @@ function downloadJson(payload, filename) {
 async function exportDryRunPatch() {
   const preview = state.currentPreview;
   if (!state.selectedFile || !state.currentConfig || !preview || !preview.valid) return;
+  if (preview.applyMode === "external-preview-only") {
+    setStatus("Home Dogs previews do not use the local dry-run patch exporter.", true);
+    renderPreviewSummary();
+    return;
+  }
   const staleReason = previewStaleReason(preview);
   if (staleReason) {
     setStatus(`Regenerate preview before dry-run export: ${staleReason}`, true);
@@ -2052,6 +3467,7 @@ async function loadGeneratorArtifacts(selectFirst = true) {
 async function loadFiles() {
   setStatus("Loading save files...");
   const payload = await api("/api/files");
+  state.saveDirectory = payload.directory || "";
   state.files = payload.files || [];
   const dynastyFiles = state.files.filter((file) => file.name.startsWith("DYNASTY-"));
   if (!state.files.length) {
@@ -2066,6 +3482,9 @@ async function loadFiles() {
   }
   renderFiles();
   await loadProfiles();
+  if (state.activeView === "recruiting") {
+    await loadRecruitingBoard();
+  }
 }
 
 async function backupCurrent() {
@@ -2080,6 +3499,7 @@ async function backupCurrent() {
 }
 
 els.refreshBtn.addEventListener("click", () => loadFiles().catch((error) => setStatus(error.message, true)));
+els.chooseSaveFolderBtn.addEventListener("click", () => chooseSaveDirectory().catch((error) => setStatus(error.message, true)));
 els.backupBtn.addEventListener("click", () => backupCurrent());
 els.artifactsBtn.addEventListener("click", () => showArtifacts());
 els.cleanupArtifactsBtn.addEventListener("click", () => cleanupArtifacts());
@@ -2103,8 +3523,157 @@ els.fileSelect.addEventListener("change", () => {
   state.recruitEditor = { ...state.recruitEditor, rows: [], selectedId: "", dirty: {}, offset: 0, total: 0 };
   state.tableBrowser = { ...state.tableBrowser, summaries: [], selected: null, rowOffset: 0, rowCount: 0 };
   state.roster = { ...state.roster, players: [], selectedId: "", dirty: {}, file: "", offset: 0 };
-  loadProfiles();
+  state.recruiting = {
+    ...state.recruiting,
+    board: null,
+    selectedId: "",
+    preview: null,
+    prospectScrollTop: 0,
+    selectedProspectIds: [],
+    stagedAdds: [],
+    stagedActions: [],
+  };
+  loadProfiles().then(() => {
+    if (state.activeView === "recruiting") return loadRecruitingBoard();
+    return null;
+  }).catch((error) => setStatus(error.message, true));
 });
+els.loadRecruitingBtn.addEventListener("click", () => loadRecruitingBoard().catch((error) => setStatus(error.message, true)));
+els.previewRecruitingPlanBtn.addEventListener("click", () => previewRecruitingPlan().catch((error) => setStatus(error.message, true)));
+els.recruitingSearch.addEventListener("input", () => {
+  state.recruiting.filter = els.recruitingSearch.value;
+  state.recruiting.prospectScrollTop = 0;
+  renderRecruitingWorkbench();
+});
+els.recruitingSort.addEventListener("change", () => {
+  state.recruiting.sort = els.recruitingSort.value;
+  state.recruiting.prospectScrollTop = 0;
+  renderRecruitingWorkbench();
+});
+els.recruitingDetail.addEventListener("scroll", (event) => {
+  const body = event.target.closest?.("[data-prospect-virtual-body]");
+  if (!body || state.recruiting.activeTab !== "prospects") return;
+  state.recruiting.prospectScrollTop = body.scrollTop;
+  if (state.recruiting.prospectRenderPending) return;
+  state.recruiting.prospectRenderPending = true;
+  requestAnimationFrame(() => {
+    state.recruiting.prospectRenderPending = false;
+    updateProspectVirtualWindow();
+  });
+}, true);
+els.recruitingDetail.addEventListener("change", (event) => {
+  const filter = event.target.closest?.("[data-prospect-filter]");
+  if (filter) {
+    state.recruiting.prospectFilters = {
+      ...state.recruiting.prospectFilters,
+      [filter.dataset.prospectFilter]: filter.value,
+    };
+    state.recruiting.prospectScrollTop = 0;
+    state.recruiting.selectedProspectIds = [];
+    renderRecruitingWorkbench();
+    return;
+  }
+  const select = event.target.closest?.("[data-prospect-select]");
+  if (select) {
+    updateProspectSelection(select.dataset.prospectSelect, select.checked);
+    updateProspectVirtualWindow();
+    renderRecruitingWorkbench();
+  }
+});
+els.recruitingDetail.addEventListener("click", (event) => {
+  const sortButton = event.target.closest?.("[data-prospect-sort]");
+  if (sortButton) {
+    const key = sortButton.dataset.prospectSort;
+    const current = state.recruiting.prospectSort || { key: "rank", direction: "asc" };
+    const defaultDirection = ["stars", "overall"].includes(key) ? "desc" : "asc";
+    state.recruiting.prospectSort = {
+      key,
+      direction: current.key === key ? (current.direction === "asc" ? "desc" : "asc") : defaultDirection,
+    };
+    state.recruiting.prospectScrollTop = 0;
+    renderRecruitingWorkbench();
+    return;
+  }
+  const addButton = event.target.closest?.("[data-prospect-add]");
+  if (addButton) {
+    stageProspectsForBoard([addButton.dataset.prospectAdd]);
+    return;
+  }
+  const actionButton = event.target.closest?.("[data-recruiting-action]");
+  if (actionButton) {
+    const target = selectedRecruitingTarget();
+    const action = RECRUITING_WEEKLY_ACTIONS.find((item) => item.field === actionButton.dataset.recruitingAction);
+    stageRecruitingWeeklyAction(target, action);
+    return;
+  }
+  const clearActionButton = event.target.closest?.("[data-recruiting-clear-action]");
+  if (clearActionButton) {
+    const key = clearActionButton.dataset.recruitingClearAction;
+    state.recruiting.stagedActions = (state.recruiting.stagedActions || [])
+      .filter((item) => stagedActionKey(item.targetId, item.actionField) !== key);
+    state.recruiting.preview = null;
+    renderRecruitingWorkbench();
+    return;
+  }
+  const unstageButton = event.target.closest?.("[data-prospect-unstage]");
+  if (unstageButton) {
+    const id = unstageButton.dataset.prospectUnstage;
+    state.recruiting.stagedAdds = state.recruiting.stagedAdds.filter((item) => item.recruitId !== id);
+    state.recruiting.preview = null;
+    renderRecruitingWorkbench();
+    return;
+  }
+  if (event.target.closest?.("[data-prospect-select-visible]")) {
+    const ids = new Set(state.recruiting.selectedProspectIds || []);
+    for (const id of visibleProspectIds()) {
+      const profile = profileByRecruitId(id);
+      if (canStageProfile(profile)) ids.add(id);
+    }
+    state.recruiting.selectedProspectIds = [...ids];
+    renderRecruitingWorkbench();
+    return;
+  }
+  if (event.target.closest?.("[data-prospect-clear-selection]")) {
+    state.recruiting.selectedProspectIds = [];
+    renderRecruitingWorkbench();
+    return;
+  }
+  if (event.target.closest?.("[data-prospect-stage-selected]")) {
+    stageProspectsForBoard(state.recruiting.selectedProspectIds || []);
+    return;
+  }
+  if (event.target.closest?.("[data-prospect-clear-staged]")) {
+    state.recruiting.stagedAdds = [];
+    state.recruiting.stagedActions = [];
+    state.recruiting.preview = null;
+    renderRecruitingWorkbench();
+    return;
+  }
+  if (event.target.closest?.("[data-prospect-preview-staged]")) {
+    previewRecruitingPlan().catch((error) => setStatus(error.message, true));
+  }
+});
+for (const tab of els.recruitingTabs) {
+  tab.addEventListener("click", () => {
+    setRecruitingTab(tab.dataset.recruitingTab || "board");
+  });
+}
+els.recruitingTargetsBody.addEventListener("click", (event) => {
+  const row = event.target.closest("tr[data-recruiting-target-id]");
+  if (!row) return;
+  state.recruiting.selectedId = row.dataset.recruitingTargetId;
+  setRecruitingTab("board");
+});
+window.addEventListener("popstate", () => {
+  if (window.location.pathname === "/recruiting") {
+    state.recruiting.activeTab = currentRecruitingTabFromLocation();
+    renderRecruitingWorkbench();
+  }
+});
+if (window.cfb27Desktop?.selectSaveDirectory) {
+  els.desktopOpenSaveBtn.hidden = false;
+  els.desktopOpenSaveBtn.addEventListener("click", () => chooseSaveDirectory().catch((error) => setStatus(error.message, true)));
+}
 els.profileSearch.addEventListener("input", renderProfiles);
 els.profilesBody.addEventListener("click", (event) => {
   const row = event.target.closest("tr[data-profile-id]");
@@ -2117,6 +3686,26 @@ els.previewBrowser.addEventListener("click", (event) => {
 for (const tab of els.viewTabs) {
   tab.addEventListener("click", () => setActiveView(tab.dataset.viewTab));
 }
+els.refreshLiveBtn.addEventListener("click", () => loadLiveStatus().catch((error) => setStatus(error.message, true)));
+els.unlockDynastyBtn.addEventListener("click", () => unlockDynastyEditing().catch((error) => setStatus(error.message, true)));
+els.discoverLivePlayerBtn.addEventListener("click", () => discoverLivePlayer().catch((error) => setStatus(error.message, true)));
+els.livePlayerQuery.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") discoverLivePlayer().catch((error) => setStatus(error.message, true));
+});
+els.livePlayerPanel.addEventListener("click", (event) => {
+  const writeButton = event.target.closest("[data-live-write-rating]");
+  const restoreButton = event.target.closest("[data-live-restore-rating]");
+  const button = writeButton || restoreButton;
+  if (!button) return;
+  const field = writeButton ? writeButton.dataset.liveWriteRating : restoreButton.dataset.liveRestoreRating;
+  const input = els.livePlayerPanel.querySelector(`[data-live-rating-value="${field}"]`);
+  const saved = state.live.playerResult?.player?.ratings?.[field];
+  const value = restoreButton ? saved : Number(input?.value);
+  button.disabled = true;
+  writeLiveRating(field, value)
+    .catch((error) => setStatus(error.message, true))
+    .finally(() => { button.disabled = false; });
+});
 els.loadRecruitEditorBtn.addEventListener("click", () => loadRecruitEditor().catch((error) => setStatus(error.message, true)));
 els.saveRecruitEditorBtn.addEventListener("click", () => saveRecruitEditorRow().catch((error) => setStatus(error.message, true)));
 els.recruitEditorSearch.addEventListener("input", renderRecruitEditor);
@@ -2247,12 +3836,16 @@ populateWriteFieldSelect(els.starRatingWriteSelect);
 populateWriteFieldSelect(els.archetypeWriteSelect);
 populateWriteFieldSelect(els.qualityWriteSelect);
 state.activeView = currentViewFromStorage();
+state.recruiting.activeTab = currentRecruitingTabFromLocation();
 setActiveView(state.activeView, false);
 renderMetrics(null);
 renderInspector(null);
 renderConfig();
 renderPreviewSummary();
 renderPreviewBrowser();
+renderRecruitingWorkbench();
+renderLiveStatus();
+renderLivePlayer();
 loadGeneratorConfigs()
-  .then(loadFiles)
+  .then(initializeFiles)
   .catch((error) => setStatus(error.message, true));

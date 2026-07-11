@@ -20,7 +20,7 @@ ACTION_FIELD_STATUS = {
     "SearchSocialMedia": "validated-015",
     "ContactHighSchoolCoaches": "validated-015",
     "ContactFriendsAndFamily": "validated-015",
-    "SendTheHouse": "experimental-opened-user-request",
+    "SendTheHouse": "validated-multi-source",
 }
 
 
