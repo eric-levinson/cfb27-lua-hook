@@ -5371,6 +5371,67 @@ class SaveStore:
         }
 
 
+def apply_live_rating_layers(
+    store: SaveStore,
+    file_name: str,
+    pid: int,
+    row: int,
+    field: str,
+    expected: int,
+    value: int,
+) -> dict[str, object]:
+    """Write verified live copies first, then arm persistence fallbacks."""
+    save_path = store.validate_filename(file_name)
+    attach_hook(pid)
+    player_patch = player_rating_patch(save_path, row, field, value)
+    if int(player_patch["expectedBefore"]) != expected:
+        raise ValueError(
+            f"The selected save has {field}={player_patch['expectedBefore']}, not the expected {expected}"
+        )
+    player_id = int(player_patch.get("player", {}).get("playerId") or 0)
+    if player_id <= 0:
+        raise ValueError("The selected Player record does not have a PresentationId")
+
+    snapshot = store.discover_live_player(file_name, "", player_row=row)
+    player = snapshot.get("player") or {}
+    if int(player.get("playerId") or 0) != player_id:
+        raise ValueError("The selected save and live discovery resolved different player IDs")
+    discovery = snapshot.get("discovery") or {}
+    object_addresses = [int(item["address"]) for item in discovery.get("objects", [])]
+    if not object_addresses:
+        raise RuntimeError("No verified live player copies were found")
+
+    direct_write = write_live_player_rating(
+        pid,
+        object_addresses,
+        player_id,
+        field,
+        expected,
+        value,
+    )
+    attach_response_guard(pid)
+    queued = queue_response_rating(pid, player_id, field, expected, value)
+    unlocked = unlock_dynasty_player_editing(pid, save_path)
+    monitor = start_dynasty_unlock_monitor(pid, save_path, extra_patches=[player_patch])
+
+    expected_ratings = dict(player.get("ratings") or {})
+    expected_ratings[field] = value
+    post_discovery = discover_live_player_objects(pid, player_id, expected_ratings)
+    updated_player = dict(player)
+    updated_player["ratings"] = expected_ratings
+    return {
+        "ok": True,
+        "directWrite": direct_write,
+        "queued": queued,
+        "unlocked": unlocked,
+        "patch": player_patch,
+        "monitor": monitor,
+        "player": updated_player,
+        "discovery": post_discovery,
+        "refresh": "instant-pending-verification",
+    }
+
+
 STORE = SaveStore(SAVE_DIR)
 
 
@@ -5633,7 +5694,6 @@ class Handler(BaseHTTPRequestHandler):
                 file_name = body.get("file")
                 if not isinstance(file_name, str) or not file_name:
                     raise AppError("file is required", 400)
-                save_path = STORE.validate_filename(file_name)
                 status = live_status()
                 processes = status.get("gameProcesses", [])
                 if not processes:
@@ -5669,22 +5729,18 @@ class Handler(BaseHTTPRequestHandler):
                     raise AppError("A real EA anticheat/Javelin process is running; live writes are blocked", 403)
                 pid = int(processes[0]["pid"])
                 try:
-                    attach_hook(pid)
-                    patch = player_rating_patch(save_path, row, field, value)
-                    if int(patch["expectedBefore"]) != expected:
-                        raise ValueError(
-                            f"The selected save has {field}={patch['expectedBefore']}, not the expected {expected}"
-                        )
-                    player_id = int(patch.get("player", {}).get("playerId") or 0)
-                    if player_id <= 0:
-                        raise ValueError("The selected Player record does not have a PresentationId")
-                    attach_response_guard(pid)
-                    queued = queue_response_rating(pid, player_id, field, expected, value)
-                    unlocked = unlock_dynasty_player_editing(pid, save_path)
-                    monitor = start_dynasty_unlock_monitor(pid, save_path, extra_patches=[patch])
+                    result = apply_live_rating_layers(
+                        STORE,
+                        file_name,
+                        pid,
+                        row,
+                        field,
+                        expected,
+                        value,
+                    )
                 except (FileNotFoundError, RuntimeError, OSError, ValueError) as exc:
                     raise AppError(str(exc), 409) from exc
-                self.send_json(200, {"ok": True, "queued": queued, "unlocked": unlocked, "patch": patch, "monitor": monitor})
+                self.send_json(200, result)
                 return
             if self.path == "/api/live/hook/run-script":
                 body = self.read_json_body()

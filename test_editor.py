@@ -205,6 +205,73 @@ class EditorTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "duplicate integrity failed"):
             live_process.plan_live_rating_object_writes(corrupt_duplicate, 25130, "speed", 90)
 
+    def test_apply_live_rating_layers_writes_before_arming_fallback(self) -> None:
+        self.assertTrue(hasattr(server, "apply_live_rating_layers"))
+        store = SimpleNamespace(
+            validate_filename=lambda _name: Path("active-dynasty"),
+            discover_live_player=lambda _name, _query, player_row=None: {
+                "player": {
+                    "row": player_row,
+                    "playerId": 25130,
+                    "firstName": "Kaelan",
+                    "lastName": "Chudzinski",
+                    "ratings": {"overall": 86, "speed": 87, "acceleration": 86, "agility": 84, "awareness": 83},
+                },
+                "discovery": {
+                    "objects": [{"address": 0x1000}, {"address": 0x2000}],
+                },
+            },
+        )
+        patch_result = {
+            "expectedBefore": 87,
+            "player": {"playerId": 25130},
+            "field": "speed",
+            "value": 82,
+        }
+        calls = []
+        with (
+            patch("server.attach_hook", side_effect=lambda _pid: calls.append("attach-hook")),
+            patch("server.player_rating_patch", return_value=patch_result),
+            patch(
+                "server.write_live_player_rating",
+                side_effect=lambda *_args: calls.append("direct-write") or {"verified": True, "bytesWritten": 4},
+            ),
+            patch("server.attach_response_guard", side_effect=lambda _pid: calls.append("attach-guard")),
+            patch(
+                "server.queue_response_rating",
+                side_effect=lambda *_args: calls.append("queue-guard") or {"queued": True},
+            ),
+            patch("server.unlock_dynasty_player_editing", return_value={"ok": True}),
+            patch("server.start_dynasty_unlock_monitor", return_value={"running": True}),
+            patch(
+                "server.discover_live_player_objects",
+                return_value={"count": 2, "objects": [{"address": 0x1000}, {"address": 0x2000}]},
+            ),
+        ):
+            result = server.apply_live_rating_layers(store, "active-dynasty", 6228, 100, "speed", 87, 82)
+
+        self.assertEqual(calls, ["attach-hook", "direct-write", "attach-guard", "queue-guard"])
+        self.assertTrue(result["directWrite"]["verified"])
+        self.assertEqual(result["refresh"], "instant-pending-verification")
+
+    def test_live_apply_ui_prefers_direct_write_message(self) -> None:
+        app_js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+        start = app_js.index("async function writeLiveRating")
+        end = app_js.index("async function discoverLivePlayer", start)
+        live_apply = app_js[start:end]
+
+        self.assertIn("response.directWrite?.verified", live_apply)
+        self.assertIn("response.discovery", live_apply)
+        self.assertIn("move the roster cursor away and back once", live_apply)
+        self.assertNotIn("Reopen the player screen to verify", live_apply)
+
+    def test_live_apply_endpoint_uses_layered_transaction(self) -> None:
+        source = (APP_DIR / "server.py").read_text(encoding="utf-8")
+        endpoint = source[source.index('if self.path == "/api/live/hook/apply-rating"') :]
+        endpoint = endpoint[: endpoint.index('if self.path == "/api/live/hook/run-script"')]
+        self.assertIn("apply_live_rating_layers(", endpoint)
+        self.assertNotIn("queue_response_rating(", endpoint)
+
     def test_live_player_layout_decodes_verified_rating_pairs(self) -> None:
         data = bytearray(LIVE_PLAYER_OBJECT_SIZE)
         data[LIVE_PLAYER_ID_OFFSET : LIVE_PLAYER_ID_OFFSET + 4] = (25130).to_bytes(4, "little")

@@ -528,9 +528,24 @@ async function writeLiveRating(field, value) {
       value: next,
     }),
   });
-  setStatus(
-    `${player.firstName} ${player.lastName} ${field} ${before} → ${next} is armed and held in the live Dynasty record. Reopen the player screen to verify.`,
-  );
+  if (!response.directWrite?.verified) {
+    throw new Error("The live write did not pass readback verification.");
+  }
+  state.live.playerResult = {
+    ...result,
+    player: response.player || {
+      ...player,
+      ratings: { ...player.ratings, [field]: next },
+    },
+    discovery: response.discovery || discovery,
+  };
+  renderLivePlayer();
+  const refreshMessage = response.refresh === "instant"
+    ? "Updated in the roster now."
+    : response.refresh === "edit-player-fallback"
+      ? "Updated and saved, but this screen still needs the Edit Player fallback."
+      : "Updated live. If the roster still shows the old value, move the roster cursor away and back once.";
+  setStatus(`${player.firstName} ${player.lastName} ${field} ${before} → ${next}. ${refreshMessage}`);
 }
 
 async function discoverLivePlayer() {
