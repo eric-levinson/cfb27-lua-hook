@@ -5392,7 +5392,11 @@ def apply_live_rating_layers(
     if player_id <= 0:
         raise ValueError("The selected Player record does not have a PresentationId")
 
-    snapshot = store.discover_live_player(file_name, "", player_row=row)
+    patch_player = player_patch.get("player") or {}
+    player_query = str(patch_player.get("lastName") or patch_player.get("firstName") or "").strip()
+    if not player_query:
+        raise ValueError("The selected Player record does not have a searchable name")
+    snapshot = store.discover_live_player(file_name, player_query, player_row=row)
     player = snapshot.get("player") or {}
     if int(player.get("playerId") or 0) != player_id:
         raise ValueError("The selected save and live discovery resolved different player IDs")

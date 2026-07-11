@@ -214,9 +214,12 @@ class EditorTests(unittest.TestCase):
 
     def test_apply_live_rating_layers_writes_before_arming_fallback(self) -> None:
         self.assertTrue(hasattr(server, "apply_live_rating_layers"))
-        store = SimpleNamespace(
-            validate_filename=lambda _name: Path("active-dynasty"),
-            discover_live_player=lambda _name, _query, player_row=None: {
+        discovery_queries = []
+
+        def discover_player(_name, query, player_row=None):
+            self.assertTrue(query)
+            discovery_queries.append(query)
+            return {
                 "player": {
                     "row": player_row,
                     "playerId": 25130,
@@ -227,11 +230,15 @@ class EditorTests(unittest.TestCase):
                 "discovery": {
                     "objects": [{"address": 0x1000}, {"address": 0x2000}],
                 },
-            },
+            }
+
+        store = SimpleNamespace(
+            validate_filename=lambda _name: Path("active-dynasty"),
+            discover_live_player=discover_player,
         )
         patch_result = {
             "expectedBefore": 87,
-            "player": {"playerId": 25130},
+            "player": {"playerId": 25130, "firstName": "Kaelan", "lastName": "Chudzinski"},
             "field": "speed",
             "value": 82,
         }
@@ -258,6 +265,7 @@ class EditorTests(unittest.TestCase):
             result = server.apply_live_rating_layers(store, "active-dynasty", 6228, 100, "speed", 87, 82)
 
         self.assertEqual(calls, ["attach-hook", "direct-write", "attach-guard", "queue-guard"])
+        self.assertEqual(discovery_queries, ["Chudzinski"])
         self.assertTrue(result["directWrite"]["verified"])
         self.assertEqual(result["refresh"], "instant-pending-verification")
 
