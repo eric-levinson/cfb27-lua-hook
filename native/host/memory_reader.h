@@ -5,11 +5,36 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace cfb27::memory {
+
+class MappedBytes {
+ public:
+  MappedBytes() = default;
+  ~MappedBytes();
+  MappedBytes(MappedBytes&&) noexcept;
+  MappedBytes& operator=(MappedBytes&&) noexcept;
+  MappedBytes(const MappedBytes&) = delete;
+  MappedBytes& operator=(const MappedBytes&) = delete;
+  static std::optional<MappedBytes> Allocate(std::size_t size);
+  static std::optional<MappedBytes> FromUpperHex(std::string_view text);
+  static std::optional<MappedBytes> CopyFrom(std::span<const std::uint8_t> bytes);
+  const std::uint8_t* data() const;
+  std::uint8_t* data();
+  std::size_t size() const;
+  bool empty() const;
+  std::span<const std::uint8_t> bytes() const;
+  std::span<std::uint8_t> mutable_bytes();
+
+ private:
+  HANDLE mapping_{};
+  std::uint8_t* view_{};
+  std::size_t size_{};
+};
 
 constexpr std::size_t kMinPatternBytes = 8;
 constexpr std::size_t kMaxPatternBytes = 4096;
@@ -55,8 +80,8 @@ struct BatchReadResult {
 };
 
 struct ScanRequest {
-  std::vector<std::uint8_t> pattern;
-  std::vector<std::uint8_t> mask;
+  MappedBytes pattern;
+  MappedBytes mask;
   std::size_t max_matches{};
   std::size_t context_before{};
   std::size_t context_after{};
@@ -72,7 +97,7 @@ struct ScanMatch {
   std::size_t region_size{};
   DWORD protection{};
   std::string context_address;
-  std::vector<std::uint8_t> context;
+  MappedBytes context;
 };
 
 struct ScanResult {

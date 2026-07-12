@@ -6,6 +6,7 @@
 #include <cstring>
 #include <algorithm>
 #include <iostream>
+#include <iterator>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -20,6 +21,7 @@ using cfb27::memory::ScanPrivateMemory;
 std::uintptr_t g_fail_read_at{};
 std::uintptr_t g_scan_destination{};
 bool g_attempted_scan_buffer_read{};
+bool g_scan_destination_is_mapped{};
 
 bool TestRead(const void* source, void* destination, std::size_t length,
               std::size_t& copied) {
@@ -27,6 +29,11 @@ bool TestRead(const void* source, void* destination, std::size_t length,
   const auto begin = reinterpret_cast<std::uintptr_t>(source);
   if (g_scan_destination == 0) {
     g_scan_destination = reinterpret_cast<std::uintptr_t>(destination);
+    MEMORY_BASIC_INFORMATION info{};
+    g_scan_destination_is_mapped =
+        VirtualQuery(destination, &info, sizeof(info)) == sizeof(info) &&
+        info.State == MEM_COMMIT && info.Type == MEM_MAPPED &&
+        (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) == 0;
   } else if (g_scan_destination >= begin && g_scan_destination - begin < length) {
     g_attempted_scan_buffer_read = true;
   }
@@ -40,6 +47,15 @@ void Require(bool condition, const char* message) {
   if (!condition) throw std::runtime_error(message);
 }
 
+void RequireMappedStorage(const void* pointer, const char* message) {
+  MEMORY_BASIC_INFORMATION info{};
+  Require(pointer != nullptr &&
+              VirtualQuery(pointer, &info, sizeof(info)) == sizeof(info) &&
+              info.State == MEM_COMMIT && info.Type == MEM_MAPPED &&
+              (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) == 0,
+          message);
+}
+
 std::vector<std::uint8_t> HexBytes(const std::string& text) {
   Require(text.size() % 2 == 0, "even hex byte text");
   std::vector<std::uint8_t> bytes;
@@ -48,6 +64,25 @@ std::vector<std::uint8_t> HexBytes(const std::string& text) {
     bytes.push_back(static_cast<std::uint8_t>(std::stoul(text.substr(i, 2), nullptr, 16)));
   }
   return bytes;
+}
+
+cfb27::memory::MappedBytes MappedHex(std::string_view text) {
+  auto bytes = cfb27::memory::MappedBytes::FromUpperHex(text);
+  Require(bytes.has_value(), "mapped hex bytes");
+  return std::move(*bytes);
+}
+
+cfb27::memory::MappedBytes MappedFill(std::size_t size, std::uint8_t value) {
+  auto bytes = cfb27::memory::MappedBytes::Allocate(size);
+  Require(bytes.has_value(), "mapped filled bytes");
+  std::fill(bytes->mutable_bytes().begin(), bytes->mutable_bytes().end(), value);
+  return std::move(*bytes);
+}
+
+cfb27::memory::MappedBytes MappedCopy(std::span<const std::uint8_t> source) {
+  auto bytes = cfb27::memory::MappedBytes::CopyFrom(source);
+  Require(bytes.has_value(), "mapped copied bytes");
+  return std::move(*bytes);
 }
 
 class Allocation {
@@ -107,8 +142,8 @@ void TestScanAndRead() {
   other.shrink_to_fit();
 
   const auto scan = ScanPrivateMemory({
-      .pattern = HexBytes("CFB27A1100A1B2C3D4E5F60718293A4B"),
-      .mask = std::vector<std::uint8_t>(16, 0xFF),
+      .pattern = MappedHex("CFB27A1100A1B2C3D4E5F60718293A4B"),
+      .mask = MappedFill(16, 0xFF),
       .max_matches = 2,
       .context_before = 4,
       .context_after = 4,
@@ -124,15 +159,15 @@ void TestScanAndRead() {
           "batch read");
 
   const auto short_pattern = ScanPrivateMemory({
-      .pattern = std::vector<std::uint8_t>(7, 0x11),
-      .mask = std::vector<std::uint8_t>(7, 0xFF),
+      .pattern = MappedFill(7, 0x11),
+      .mask = MappedFill(7, 0xFF),
       .max_matches = 1,
   });
   Require(!short_pattern.complete, "7-byte pattern rejection");
 
   const auto excessive_matches = ScanPrivateMemory({
-      .pattern = std::vector<std::uint8_t>(8, 0x11),
-      .mask = std::vector<std::uint8_t>(8, 0xFF),
+      .pattern = MappedFill(8, 0x11),
+      .mask = MappedFill(8, 0xFF),
       .max_matches = 65,
   });
   Require(!excessive_matches.complete, "65 requested matches rejection");
@@ -140,23 +175,65 @@ void TestScanAndRead() {
 
 void TestScanExcludesMaskBuffer() {
   cfb27::memory::ScanRequest request{
-      .pattern = std::vector<std::uint8_t>(4096, 0xFF),
-      .mask = std::vector<std::uint8_t>(4096, 0xFF),
+      .pattern = MappedHex(std::string(8192, 'F')),
+      .mask = MappedHex(std::string(8192, 'F')),
       .max_matches = 2,
   };
   const auto mask_begin = reinterpret_cast<std::uintptr_t>(request.mask.data());
   const auto mask_end = mask_begin + request.mask.size();
 
+  RequireMappedStorage(request.pattern.data(), "decoded pattern uses mapped storage");
+  RequireMappedStorage(request.mask.data(), "decoded mask uses mapped storage");
+
   g_scan_destination = 0;
   g_attempted_scan_buffer_read = false;
+  g_scan_destination_is_mapped = false;
   const auto scan = ScanPrivateMemory(request, TestRead);
   Require(scan.complete, "mask buffer exclusion scan completes");
+  Require(g_scan_destination_is_mapped, "scan read destination uses mapped storage");
   Require(!g_attempted_scan_buffer_read, "dedicated scan buffer excluded from traversal");
   for (const auto& match : scan.matches) {
     const auto address = cfb27::memory::ParseAddress(match.address);
     Require(address && (*address < mask_begin || *address >= mask_end),
             "scan returned request mask buffer");
   }
+}
+
+std::size_t CountAddress(const std::vector<cfb27::memory::ScanMatch>& matches,
+                         const void* address);
+
+void TestRetainedContextCannotSelfMatch() {
+  constexpr std::size_t kAllocationSize = 64 * 1024;
+  void* allocation =
+      VirtualAlloc(nullptr, kAllocationSize, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+  Require(allocation != nullptr, "allocate retained-context target");
+  auto sentinel = HexBytes("E37A91C5B2046DF80A1B2C3D4E5F6071");
+  std::memcpy(static_cast<std::uint8_t*>(allocation) + 128, sentinel.data(), sentinel.size());
+
+  cfb27::memory::ScanRequest request{
+      .pattern = MappedCopy(sentinel),
+      .mask = MappedFill(sentinel.size(), 0xFF),
+      .max_matches = 1,
+      .context_before = 4,
+      .context_after = 4,
+      .cursor = FormatAddress(reinterpret_cast<std::uintptr_t>(allocation)),
+  };
+  SecureZeroMemory(sentinel.data(), sentinel.size());
+  sentinel.clear();
+  sentinel.shrink_to_fit();
+
+  auto first = ScanPrivateMemory(request);
+  Require(first.matches.size() == 1, "retained-context first match");
+  RequireMappedStorage(first.matches[0].context.data(),
+                       "produced match context uses mapped storage");
+  const auto retained_address = first.matches[0].context.data() + request.context_before;
+  request.cursor = FormatAddress(
+      reinterpret_cast<std::uintptr_t>(first.matches[0].context.data()));
+  VirtualFree(allocation, 0, MEM_RELEASE);
+
+  const auto second = ScanPrivateMemory(request);
+  Require(CountAddress(second.matches, retained_address) == 0,
+          "retained prior context is not returned as a later match");
 }
 
 std::size_t CountAddress(const std::vector<cfb27::memory::ScanMatch>& matches,
@@ -182,8 +259,8 @@ void TestPagedLargeRegionAndBoundaries() {
   std::memcpy(bytes + old_tail, sentinel.data(), sentinel.size());
 
   cfb27::memory::ScanRequest request{
-      .pattern = sentinel,
-      .mask = mask,
+      .pattern = MappedCopy(sentinel),
+      .mask = MappedCopy(mask),
       .max_matches = 8,
       .context_before = 4,
       .context_after = 4,
@@ -195,11 +272,13 @@ void TestPagedLargeRegionAndBoundaries() {
   for (std::size_t pages = 0; pages < 4096; ++pages) {
     const auto input_cursor = cfb27::memory::ParseAddress(*request.cursor);
     Require(input_cursor.has_value(), "page input cursor is valid");
-    const auto result = ScanPrivateMemory(request);
+    auto result = ScanPrivateMemory(request);
     Require(result.code.empty(), "large-region page succeeds");
     Require(result.scanned_bytes <= cfb27::memory::kMaxScanPageBytes,
             "scan page is bounded");
-    matches.insert(matches.end(), result.matches.begin(), result.matches.end());
+    matches.insert(matches.end(),
+                   std::make_move_iterator(result.matches.begin()),
+                   std::make_move_iterator(result.matches.end()));
     if (result.complete) {
       Require(!result.next_cursor.has_value(), "complete page has no cursor");
       completed = true;
@@ -239,8 +318,8 @@ void TestInvalidPageCursors() {
       reinterpret_cast<std::uintptr_t>(system_info.lpMaximumApplicationAddress);
   const auto above_maximum = FormatAddress(maximum + 1);
   const auto result = ScanPrivateMemory({
-      .pattern = HexBytes("A1B2C3D4E5F60718"),
-      .mask = std::vector<std::uint8_t>(8, 0xFF),
+      .pattern = MappedHex("A1B2C3D4E5F60718"),
+      .mask = MappedFill(8, 0xFF),
       .max_matches = 1,
       .cursor = above_maximum,
   });
@@ -248,8 +327,8 @@ void TestInvalidPageCursors() {
           "cursor above system maximum rejected");
 
   const auto overflowing = ScanPrivateMemory({
-      .pattern = HexBytes("A1B2C3D4E5F60718"),
-      .mask = std::vector<std::uint8_t>(8, 0xFF),
+      .pattern = MappedHex("A1B2C3D4E5F60718"),
+      .mask = MappedFill(8, 0xFF),
       .max_matches = 1,
       .cursor = "0x10000000000000000",
   });
@@ -270,8 +349,8 @@ void TestInvalidPageCursors() {
   };
   for (const auto& cursor : noncanonical) {
     const auto rejected = ScanPrivateMemory({
-        .pattern = HexBytes("A1B2C3D4E5F60718"),
-        .mask = std::vector<std::uint8_t>(8, 0xFF),
+        .pattern = MappedHex("A1B2C3D4E5F60718"),
+        .mask = MappedFill(8, 0xFF),
         .max_matches = 1,
         .cursor = cursor,
     });
@@ -346,8 +425,8 @@ void TestPagedScanBeyondOldAggregateLimit() {
   std::memcpy(static_cast<std::uint8_t*>(regions.back()) + kTargetOffset, sentinel.data(),
               sentinel.size());
   cfb27::memory::ScanRequest request{
-      .pattern = sentinel,
-      .mask = std::vector<std::uint8_t>(16, 0xFF),
+      .pattern = MappedCopy(sentinel),
+      .mask = MappedFill(16, 0xFF),
       .max_matches = 1,
       .cursor = FormatAddress(reinterpret_cast<std::uintptr_t>(regions.front())),
   };
@@ -382,6 +461,7 @@ int main() {
     TestRegionEligibility();
     TestScanAndRead();
     TestScanExcludesMaskBuffer();
+    TestRetainedContextCannotSelfMatch();
     TestPagedLargeRegionAndBoundaries();
     TestInvalidPageCursors();
     TestTerminalCompletionPrecedesPageBudget();

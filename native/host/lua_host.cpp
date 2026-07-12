@@ -810,7 +810,7 @@ std::optional<std::vector<std::uint8_t>> HexToBytes(
   return bytes;
 }
 
-std::string BytesToHex(const std::vector<std::uint8_t>& bytes) {
+std::string BytesToHex(std::span<const std::uint8_t> bytes) {
   constexpr char digits[] = "0123456789ABCDEF";
   std::string encoded(bytes.size() * 2, '0');
   for (std::size_t index = 0; index < bytes.size(); ++index) {
@@ -1108,8 +1108,14 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
         !params.contains("patternHex") || !params.contains("maskHex")) {
       return ErrorResponse(id, "INVALID_REQUEST", "Invalid scanMemory params");
     }
-    auto pattern = HexToBytes(params["patternHex"]);
-    auto mask = HexToBytes(params["maskHex"]);
+    auto pattern = params["patternHex"].is_string()
+        ? cfb27::memory::MappedBytes::FromUpperHex(
+              params["patternHex"].get_ref<const std::string&>())
+        : std::nullopt;
+    auto mask = params["maskHex"].is_string()
+        ? cfb27::memory::MappedBytes::FromUpperHex(
+              params["maskHex"].get_ref<const std::string&>())
+        : std::nullopt;
     const auto max_matches = ReadUnsigned(
         params, "maxMatches", 1, cfb27::memory::kMaxMatches);
     const auto context_before = ReadUnsigned(
@@ -1158,7 +1164,7 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
           {"regionSize", match.region_size},
           {"protection", match.protection},
           {"contextAddress", FormatCanonicalAddress(*context_address)},
-          {"contextHex", BytesToHex(match.context)},
+          {"contextHex", BytesToHex(match.context.bytes())},
       });
     }
     return SuccessResponse(id, {

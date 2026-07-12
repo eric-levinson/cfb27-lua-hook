@@ -516,6 +516,11 @@ int wmain(int argc, wchar_t** argv) {
       response["result"]["ranges"][0].value("bytesHex", "") != kSentinelHex) return 32;
 
   Json invalid_params = allowed_scan_params;
+  invalid_params["patternHex"] = "";
+  if (!Request(pipe, {{"protocol", 1}, {"id", "scan-empty-pattern"},
+                      {"command", "scanMemory"}, {"params", invalid_params}}, response, false) ||
+      !IsError(response, "INVALID_REQUEST")) return 104;
+  invalid_params = allowed_scan_params;
   invalid_params["patternHex"] = "CFB27A1Z";
   if (!Request(pipe, {{"protocol", 1}, {"id", "scan-bad-hex"},
                       {"command", "scanMemory"}, {"params", invalid_params}}, response, false) ||
