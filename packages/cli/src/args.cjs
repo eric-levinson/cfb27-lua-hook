@@ -45,6 +45,8 @@ function parseArgs(argv) {
     context: undefined,
     ranges: [],
     allowUnsupportedBuild: false,
+    includeAllocationMetadata: false,
+    allowExternalFile: false,
   };
   const seen = new Set();
   const values = new Map([
@@ -74,12 +76,18 @@ function parseArgs(argv) {
       help = true;
       continue;
     }
-    if (token === '--json' || token === '--follow' || token === '--allow-unsupported-build') {
+    if (token === '--json' || token === '--follow' || token === '--allow-unsupported-build' ||
+        token === '--include-allocation-metadata' ||
+        token === '--allow-external-file') {
       if (seen.has(token)) throw usageError(`Duplicate option: ${token}`);
       seen.add(token);
       if (token === '--json') json = true;
       else if (token === '--follow') options.follow = true;
-      else options.allowUnsupportedBuild = true;
+      else if (token === '--allow-unsupported-build') options.allowUnsupportedBuild = true;
+      else if (token === '--include-allocation-metadata') {
+        options.includeAllocationMetadata = true;
+      }
+      else options.allowExternalFile = true;
       continue;
     }
     if (token === '--range') {
@@ -101,6 +109,13 @@ function parseArgs(argv) {
       options[values.get(token)] = value;
       index += 1;
       continue;
+    }
+    if (token === '-') {
+      if (command === 'memory' && positionals.length === 1 && positionals[0] === 'transact') {
+        positionals.push(token);
+        continue;
+      }
+      throw usageError('Unknown option: -');
     }
     if (token.startsWith('-')) throw usageError(`Unknown option: ${token}`);
     if (!command) command = token;

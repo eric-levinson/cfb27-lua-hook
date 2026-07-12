@@ -3,7 +3,7 @@
 Offline Lua scripting runtime, Node SDK, and MMC startup tooling for EA SPORTS
 College Football 27 on PC.
 
-> Developer preview `0.2.0-dev.1`. The runtime supports one verified game
+> Developer preview `0.2.0-dev.2`. The runtime supports one verified game
 > build, is intended only for offline play, and does not include or provide an
 > anticheat bypass.
 
@@ -35,7 +35,7 @@ cfb27lua logs [--follow]
 cfb27lua doctor
 ```
 
-These commands are implemented in the `0.2.0-dev.1` developer preview. One-shot
+These commands are implemented in the `0.2.0-dev.2` developer preview. One-shot
 `--json` output is a single object; followed logs use JSON Lines.
 
 ## Start here

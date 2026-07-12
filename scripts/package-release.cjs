@@ -6,7 +6,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 
 const root = path.resolve(__dirname, '..');
-const version = '0.2.0-dev.1';
+const version = '0.2.0-dev.2';
 
 function releaseEntries() {
   return ['native', 'packages', 'examples', 'docs', 'README.md', 'LICENSE'];

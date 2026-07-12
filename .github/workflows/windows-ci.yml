@@ -21,9 +21,12 @@ jobs:
       - run: native/build-release/Release/cfb27_startup_smoke.exe native/build-release/Release/cfb27_lua_host.dll
       - run: native/build-release/Release/cfb27_memory_reader_smoke.exe
       - run: native/build-release/Release/cfb27_telemetry_smoke.exe
+      - run: native/build-release/Release/cfb27_memory_transaction_smoke.exe
       - run: native/build-release/Release/cfb27_protocol_smoke.exe native/build-release/Release/cfb27_lua_host.dll
+        env:
+          CFB27_SMOKE_ALLOW_WRITES: '1'
       - run: npm run pack:preview
       - uses: actions/upload-artifact@v4
         with:
-          name: cfb27-lua-hook-0.2.0-dev.1
+          name: cfb27-lua-hook-0.2.0-dev.2
           path: dist/

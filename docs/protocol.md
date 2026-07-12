@@ -40,14 +40,20 @@ Error response:
 - `registerTelemetry { types }` — add trusted structured event names for the
   current host session.
 - `scanMemory { patternHex, maskHex, maxMatches, contextBefore,
-  contextAfter, allowUnsupportedBuild?, cursor? }` — scan one bounded page of
-  readable private memory and optionally resume from a continuation cursor.
+  contextAfter, allowUnsupportedBuild?, cursor?, includeAllocationMetadata? }`
+  — scan one bounded page of readable private memory and optionally resume from
+  a continuation cursor.
 - `readMemory { ranges, allowUnsupportedBuild? }` — read a bounded batch of
   readable private-memory ranges.
+- `writeTransaction { transactionId, operations }` — apply a bounded guarded
+  batch with complete preflight comparison, readback, and rollback.
 
 `hello.capabilities` advertises the memory commands as `memoryScan` and
-`memoryRead`, and structured event registration as `telemetry`. They are
-read-only host operations and do not expose a write API.
+`memoryRead`, allocation-aware scans as `memoryScanAllocationMetadata`, guarded
+writes as `memoryWriteTransaction`, and structured event registration as
+`telemetry`. `status.sessionWritesDisabled` reports whether an
+unverifiable rollback has permanently disabled writes for the current host
+session.
 
 ### Structured telemetry
 
@@ -104,6 +110,24 @@ Result:
 {"supportedBuild":false,"complete":false,"nextCursor":"0x7FF614340000","scannedBytes":33554432,"matches":[{"address":"0x7FF612340080","regionBase":"0x7FF612340000","regionSize":65536,"protection":4,"contextAddress":"0x7FF61234007C","contextHex":"00000000CFB27A1100A1B2C3D4E5F60718293A4B00000000"}]}
 ```
 
+When `includeAllocationMetadata` is absent or the JSON boolean `false`, each
+match has exactly the six legacy properties shown above. When it is `true`, the
+host adds exactly four properties to every match:
+
+```json
+{"address":"0x7FF612340080","regionBase":"0x7FF612340000","regionSize":4096,"protection":4,"contextAddress":"0x7FF61234007C","contextHex":"00000000CFB27A1100A1B2C3D4E5F60718293A4B00000000","allocationBase":"0x7FF612300000","allocationSize":4194304,"allocationProtect":4,"offsetInAllocation":262272}
+```
+
+`allocationBase` is the allocation identity reported by the operating system.
+`allocationSize` is the checked contiguous extent of adjacent virtual-memory
+regions that retain that identity. `allocationProtect` is the allocation's
+initial protection, while `protection` remains the current protection of the
+matched region. `offsetInAllocation` is the checked byte difference from the
+allocation base, and therefore
+`BigInt(address) === BigInt(allocationBase) + BigInt(offsetInAllocation)`.
+Failure to discover a complete consistent extent fails the whole page with
+`MEMORY_ACCESS_DENIED`; partial matches are not returned.
+
 Every successful page contains exactly `complete`, `nextCursor`,
 `scannedBytes`, `matches`, and `supportedBuild`. A partial page has
 `complete:false` and a canonical string `nextCursor`; a terminal page has
@@ -119,6 +143,15 @@ owns continuation cursors, accepts `maxPages` from 1 through 4,096 (default
 cursors. The default bounds total eligible-byte work to 128 GiB. Before using a
 candidate for interpretation, re-read it and validate its expected structure;
 the live memory map can change between pages.
+
+Before an opt-in request, the SDK negotiates `hello` and requires
+`memoryScanAllocationMetadata`; older hosts fail closed with
+`PROTOCOL_MISMATCH`. Allocation addresses and topology are opaque, session-only
+observations. They must not be persisted or reused after a PID, host session,
+allocation lifecycle, or validation change. Allocation size and address order
+are never authority signals: use independently validated content and lifecycle
+behavior to distinguish authoritative state from replicas, caches, or stale
+allocations.
 
 ### Memory read
 
@@ -145,6 +178,38 @@ keys. On an unsupported executable, `allowUnsupportedBuild` must be the JSON
 boolean `true` or the command returns `UNSUPPORTED_BUILD`. Successful diagnostic
 requests then return `supportedBuild:false`. This override never enables writes.
 
+### Memory write transactions
+
+`transactionId` is 1–64 ASCII letters, digits, dots, underscores, or hyphens.
+`operations` contains 1–32 objects with exactly `address`, `expectedHex`, and
+`replacementHex`. Addresses use the same canonical uppercase format as memory
+reads. Hex strings are nonempty uppercase byte sequences of equal length. One
+operation is limited to 4,096 bytes and the request is limited to 65,536 bytes.
+
+```json
+{"protocol":1,"id":"write-1","command":"writeTransaction","params":{"transactionId":"recruiting.proof-1","operations":[{"address":"0x7FF612340080","expectedHex":"1020","replacementHex":"1121"}]}}
+```
+
+A successful result records the verified outcome for every operation:
+
+```json
+{"transactionId":"recruiting.proof-1","status":"applied_verified","operations":[{"index":0,"applied":true,"verified":true}]}
+```
+
+The host validates every range and compares every expected byte before the
+first write. It then applies and verifies operations in request order. If an
+apply or readback step fails, it restores attempted operations in reverse order
+and verifies the originals. A verified rollback is returned as
+`TRANSACTION_APPLY_FAILED`, with `rolled_back_verified` transaction details. An
+unverifiable rollback returns `ROLLBACK_VERIFICATION_FAILED`, with
+`rollback_unverified` details, and permanently rejects subsequent transaction
+and Lua writes with `SESSION_WRITES_DISABLED` until the host restarts.
+
+This is request-level host sequencing, not game-thread atomicity: the game may
+mutate memory while preflight, apply, verification, or rollback is running.
+Callers must establish a stable window appropriate to the target data before
+submitting a transaction.
+
 The host retains at most 512 log entries and 1,024 events. Event cursors are
 monotonic for one host session. Tick events are coalesced to at most one per
 second; Lua tick callbacks still run at their normal cadence.
@@ -160,6 +225,11 @@ Memory commands additionally return `MEMORY_ACCESS_DENIED` when a requested
 range is not wholly readable private memory, `SCAN_LIMIT_EXCEEDED` when the
 aggregate scan bound would be crossed, and `TOO_MANY_MATCHES` rather than
 silently truncating a scan. These errors do not include memory or region dumps.
+Guarded writes additionally return `MEMORY_MISMATCH`,
+`TRANSACTION_LIMIT_EXCEEDED`, `TRANSACTION_APPLY_FAILED`,
+`ROLLBACK_VERIFICATION_FAILED`, and `SESSION_WRITES_DISABLED`. Malformed
+transaction shapes, addresses, hex, and overlapping operations return
+`INVALID_REQUEST`.
 
 The unversioned legacy text pipe remains temporarily available for migration,
 but it is not the integration contract for new tools.

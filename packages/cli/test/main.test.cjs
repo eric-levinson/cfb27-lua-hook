@@ -2,6 +2,8 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const os = require('node:os');
 const path = require('node:path');
 const { main } = require('../src/main.cjs');
 
@@ -14,6 +16,13 @@ function memoryIo(env = {}) {
       out: (value) => { output.stdout += `${value}\n`; },
       err: (value) => { output.stderr += `${value}\n`; },
     },
+  };
+}
+
+function memoryFileSystem(readFile) {
+  return {
+    readFile,
+    realpath: async (value) => path.resolve(value),
   };
 }
 
@@ -166,6 +175,10 @@ test('memory scan parses diagnostic options and preserves the validated SDK resu
       protection: 4,
       contextAddress: '0x7FF612340060',
       contextHex: `${'00'.repeat(32)}CFB27A1100A1B2C3D4E5F60718293A4B${'00'.repeat(32)}`,
+      allocationBase: '0x7FF612300000',
+      allocationSize: 4194304,
+      allocationProtect: 4,
+      offsetInAllocation: 262272,
     }],
   };
   const calls = [];
@@ -188,6 +201,7 @@ test('memory scan parses diagnostic options and preserves the validated SDK resu
     '--context', '32',
     '--max-pages', '3',
     '--allow-unsupported-build',
+    '--include-allocation-metadata',
     '--json',
   ], { sdk, io }), 0);
   assert.deepEqual(calls, [
@@ -200,6 +214,7 @@ test('memory scan parses diagnostic options and preserves the validated SDK resu
       contextAfter: 32,
       maxPages: 3,
       allowUnsupportedBuild: true,
+      includeAllocationMetadata: true,
     }],
   ]);
   assert.deepEqual(JSON.parse(output.stdout), {
@@ -420,6 +435,260 @@ test('allow-unsupported-build is explicit and only valid for memory diagnostics'
     sdk: {}, io: invalid.io,
   }), 2);
   assert.match(invalid.output.stderr, /only valid for memory/);
+});
+
+test('memory transact reads one JSON request file and preserves the validated SDK result', async () => {
+  const request = {
+    transactionId: 'recruiting.influence-proof-1',
+    operations: [{
+      address: '0x7FF612340000',
+      expectedHex: '1020',
+      replacementHex: '1121',
+    }],
+  };
+  const result = {
+    transactionId: request.transactionId,
+    status: 'applied_verified',
+    operations: [{ index: 0, applied: true, verified: true }],
+  };
+  const reads = [];
+  const calls = [];
+  const { io, output } = memoryIo();
+  const sdk = {
+    discoverGame: async () => ({ pid: 27 }),
+    createClient: () => ({
+      writeTransaction: async (value) => { calls.push(value); return result; },
+    }),
+  };
+  const fileSystem = {
+    readFile: async (file, encoding) => {
+      reads.push([file, encoding]);
+      return JSON.stringify(request);
+    },
+    realpath: async (value) => path.resolve(value),
+  };
+
+  assert.equal(await main([
+    'memory', 'transact', 'proof-transaction.json', '--json',
+  ], { sdk, io, fileSystem, cwd: 'C:\\workspace' }), 0);
+  assert.deepEqual(reads, [[path.resolve('C:\\workspace', 'proof-transaction.json'), 'utf8']]);
+  assert.deepEqual(calls, [request]);
+  assert.deepEqual(JSON.parse(output.stdout), result);
+});
+
+test('memory transact human output contains only transaction identity, status, and counts', async () => {
+  const request = {
+    transactionId: 'recruiting.influence-proof-1',
+    operations: [{
+      address: '0x7FF612340000',
+      expectedHex: '1020',
+      replacementHex: '1121',
+    }],
+  };
+  const result = {
+    transactionId: request.transactionId,
+    status: 'applied_verified',
+    operations: [{ index: 0, applied: true, verified: true }],
+  };
+  const { io, output } = memoryIo();
+  const sdk = {
+    discoverGame: async () => ({ pid: 27 }),
+    createClient: () => ({ writeTransaction: async () => result }),
+  };
+  assert.equal(await main(['memory', 'transact', 'proof.json'], {
+    sdk,
+    io,
+    fileSystem: memoryFileSystem(async () => JSON.stringify(request)),
+    cwd: 'C:\\workspace',
+  }), 0);
+  assert.match(output.stdout, /recruiting\.influence-proof-1/);
+  assert.match(output.stdout, /applied_verified/);
+  assert.match(output.stdout, /1 operation/);
+  assert.match(output.stdout, /1 applied/);
+  assert.match(output.stdout, /1 verified/);
+  for (const secret of ['0x7FF612340000', '1020', '1121', 'address', 'expectedHex', 'replacementHex']) {
+    assert.equal(output.stdout.includes(secret), false, `human output leaked ${secret}`);
+  }
+});
+
+test('memory transact refuses stdin, non-JSON files, and external absolute paths by default', async () => {
+  const cases = [
+    [['memory', 'transact', '-'], /JSON file/],
+    [['memory', 'transact', 'proof.txt'], /\.json/],
+    [['memory', 'transact', 'C:\\outside\\proof.json'], /outside the current working directory/],
+    [['memory', 'transact'], /exactly one JSON file/],
+    [['memory', 'transact', 'one.json', 'two.json'], /exactly one JSON file/],
+  ];
+  for (const [argv, pattern] of cases) {
+    let reads = 0;
+    const { io, output } = memoryIo();
+    assert.equal(await main(argv, {
+      sdk: {},
+      io,
+      fileSystem: memoryFileSystem(async () => { reads += 1; return '{}'; }),
+      cwd: 'C:\\workspace',
+    }), 2, argv.join(' '));
+    assert.match(output.stderr, pattern, argv.join(' '));
+    assert.equal(reads, 0, argv.join(' '));
+  }
+});
+
+test('bare dash remains an invalid option outside the transaction file slot', async () => {
+  const cases = [
+    ['run', '-'],
+    ['eval', '-'],
+    ['telemetry', 'register', '-'],
+  ];
+  for (const argv of cases) {
+    const { io, output } = memoryIo();
+    assert.equal(await main(argv, { sdk: {}, io }), 2, argv.join(' '));
+    assert.match(output.stderr, /Unknown option: -/, argv.join(' '));
+  }
+});
+
+test('memory transact allows an external absolute JSON file only with the explicit flag', async () => {
+  const request = {
+    transactionId: 'proof.external-1',
+    operations: [{ address: '0x1000', expectedHex: '00', replacementHex: '01' }],
+  };
+  const result = {
+    transactionId: request.transactionId,
+    status: 'applied_verified',
+    operations: [{ index: 0, applied: true, verified: true }],
+  };
+  const reads = [];
+  const calls = [];
+  const sdk = {
+    discoverGame: async () => ({ pid: 27 }),
+    createClient: () => ({
+      writeTransaction: async (value) => { calls.push(value); return result; },
+    }),
+  };
+  assert.equal(await main([
+    'memory', 'transact', 'C:\\outside\\proof.json', '--allow-external-file', '--json',
+  ], {
+    sdk,
+    io: memoryIo().io,
+    fileSystem: memoryFileSystem(async (file) => { reads.push(file); return JSON.stringify(request); }),
+    cwd: 'C:\\workspace',
+  }), 0);
+  assert.deepEqual(reads, ['C:\\outside\\proof.json']);
+  assert.deepEqual(calls, [request]);
+});
+
+test('memory transact resolves junction targets before enforcing CWD containment', async (t) => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'cfb27-cli-cwd-'));
+  const external = await fs.mkdtemp(path.join(os.tmpdir(), 'cfb27-cli-external-'));
+  t.after(async () => {
+    await fs.rm(cwd, { recursive: true, force: true });
+    await fs.rm(external, { recursive: true, force: true });
+  });
+  const request = {
+    transactionId: 'proof.link-1',
+    operations: [{ address: '0x1000', expectedHex: '00', replacementHex: '01' }],
+  };
+  const result = {
+    transactionId: request.transactionId,
+    status: 'applied_verified',
+    operations: [{ index: 0, applied: true, verified: true }],
+  };
+  await fs.writeFile(path.join(external, 'proof.json'), JSON.stringify(request));
+  await fs.symlink(external, path.join(cwd, 'linked'), process.platform === 'win32' ? 'junction' : 'dir');
+
+  let calls = 0;
+  const sdk = {
+    discoverGame: async () => ({ pid: 27 }),
+    createClient: () => ({
+      writeTransaction: async () => { calls += 1; return result; },
+    }),
+  };
+  const refused = memoryIo();
+  assert.equal(await main(['memory', 'transact', 'linked/proof.json'], {
+    sdk, io: refused.io, cwd,
+  }), 2);
+  assert.match(refused.output.stderr, /outside the current working directory/);
+  assert.equal(calls, 0);
+
+  const allowed = memoryIo();
+  assert.equal(await main([
+    'memory', 'transact', 'linked/proof.json', '--allow-external-file', '--json',
+  ], { sdk, io: allowed.io, cwd }), 0);
+  assert.deepEqual(JSON.parse(allowed.output.stdout), result);
+  assert.equal(calls, 1);
+});
+
+test('allow-external-file is only valid for memory transact', async () => {
+  const { io, output } = memoryIo();
+  assert.equal(await main(['status', '--allow-external-file'], { sdk: {}, io }), 2);
+  assert.match(output.stderr, /only valid for memory transact/);
+});
+
+test('memory transact rejects diagnostic controls and accepts only the JSON file request', async () => {
+  const cases = [
+    ['--pattern', '0011223344556677'],
+    ['--mask', 'FFFFFFFFFFFFFFFF'],
+    ['--max-matches', '1'],
+    ['--max-pages', '1'],
+    ['--context', '0'],
+    ['--range', '0x1000:1'],
+    ['--allow-unsupported-build'],
+    ['--follow'],
+    ['--after', '1'],
+    ['--game-dir', 'C:\\game'],
+    ['--mmc-dir', 'C:\\mmc'],
+    ['--artifacts-dir', 'C:\\artifacts'],
+  ];
+  for (const option of cases) {
+    let reads = 0;
+    const { io, output } = memoryIo();
+    const argv = ['memory', 'transact', 'proof.json', ...option];
+    assert.equal(await main(argv, {
+      sdk: {},
+      io,
+      fileSystem: memoryFileSystem(async () => { reads += 1; return '{}'; }),
+      cwd: 'C:\\workspace',
+    }), 2, argv.join(' '));
+    assert.match(output.stderr, /not valid for memory transact/, argv.join(' '));
+    assert.equal(reads, 0, argv.join(' '));
+  }
+});
+
+test('memory transact sanitizes hostile errors in human and JSON output', async () => {
+  const hostile = Object.assign(
+    new Error('address 0x7FF612340000 expected 1020 actual DEADBEEF'),
+    {
+      code: 'MEMORY_MISMATCH',
+      details: {
+        address: '0x7FF612340000',
+        expectedHex: '1020',
+        actualHex: 'DEADBEEF',
+      },
+    },
+  );
+  const sdk = {
+    discoverGame: async () => ({ pid: 27 }),
+    createClient: () => ({ writeTransaction: async () => { throw hostile; } }),
+  };
+  for (const json of [false, true]) {
+    const { io, output } = memoryIo();
+    const argv = ['memory', 'transact', 'proof.json', ...(json ? ['--json'] : [])];
+    assert.notEqual(await main(argv, {
+      sdk,
+      io,
+      fileSystem: memoryFileSystem(async () => JSON.stringify({
+        transactionId: 'proof.hostile-1',
+        operations: [{ address: '0x1000', expectedHex: '00', replacementHex: '01' }],
+      })),
+      cwd: 'C:\\workspace',
+    }), 0);
+    const combined = `${output.stdout}${output.stderr}`;
+    assert.equal(combined.includes('0x7FF612340000'), false);
+    assert.equal(combined.includes('1020'), false);
+    assert.equal(combined.includes('DEADBEEF'), false);
+    assert.equal(combined.includes('expectedHex'), false);
+    assert.equal(combined.includes('actualHex'), false);
+    assert.match(combined, /MEMORY_MISMATCH/);
+  }
 });
 
 test('developer-only options are rejected outside their exact diagnostic operation', async () => {

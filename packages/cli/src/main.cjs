@@ -1,8 +1,24 @@
 'use strict';
 
+const fs = require('node:fs/promises');
 const path = require('node:path');
 const { parseArgs, usageError } = require('./args.cjs');
 const { printSuccess, printError } = require('./output.cjs');
+
+const TRANSACTION_ERROR_MESSAGES = Object.freeze({
+  INVALID_REQUEST: 'Transaction request was rejected',
+  UNSUPPORTED_BUILD: 'Memory writes require the supported game build',
+  MEMORY_ACCESS_DENIED: 'Transaction memory is not available for writing',
+  MEMORY_MISMATCH: 'Live memory does not match the transaction preflight',
+  TRANSACTION_LIMIT_EXCEEDED: 'Transaction exceeds an operation or byte limit',
+  TRANSACTION_APPLY_FAILED: 'Transaction failed and was rolled back',
+  ROLLBACK_VERIFICATION_FAILED: 'Transaction rollback could not be verified',
+  SESSION_WRITES_DISABLED: 'Writes are disabled for this host session',
+  HOST_NOT_READY: 'Could not connect to the Lua host',
+  PIPE_TIMEOUT: 'Lua host transaction request timed out',
+  PROTOCOL_MISMATCH: 'Host protocol version does not match',
+  INVALID_RESPONSE: 'Host returned an invalid writeTransaction response',
+});
 
 const HELP = `cfb27lua <command> [options]
 
@@ -17,6 +33,8 @@ Commands:
   events        Read host events after a cursor
   memory scan   Scan bounded private readable memory (diagnostic)
   memory read   Read bounded canonical address ranges (diagnostic)
+  memory transact <file.json>
+                Apply one guarded transaction from a JSON request file
   telemetry register <type...>
                 Register structured telemetry type names
 
@@ -35,6 +53,9 @@ Options:
   --range <address:length> Canonical read range; may be repeated
   --allow-unsupported-build
                           Explicitly allow unsupported-build diagnostics
+  --include-allocation-metadata
+                          Include session-only allocation topology in scan matches
+  --allow-external-file   Allow a transaction JSON file outside the current directory
   -h, --help              Show this help`;
 
 const defaultIo = {
@@ -70,6 +91,7 @@ function requireMemoryScanOptions(options) {
     contextAfter: options.context,
     maxPages: options.maxPages || 4096,
     ...(options.allowUnsupportedBuild ? { allowUnsupportedBuild: true } : {}),
+    ...(options.includeAllocationMetadata ? { includeAllocationMetadata: true } : {}),
   };
 }
 
@@ -77,6 +99,7 @@ function rejectMisplacedDeveloperOptions(command, positionals, options) {
   const operation = command === 'memory' ? positionals[0] : undefined;
   const scanOptions = [
     options.pattern, options.mask, options.maxMatches, options.maxPages, options.context,
+    options.includeAllocationMetadata || undefined,
   ];
   if (command !== 'memory' && (scanOptions.some((value) => value !== undefined) ||
       options.ranges.length || options.allowUnsupportedBuild)) {
@@ -87,6 +110,55 @@ function rejectMisplacedDeveloperOptions(command, positionals, options) {
   }
   if (operation === 'read' && scanOptions.some((value) => value !== undefined)) {
     throw usageError('Scan options are not valid for memory read');
+  }
+  if (operation === 'transact') {
+    const hasUnrelatedOption = Object.entries(options).some(([key, value]) => {
+      if (key === 'allowExternalFile') return false;
+      if (Array.isArray(value)) return value.length > 0;
+      if (typeof value === 'boolean') return value;
+      return value !== undefined;
+    });
+    if (hasUnrelatedOption) {
+      throw usageError('This option is not valid for memory transact');
+    }
+  }
+  if (operation !== 'transact' && options.allowExternalFile) {
+    throw usageError('--allow-external-file is only valid for memory transact');
+  }
+}
+
+async function readTransactionRequest(file, { fileSystem, cwd, allowExternalFile }) {
+  if (file === '-') throw usageError('memory transact requires a JSON file and refuses stdin');
+  if (path.extname(file).toLowerCase() !== '.json') {
+    throw usageError('memory transact requires a .json file');
+  }
+  let resolvedCwd;
+  try {
+    resolvedCwd = await fileSystem.realpath(path.resolve(cwd));
+  } catch (error) {
+    throw usageError(`Could not resolve current working directory: ${error.message}`);
+  }
+  let resolved;
+  try {
+    resolved = await fileSystem.realpath(path.resolve(cwd, file));
+  } catch (error) {
+    throw usageError(`Could not resolve transaction JSON file: ${error.message}`);
+  }
+  const relative = path.relative(resolvedCwd, resolved);
+  if (!allowExternalFile && (relative === '..' || relative.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(relative))) {
+    throw usageError('Transaction file is outside the current working directory; pass --allow-external-file to allow it');
+  }
+  let source;
+  try {
+    source = await fileSystem.readFile(resolved, 'utf8');
+  } catch (error) {
+    throw usageError(`Could not read transaction JSON file: ${error.message}`);
+  }
+  try {
+    return JSON.parse(source);
+  } catch {
+    throw usageError('Transaction file must contain valid JSON');
   }
 }
 
@@ -107,10 +179,21 @@ function memoryHumanLines(command, result) {
 
 function printCommandSuccess(io, command, result, json) {
   if (json) {
+    if (command === 'memory transact') {
+      io.out(JSON.stringify(result));
+      return;
+    }
     printSuccess(io, command, result, true);
     return;
   }
   if (command.startsWith('memory ')) {
+    if (command === 'memory transact') {
+      const applied = result.operations.filter((operation) => operation.applied).length;
+      const verified = result.operations.filter((operation) => operation.verified).length;
+      io.out(`Transaction ${result.transactionId}: ${result.status}`);
+      io.out(`${result.operations.length} ${result.operations.length === 1 ? 'operation' : 'operations'}, ${applied} applied, ${verified} verified`);
+      return;
+    }
     for (const line of memoryHumanLines(command, result)) io.out(line);
     return;
   }
@@ -123,7 +206,21 @@ function printCommandSuccess(io, command, result, json) {
   printSuccess(io, command, result, false);
 }
 
-async function main(argv, { sdk = require('@cfb27/lua-hook'), io = defaultIo } = {}) {
+function sanitizeTransactionError(error) {
+  if (error?.code === 'USAGE') return error;
+  const code = typeof error?.code === 'string' &&
+    Object.hasOwn(TRANSACTION_ERROR_MESSAGES, error.code)
+    ? error.code
+    : 'INVALID_RESPONSE';
+  return Object.assign(new Error(TRANSACTION_ERROR_MESSAGES[code]), { code });
+}
+
+async function main(argv, {
+  sdk = require('@cfb27/lua-hook'),
+  io = defaultIo,
+  fileSystem = fs,
+  cwd = process.cwd(),
+} = {}) {
   let parsed = { json: false };
   try {
     parsed = parseArgs(argv);
@@ -209,8 +306,19 @@ async function main(argv, { sdk = require('@cfb27/lua-hook'), io = defaultIo } =
         if (options.allowUnsupportedBuild) readOptions.allowUnsupportedBuild = true;
         const game = await sdk.discoverGame();
         result = await sdk.createClient({ pid: game.pid }).readMemory(readOptions);
+      } else if (operation === 'transact') {
+        if (extra.length !== 1) {
+          throw usageError('memory transact requires exactly one JSON file');
+        }
+        const transaction = await readTransactionRequest(extra[0], {
+          fileSystem,
+          cwd,
+          allowExternalFile: options.allowExternalFile,
+        });
+        const game = await sdk.discoverGame();
+        result = await sdk.createClient({ pid: game.pid }).writeTransaction(transaction);
       } else {
-        throw usageError('memory requires scan or read');
+        throw usageError('memory requires scan, read, or transact');
       }
     } else if (command === 'telemetry') {
       const [operation, ...types] = positionals;
@@ -228,8 +336,11 @@ async function main(argv, { sdk = require('@cfb27/lua-hook'), io = defaultIo } =
     printCommandSuccess(io, displayCommand, result, json);
     return 0;
   } catch (error) {
-    printError(io, error, parsed.json === true);
-    return exitCodeFor(error);
+    const safeError = parsed.command === 'memory' && parsed.positionals?.[0] === 'transact'
+      ? sanitizeTransactionError(error)
+      : error;
+    printError(io, safeError, parsed.json === true);
+    return exitCodeFor(safeError);
   }
 }
 

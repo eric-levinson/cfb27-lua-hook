@@ -1,6 +1,6 @@
 # Getting started
 
-CFB27 Lua Hook `0.2.0-dev.1` is a Windows x64 developer preview. It requires
+CFB27 Lua Hook `0.2.0-dev.2` is a Windows x64 developer preview. It requires
 Node.js 20 or later, CMake 3.24 or later, Visual Studio 2022 C++ build tools,
 MMC, and a separately launched offline CFB27 session.
 
@@ -70,6 +70,7 @@ const scan = await client.scanMemory({
   contextBefore: 4,
   contextAfter: 4,
   maxPages: 4096,
+  includeAllocationMetadata: true,
 });
 
 const read = await client.readMemory({
@@ -88,6 +89,26 @@ page control; its `nextCursor` may be passed only to the next page request.
 A batch read contains at most 64 ranges of 64 KiB each and at most 256 KiB
 total. Unsupported game builds
 require `allowUnsupportedBuild: true` and report `supportedBuild: false`.
+
+Allocation metadata is opt-in. The SDK first requires the host's
+`memoryScanAllocationMetadata` capability, then returns `allocationBase`,
+`allocationSize`, `allocationProtect`, and `offsetInAllocation` on every match.
+Without the option, or with `includeAllocationMetadata: false`, the legacy
+six-property match shape is unchanged. The equivalent CLI diagnostic is:
+
+```powershell
+node packages/cli/bin/cfb27lua.cjs memory scan `
+  --pattern CFB27A1100A1B2C3D4E5F60718293A4B `
+  --mask FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF `
+  --max-matches 2 --context 4 `
+  --include-allocation-metadata --json
+```
+
+The CLI preserves the SDK-validated extended JSON only for that invocation; it
+does not persist it. Treat allocation addresses and topology as session-only:
+discard them after a PID, host session, allocation, or validation change.
+Allocation size and address order do not establish which copy is authoritative.
+Use independently validated record content and lifecycle behavior instead.
 
 All memory methods validate requests before opening the pipe and every host
 response field before returning it. A multi-page scan observes a live,

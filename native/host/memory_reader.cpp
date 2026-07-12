@@ -4,8 +4,8 @@
 #include <charconv>
 #include <cctype>
 #include <limits>
-#include <memory>
 #include <system_error>
+#include <unordered_map>
 #include <utility>
 
 namespace cfb27::memory {
@@ -37,6 +37,14 @@ bool IsReadableProtection(DWORD protection) {
   }
 }
 
+bool IsMappedReadableStorage(const void* pointer) {
+  MEMORY_BASIC_INFORMATION info{};
+  return pointer != nullptr &&
+         VirtualQuery(pointer, &info, sizeof(info)) == sizeof(info) &&
+         info.State == MEM_COMMIT && info.Type == MEM_MAPPED &&
+         IsReadableProtection(info.Protect);
+}
+
 struct ValidatedRead {
   std::uintptr_t address{};
   std::size_t length{};
@@ -58,7 +66,8 @@ bool IsWithinOneEligibleRegion(std::uintptr_t address, std::size_t length) {
 
 bool PatternMatches(const std::uint8_t* bytes, const ScanRequest& request) {
   for (std::size_t i = 0; i < request.pattern.size(); ++i) {
-    if ((bytes[i] & request.mask[i]) != (request.pattern[i] & request.mask[i])) return false;
+    if ((bytes[i] & request.mask.data()[i]) !=
+        (request.pattern.data()[i] & request.mask.data()[i])) return false;
   }
   return true;
 }
@@ -77,7 +86,7 @@ bool OverlapsMatchContext(std::uintptr_t candidate, std::size_t candidate_length
                           const ScanResult& result) {
   for (const auto& match : result.matches) {
     if (OverlapsRange(candidate, candidate_length, match.context.data(),
-                      match.context.capacity())) {
+                      match.context.size())) {
       return true;
     }
   }
@@ -93,13 +102,163 @@ bool ProductionRead(const void* source, void* destination, std::size_t length,
   return ok;
 }
 
-struct VirtualFreeDeleter {
-  void operator()(std::uint8_t* allocation) const {
-    if (allocation != nullptr) VirtualFree(allocation, 0, MEM_RELEASE);
+}  // namespace
+
+MappedBytes::~MappedBytes() {
+  if (view_ != nullptr) {
+    SecureZeroMemory(view_, size_);
+    UnmapViewOfFile(view_);
   }
+  if (mapping_ != nullptr) CloseHandle(mapping_);
+}
+
+namespace {
+
+SIZE_T ProductionQuery(const void* address, MEMORY_BASIC_INFORMATION* information,
+                       SIZE_T length) {
+  return VirtualQuery(address, information, length);
+}
+
+struct AllocationExtent {
+  std::size_t size{};
+  DWORD protection{};
 };
 
+std::optional<AllocationMetadata> ResolveAllocationMetadata(
+    std::uintptr_t match_address, const MEMORY_BASIC_INFORMATION& match_info,
+    std::uintptr_t maximum, ScanQueryFunction query,
+    std::unordered_map<std::uintptr_t, AllocationExtent>& extents) {
+  const auto allocation_base =
+      reinterpret_cast<std::uintptr_t>(match_info.AllocationBase);
+  if (allocation_base == 0 || match_address < allocation_base) return std::nullopt;
+
+  auto cached = extents.find(allocation_base);
+  if (cached == extents.end()) {
+    auto cursor = allocation_base;
+    std::size_t allocation_size = 0;
+    DWORD allocation_protection = 0;
+    bool first = true;
+    while (cursor <= maximum) {
+      MEMORY_BASIC_INFORMATION info{};
+      if (query(reinterpret_cast<const void*>(cursor), &info, sizeof(info)) !=
+          sizeof(info)) {
+        return std::nullopt;
+      }
+      const auto base = reinterpret_cast<std::uintptr_t>(info.BaseAddress);
+      const auto queried_allocation =
+          reinterpret_cast<std::uintptr_t>(info.AllocationBase);
+      if (queried_allocation != allocation_base) break;
+      if (base != cursor || info.RegionSize == 0 ||
+          AddOverflows(base, info.RegionSize) ||
+          SizeAddOverflows(allocation_size, info.RegionSize)) {
+        return std::nullopt;
+      }
+      if (first) {
+        allocation_protection = info.AllocationProtect;
+        first = false;
+      }
+      allocation_size += info.RegionSize;
+      const auto next = base + info.RegionSize;
+      if (next <= cursor) return std::nullopt;
+      if (next > maximum) {
+        const auto capped_size = maximum - allocation_base + 1;
+        allocation_size = static_cast<std::size_t>(capped_size);
+        cursor = next;
+        break;
+      }
+      cursor = next;
+    }
+    if (first || allocation_size == 0) return std::nullopt;
+    cached = extents.emplace(allocation_base,
+                             AllocationExtent{allocation_size,
+                                              allocation_protection}).first;
+  }
+
+  const auto offset_value = match_address - allocation_base;
+  if (offset_value > std::numeric_limits<std::size_t>::max()) return std::nullopt;
+  const auto offset = static_cast<std::size_t>(offset_value);
+  if (offset >= cached->second.size) return std::nullopt;
+  return AllocationMetadata{
+      FormatAddress(allocation_base), cached->second.size,
+      cached->second.protection, offset};
+}
+
 }  // namespace
+
+MappedBytes::MappedBytes(MappedBytes&& other) noexcept
+    : mapping_(std::exchange(other.mapping_, nullptr)),
+      view_(std::exchange(other.view_, nullptr)),
+      size_(std::exchange(other.size_, 0)) {}
+
+MappedBytes& MappedBytes::operator=(MappedBytes&& other) noexcept {
+  if (this == &other) return *this;
+  if (view_ != nullptr) {
+    SecureZeroMemory(view_, size_);
+    UnmapViewOfFile(view_);
+  }
+  if (mapping_ != nullptr) CloseHandle(mapping_);
+  mapping_ = std::exchange(other.mapping_, nullptr);
+  view_ = std::exchange(other.view_, nullptr);
+  size_ = std::exchange(other.size_, 0);
+  return *this;
+}
+
+std::optional<MappedBytes> MappedBytes::Allocate(std::size_t size) {
+  if (size == 0) return std::nullopt;
+  const auto size64 = static_cast<std::uint64_t>(size);
+  MappedBytes result;
+  result.mapping_ = CreateFileMappingW(
+      INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,
+      static_cast<DWORD>(size64 >> 32), static_cast<DWORD>(size64), nullptr);
+  if (result.mapping_ == nullptr) return std::nullopt;
+  result.view_ = static_cast<std::uint8_t*>(
+      MapViewOfFile(result.mapping_, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, size));
+  result.size_ = size;
+  if (result.view_ == nullptr || !IsMappedReadableStorage(result.view_)) return std::nullopt;
+  return result;
+}
+
+std::optional<MappedBytes> MappedBytes::FromUpperHex(std::string_view text) {
+  if (text.empty() || text.size() % 2 != 0) return std::nullopt;
+  auto decoded = Allocate(text.size() / 2);
+  if (!decoded) return std::nullopt;
+  auto nibble = [](char character) -> std::optional<std::uint8_t> {
+    if (character >= '0' && character <= '9') {
+      return static_cast<std::uint8_t>(character - '0');
+    }
+    if (character >= 'A' && character <= 'F') {
+      return static_cast<std::uint8_t>(character - 'A' + 10);
+    }
+    return std::nullopt;
+  };
+  for (std::size_t index = 0; index < text.size(); index += 2) {
+    const auto high = nibble(text[index]);
+    const auto low = nibble(text[index + 1]);
+    if (!high || !low) return std::nullopt;
+    decoded->view_[index / 2] = static_cast<std::uint8_t>((*high << 4) | *low);
+  }
+  return decoded;
+}
+
+std::optional<MappedBytes> DecodeScanHex(std::string_view text) {
+  if (text.size() > kMaxPatternBytes * 2) return std::nullopt;
+  return MappedBytes::FromUpperHex(text);
+}
+
+std::optional<MappedBytes> MappedBytes::CopyFrom(
+    std::span<const std::uint8_t> bytes) {
+  auto copy = Allocate(bytes.size());
+  if (!copy) return std::nullopt;
+  std::copy(bytes.begin(), bytes.end(), copy->view_);
+  return copy;
+}
+
+const std::uint8_t* MappedBytes::data() const { return view_; }
+std::uint8_t* MappedBytes::data() { return view_; }
+std::size_t MappedBytes::size() const { return size_; }
+bool MappedBytes::empty() const { return size_ == 0; }
+std::span<const std::uint8_t> MappedBytes::bytes() const { return {view_, size_}; }
+std::span<std::uint8_t> MappedBytes::mutable_bytes() { return {view_, size_}; }
 
 std::optional<std::uintptr_t> ParseAddress(std::string_view text) {
   if (text.size() >= 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) {
@@ -177,7 +336,8 @@ BatchReadResult ReadMemoryBatch(const std::vector<ReadRange>& ranges) {
   return result;
 }
 
-ScanResult ScanPrivateMemory(const ScanRequest& request, ScanReadFunction read) {
+ScanResult ScanPrivateMemory(const ScanRequest& request, ScanReadFunction read,
+                             ScanQueryFunction query) {
   ScanResult result;
   if (request.pattern.size() < kMinPatternBytes ||
       request.pattern.size() > kMaxPatternBytes ||
@@ -206,22 +366,21 @@ ScanResult ScanPrivateMemory(const ScanRequest& request, ScanReadFunction read) 
   }
 
   const auto buffer_capacity = kScanChunkBytes + request.pattern.size() - 1;
-  std::unique_ptr<std::uint8_t, VirtualFreeDeleter> scan_buffer(
-      static_cast<std::uint8_t*>(VirtualAlloc(nullptr, buffer_capacity,
-                                               MEM_RESERVE | MEM_COMMIT,
-                                               PAGE_READWRITE)));
+  auto scan_buffer = MappedBytes::Allocate(buffer_capacity);
   if (!scan_buffer) {
     result.code = kMemoryAccessDenied;
     return result;
   }
-  const auto buffer_begin = reinterpret_cast<std::uintptr_t>(scan_buffer.get());
+  const auto buffer_begin = reinterpret_cast<std::uintptr_t>(scan_buffer->data());
   const auto buffer_end = buffer_begin + buffer_capacity;
   const auto read_chunk = read != nullptr ? read : ProductionRead;
+  const auto query_region = query != nullptr ? query : ProductionQuery;
+  std::unordered_map<std::uintptr_t, AllocationExtent> allocation_extents;
   result.matches.reserve(request.max_matches + 1);
 
   while (cursor <= maximum) {
     MEMORY_BASIC_INFORMATION info{};
-    if (VirtualQuery(reinterpret_cast<const void*>(cursor), &info, sizeof(info)) != sizeof(info)) {
+    if (query_region(reinterpret_cast<const void*>(cursor), &info, sizeof(info)) != sizeof(info)) {
       result.code = kMemoryAccessDenied;
       return result;
     }
@@ -263,7 +422,7 @@ ScanResult ScanPrivateMemory(const ScanRequest& request, ScanReadFunction read) 
         request.pattern.size() - 1, region_end - after_unique);
     const auto read_bytes = static_cast<std::size_t>(unique_bytes + lookahead);
     std::size_t copied = 0;
-    if (!read_chunk(reinterpret_cast<const void*>(cursor), scan_buffer.get(), read_bytes,
+    if (!read_chunk(reinterpret_cast<const void*>(cursor), scan_buffer->data(), read_bytes,
                     copied) || copied != read_bytes) {
       result.code = kMemoryAccessDenied;
       return result;
@@ -279,7 +438,7 @@ ScanResult ScanPrivateMemory(const ScanRequest& request, ScanReadFunction read) 
             OverlapsRange(match_address, request.pattern.size(), request.mask.data(),
                           request.mask.size()) ||
             OverlapsMatchContext(match_address, request.pattern.size(), result) ||
-            !PatternMatches(scan_buffer.get() + offset, request)) {
+            !PatternMatches(scan_buffer->data() + offset, request)) {
           continue;
         }
 
@@ -296,8 +455,22 @@ ScanResult ScanPrivateMemory(const ScanRequest& request, ScanReadFunction read) 
         match.region_size = info.RegionSize;
         match.protection = info.Protect;
         match.context_address = FormatAddress(cursor + context_start);
-        match.context.assign(scan_buffer.get() + context_start,
-                             scan_buffer.get() + context_end);
+        auto context = MappedBytes::CopyFrom(std::span<const std::uint8_t>(
+            scan_buffer->data() + context_start, context_end - context_start));
+        if (!context) {
+          result.code = kMemoryAccessDenied;
+          return result;
+        }
+        match.context = std::move(*context);
+        if (request.include_allocation_metadata) {
+          match.allocation = ResolveAllocationMetadata(
+              match_address, info, maximum, query_region, allocation_extents);
+          if (!match.allocation) {
+            result.matches.clear();
+            result.code = kMemoryAccessDenied;
+            return result;
+          }
+        }
         result.matches.push_back(std::move(match));
 
         if (result.matches.size() > request.max_matches) {

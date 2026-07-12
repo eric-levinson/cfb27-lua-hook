@@ -21,9 +21,30 @@ test('SDK and CLI package identities are stable', () => {
   const sdk = readJson('packages/sdk/package.json');
   const cli = readJson('packages/cli/package.json');
   assert.equal(sdk.name, '@cfb27/lua-hook');
-  assert.equal(sdk.version, '0.2.0-dev.1');
+  assert.equal(sdk.version, '0.2.0-dev.2');
   assert.equal(cli.name, 'cfb27-lua-hook');
   assert.equal(cli.bin.cfb27lua, 'bin/cfb27lua.cjs');
+});
+
+test('Windows CI uploads the current preview version', () => {
+  const pkg = readJson('package.json');
+  const workflow = fs.readFileSync(
+    path.join(root, '.github/workflows/windows-ci.yml'), 'utf8',
+  );
+  assert.match(
+    workflow,
+    new RegExp(`name: cfb27-lua-hook-${pkg.version.replaceAll('.', '\\.')}`),
+  );
+});
+
+test('Windows CI executes the memory transaction smoke', () => {
+  const workflow = fs.readFileSync(
+    path.join(root, '.github/workflows/windows-ci.yml'), 'utf8',
+  );
+  assert.match(
+    workflow,
+    /- run: native\/build-release\/Release\/cfb27_memory_transaction_smoke\.exe/,
+  );
 });
 
 test('repository is MIT licensed', () => {
