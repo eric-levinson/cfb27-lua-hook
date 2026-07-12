@@ -4,6 +4,40 @@ The host embeds Lua 5.4 in the offline `CollegeFB27.exe` process. One Lua state
 persists for the game session, so globals and callbacks registered by one
 script remain available to later scripts.
 
+## Catalog database API
+
+The typed database API resolves tables only by their persistent profile Unique
+ID. Logical names are display labels and current-build table IDs are not public
+lookup selectors.
+
+```lua
+local recruits = CFB27.db:GetTableByUniqueId(1873209313)
+local recruit = recruits:GetRecord(7)
+local score = recruit:GetField("CommitScore")
+
+CFB27.db:Transaction(function(tx)
+  tx:SetField(recruit, "CommitScore", score + 100)
+end)
+```
+
+Table and record values retain only a Unique-ID handle, row, and catalog
+generation. Every method resolves that handle again, so lifecycle invalidation
+makes retained values stale instead of retaining a process address. Rows are
+zero-based and bounds checked. Fields come from the table's complete installed
+schema layout; numeric primitives and bitfields return Lua integers, while a
+packed reference returns `{ tableId = ..., row = ... }`.
+
+`Transaction` records typed changes during its callback, rejects nesting and
+duplicate changes to the same record field, rereads complete records, and
+submits one guarded transaction. Writes are available only when the installed
+table declares `direct_verified` authority and the host's offline write-safety
+gates permit them. `discovery_only` and `commit_adapter_required` tables remain
+read-only. A callback error or failed guard applies no partial typed change.
+
+The `CFB27` table exposes no raw-address read, write, or scan methods. The typed
+database API never returns table addresses, record bytes, or transaction
+operations.
+
 ## Runtime functions
 
 ```lua
@@ -29,6 +63,10 @@ cfb.on("tick", function()
   -- Keep callbacks short because all callbacks share the Lua state.
 end)
 ```
+
+The lowercase `cfb` functions above are the legacy host scripting surface and
+are separate from `CFB27.db`; no raw-memory wrapper is added to the database
+API.
 
 Supported callback names are `game_ready` and `tick`. The host runs `tick`
 callbacks approximately every 100 ms. The event protocol coalesces observable

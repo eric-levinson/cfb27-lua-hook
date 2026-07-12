@@ -5,6 +5,7 @@
 #include "memory_reader.h"
 #include "memory_transaction.h"
 #include "frtk_catalog.h"
+#include "frtk_lua_api.h"
 #include "frtk_profile.h"
 #include "frtk_record_access.h"
 #include "protocol.h"
@@ -23,6 +24,7 @@
 #include <iomanip>
 #include <initializer_list>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -338,6 +340,10 @@ class ProcessDiscoveryBackend final : public cfb27::frtk::DiscoveryBackend {
     return cursor == end;
   }
 };
+
+std::unique_ptr<ProcessDiscoveryBackend> g_lua_db_validation_backend;
+std::unique_ptr<cfb27::memory::ProcessMemoryBackend> g_lua_db_memory_backend;
+std::unique_ptr<cfb27::frtk::LuaDatabaseApi> g_lua_db_api;
 
 class SmokeRollbackUnverifiedBackend final : public cfb27::memory::MemoryBackend {
  public:
@@ -772,6 +778,38 @@ void RegisterApi(lua_State* state) {
   lua_pushcfunction(state, LuaEmit); lua_setfield(state, -2, "emit");
   lua_pushcfunction(state, LuaOn); lua_setfield(state, -2, "on");
   lua_setglobal(state, "cfb");
+
+  g_lua_db_validation_backend = std::make_unique<ProcessDiscoveryBackend>();
+  g_lua_db_memory_backend =
+      std::make_unique<cfb27::memory::ProcessMemoryBackend>();
+  g_lua_db_api = std::make_unique<cfb27::frtk::LuaDatabaseApi>(
+      g_frtk_catalog,
+      []() -> const cfb27::frtk::SchemaRegistry* {
+        return g_frtk_profile ? &g_frtk_profile->schema : nullptr;
+      },
+      *g_lua_db_validation_backend, *g_lua_db_memory_backend,
+      [](const cfb27::memory::TransactionRequest& request) {
+        std::lock_guard write_lock(g_host_write_mutex);
+        if (g_session_writes_disabled.load(std::memory_order_acquire)) {
+          return cfb27::memory::TransactionResult{
+              .status = cfb27::memory::TransactionStatus::kRejected,
+              .code = "writes_disabled"};
+        }
+        if (!WriteEnvironmentAllowed()) {
+          return cfb27::memory::TransactionResult{
+              .status = cfb27::memory::TransactionStatus::kRejected,
+              .code = "write_environment_denied"};
+        }
+        auto result = cfb27::memory::RunTransaction(
+            request, *g_lua_db_memory_backend);
+        if (result.status ==
+            cfb27::memory::TransactionStatus::kRollbackUnverified) {
+          g_session_writes_disabled.store(true, std::memory_order_release);
+        }
+        return result;
+      },
+      &g_frtk_mutex);
+  g_lua_db_api->Register(state);
 }
 
 bool RunLuaText(std::string_view text, const char* chunk_name, std::string& result) {

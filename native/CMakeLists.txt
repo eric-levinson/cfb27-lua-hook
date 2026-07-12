@@ -47,6 +47,7 @@ add_library(cfb27_lua_host SHARED
   host/frtk_catalog.cpp
   host/frtk_discovery.cpp
   host/frtk_field_schema.cpp
+  host/frtk_lua_api.cpp
   host/frtk_profile.cpp
   host/frtk_record_access.cpp
   host/lua_host.cpp
@@ -147,3 +148,16 @@ add_executable(cfb27_frtk_record_access_smoke
 target_compile_features(cfb27_frtk_record_access_smoke PRIVATE cxx_std_20)
 target_link_libraries(cfb27_frtk_record_access_smoke PRIVATE nlohmann_json::nlohmann_json)
 target_link_options(cfb27_frtk_record_access_smoke PRIVATE /STACK:1048576)
+
+add_executable(cfb27_frtk_lua_api_smoke
+  smoke/frtk_lua_api_smoke.cpp
+  host/frtk_lua_api.cpp
+  host/frtk_catalog.cpp
+  host/frtk_record_access.cpp
+  host/frtk_field_schema.cpp
+  host/memory_transaction.cpp
+)
+target_compile_features(cfb27_frtk_lua_api_smoke PRIVATE cxx_std_20)
+target_compile_definitions(cfb27_frtk_lua_api_smoke PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(cfb27_frtk_lua_api_smoke PRIVATE lua54 nlohmann_json::nlohmann_json)
+target_link_options(cfb27_frtk_lua_api_smoke PRIVATE /STACK:1048576)
