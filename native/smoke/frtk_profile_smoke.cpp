@@ -140,6 +140,13 @@ void TestIdentityAndTableIdentity() {
   auto dimensions = ValidBundle();
   dimensions["layout"]["tables"][0]["recordSize"] = 7;
   RequireRejected(dimensions, "table dimension mismatch accepted");
+  auto unique_id = ValidBundle();
+  unique_id["layout"]["tables"][0]["uniqueId"] =
+      unique_id["layout"]["tables"][0]["uniqueId"].get<int>() + 1;
+  RequireRejected(unique_id, "per-table unique ID mismatch accepted");
+  auto table_id = ValidBundle();
+  table_id["layout"]["tables"][0]["tableId"] = 7000;
+  RequireRejected(table_id, "per-table table ID mismatch accepted");
 }
 
 void TestRows() {
@@ -251,6 +258,11 @@ void TestDuplicatesAndRelationships() {
   duplicate_table["profile"]["tables"].push_back(
       duplicate_table["profile"]["tables"][0]);
   RequireRejected(duplicate_table, "duplicate table ID accepted");
+  auto duplicate_unique_id = ValidBundle();
+  duplicate_unique_id["profile"]["tables"][1]["uniqueId"] =
+      duplicate_unique_id["profile"]["tables"][0]["uniqueId"];
+  RequireRejectedContaining(duplicate_unique_id, "Duplicate unique ID in profile",
+                            "duplicate profile unique ID accepted");
   auto unknown = ValidBundle();
   unknown["profile"]["tables"][1]["relationships"][0]["targetTableId"] = 9999;
   RequireRejected(unknown, "unknown relationship target accepted");

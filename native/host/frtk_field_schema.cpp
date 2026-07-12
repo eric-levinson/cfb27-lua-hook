@@ -225,10 +225,14 @@ bool SchemaRegistry::Load(const json& artifact, std::string* error) {
     parsed.build_identity_ =
         Identity(artifact.at("buildIdentity"), "Invalid build identity");
     std::set<std::uint16_t> table_ids;
+    std::set<std::uint32_t> unique_ids;
     for (const auto& table : artifact.at("tables")) {
       auto parsed_table = ParseTable(table);
       if (!table_ids.insert(parsed_table.table_id).second) {
         throw std::invalid_argument("Duplicate table ID in layout");
+      }
+      if (!unique_ids.insert(parsed_table.unique_id).second) {
+        throw std::invalid_argument("Duplicate unique ID in layout");
       }
       parsed.tables_.push_back(std::move(parsed_table));
     }

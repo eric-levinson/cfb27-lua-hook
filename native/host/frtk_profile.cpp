@@ -289,10 +289,14 @@ ProfileValidationResult ParseProfile(const json& artifact) {
     }
 
     std::set<std::uint16_t> table_ids;
+    std::set<std::uint32_t> unique_ids;
     for (const auto& table : profile.at("tables")) {
       auto parsed = ParseTable(table);
       if (!table_ids.insert(parsed.table_id).second) {
         throw std::invalid_argument("Duplicate table ID in profile");
+      }
+      if (!unique_ids.insert(parsed.unique_id).second) {
+        throw std::invalid_argument("Duplicate unique ID in profile");
       }
       bundle.tables.push_back(std::move(parsed));
     }

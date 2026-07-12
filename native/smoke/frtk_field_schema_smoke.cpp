@@ -102,6 +102,14 @@ void TestSchemaRegistry() {
   duplicate["tables"][1]["fields"].push_back(
       duplicate["tables"][1]["fields"][0]);
   Require(!registry.Load(duplicate, &error), "duplicate field name accepted");
+  auto duplicate_unique_id = ValidLayout();
+  duplicate_unique_id["tables"][1]["uniqueId"] =
+      duplicate_unique_id["tables"][0]["uniqueId"];
+  Require(!registry.Load(duplicate_unique_id, &error) &&
+              error.find("Duplicate unique ID in layout") != std::string::npos,
+          "duplicate layout unique ID accepted");
+  Require(registry.FindTable(4288) != nullptr,
+          "failed layout load replaced the previous registry");
   auto unknown_ref = ValidLayout();
   unknown_ref["tables"][1]["fields"][0]["referenceTableId"] = 9999;
   Require(!registry.Load(unknown_ref, &error), "unknown reference table accepted");

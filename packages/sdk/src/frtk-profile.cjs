@@ -43,9 +43,12 @@ function validateTableIdentity(table, extraKeys) {
 
 function ensureUniqueTableIds(tables, kind) {
   const ids = new Set();
+  const uniqueIds = new Set();
   for (const table of tables) {
     if (ids.has(table.tableId)) throw new Error(`Duplicate table ID in ${kind}`);
     ids.add(table.tableId);
+    if (uniqueIds.has(table.uniqueId)) throw new Error(`Duplicate unique ID in ${kind}`);
+    uniqueIds.add(table.uniqueId);
   }
 }
 

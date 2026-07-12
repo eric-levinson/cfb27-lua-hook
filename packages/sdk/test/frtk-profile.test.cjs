@@ -71,6 +71,46 @@ test('compiler rejects ambiguous or duplicate table identities', () => {
   assert.throws(() => compileFrtkArtifacts(team), /Team.*table ID/i);
 });
 
+test('compiler rejects duplicate snapshot unique IDs', () => {
+  const duplicate = makeSyntheticInputs();
+  duplicate.snapshot.tables[1].uniqueId = duplicate.snapshot.tables[0].uniqueId;
+  assert.throws(() => compileFrtkArtifacts(duplicate), /duplicate unique ID.*snapshot/i);
+});
+
+test('compiler rejects duplicate layout unique IDs', () => {
+  const duplicate = makeSyntheticInputs();
+  duplicate.layout.tables[1].uniqueId = duplicate.layout.tables[0].uniqueId;
+  assert.throws(() => compileFrtkArtifacts(duplicate), /duplicate unique ID.*layout/i);
+});
+
+test('compiler permits one unique ID to use build-local table IDs in distinct builds', () => {
+  const firstInputs = makeSyntheticInputs();
+  const secondInputs = makeSyntheticInputs();
+  secondInputs.snapshot.buildIdentity = 'synthetic-build-v2';
+  secondInputs.layout.buildIdentity = 'synthetic-build-v2';
+  secondInputs.snapshot.tables[0].tableId = 7000;
+  secondInputs.layout.tables[0].tableId = 7000;
+
+  const first = compileFrtkArtifacts(firstInputs);
+  const second = compileFrtkArtifacts(secondInputs);
+  const uniqueId = firstInputs.snapshot.tables[0].uniqueId;
+  const firstTable = first.profile.tables.find((table) => table.uniqueId === uniqueId);
+  const secondTable = second.profile.tables.find((table) => table.uniqueId === uniqueId);
+  assert.equal(firstTable.uniqueId, secondTable.uniqueId);
+  assert.notEqual(firstTable.tableId, secondTable.tableId);
+  assert.notEqual(first.profile.buildIdentity, second.profile.buildIdentity);
+});
+
+test('compiler requires exact per-table unique ID and build-local table ID mappings', () => {
+  const uniqueIdMismatch = makeSyntheticInputs();
+  uniqueIdMismatch.layout.tables[0].uniqueId += 1;
+  assert.throws(() => compileFrtkArtifacts(uniqueIdMismatch), /table identity mismatch/i);
+
+  const tableIdMismatch = makeSyntheticInputs();
+  tableIdMismatch.layout.tables[0].tableId = 7000;
+  assert.throws(() => compileFrtkArtifacts(tableIdMismatch), /table identity mismatch/i);
+});
+
 test('compiler rejects unknown relationship targets and identity mismatch', () => {
   const unknownTarget = makeSyntheticInputs();
   unknownTarget.snapshot.tables.find((table) => table.tableId === 4288)
