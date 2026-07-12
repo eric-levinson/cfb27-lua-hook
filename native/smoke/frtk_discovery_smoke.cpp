@@ -1,5 +1,7 @@
 #include "../host/frtk_discovery.h"
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
 #include <cstring>
 #include <iostream>
@@ -11,6 +13,7 @@
 namespace {
 
 using namespace cfb27::frtk;
+using nlohmann::json;
 
 void Require(bool condition, const char* message) {
   if (!condition) throw std::runtime_error(message);
@@ -39,6 +42,65 @@ TableProfile Table(std::string name, std::uint16_t id, std::uint32_t capacity) {
   return table;
 }
 
+json Field(std::string name, std::string encoding, std::uint32_t offset,
+           std::uint32_t storage, std::uint32_t width,
+           std::optional<std::uint16_t> reference_table_id = std::nullopt) {
+  return {{"name", std::move(name)},
+          {"encoding", std::move(encoding)},
+          {"byteOffset", offset},
+          {"storageBytes", storage},
+          {"bitOffset", 0},
+          {"bitWidth", width},
+          {"minimum", 0},
+          {"maximum", width == 32 ? 0xFFFFFFFFull : 0xFFFFull},
+          {"referenceTableId",
+           reference_table_id ? json(*reference_table_id) : json(nullptr)}};
+}
+
+void LoadSchema(ProfileBundle& bundle) {
+  json tables = json::array();
+  for (const auto& table : bundle.tables) {
+    json fields = json::array(
+        {Field("SyntheticValue", "unsigned", 0, 2, 16)});
+    for (const auto& relationship : table.relationships) {
+      fields.push_back(Field(relationship.field_name, "packed-reference", 4,
+                             4, 32, relationship.target_table_id));
+    }
+    tables.push_back({{"logicalName", table.logical_name},
+                      {"tableId", table.table_id},
+                      {"uniqueId", table.unique_id},
+                      {"capacity", table.capacity},
+                      {"recordSize", table.record_size},
+                      {"authorityStatus", "discovery_only"},
+                      {"fields", std::move(fields)}});
+  }
+  std::sort(tables.begin(), tables.end(), [](const json& left, const json& right) {
+    return left.at("tableId").get<std::uint16_t>() <
+           right.at("tableId").get<std::uint16_t>();
+  });
+  std::string error;
+  const bool loaded = bundle.schema.Load(
+      {{"formatVersion", 1},
+       {"schemaIdentity", "synthetic-schema-v1"},
+       {"buildIdentity", "synthetic-build-v1"},
+       {"tables", std::move(tables)}},
+      &error);
+  if (!loaded) throw std::runtime_error(error);
+}
+
+FieldDefinition& MutableField(ProfileBundle& bundle, std::uint16_t table_id,
+                              std::string_view field_name) {
+  auto& tables =
+      const_cast<std::vector<TableSchema>&>(bundle.schema.tables());
+  for (auto& table : tables) {
+    if (table.table_id != table_id) continue;
+    for (auto& field : table.fields) {
+      if (field.name == field_name) return field;
+    }
+  }
+  throw std::runtime_error("fixture schema field missing");
+}
+
 ProfileBundle Bundle() {
   ProfileBundle bundle;
   bundle.tables = {Table("Player", 4244, 10), Table("RecruitingBoard", 4251, 10),
@@ -50,6 +112,7 @@ ProfileBundle Bundle() {
   bundle.tables[4].relationships.push_back(
       {.source_row = 3, .field_name = "OverflowRef", .target_table_id = 5841,
        .target_row = 5});
+  LoadSchema(bundle);
   return bundle;
 }
 
@@ -82,10 +145,10 @@ class FakeBackend final : public DiscoveryBackend {
 
   void PutReference(std::uintptr_t table_base, std::uint32_t source_row,
                     std::uint16_t target_table, std::uint32_t target_row) {
-    auto bytes = Record(target_table == 5841 ? 5841 : 4288, source_row);
+    std::vector<std::uint8_t> bytes(4);
     const auto encoded = EncodePackedReference({target_table, target_row});
     std::memcpy(bytes.data(), &encoded, sizeof(encoded));
-    Put(table_base + source_row * 8, bytes);
+    Put(table_base + source_row * 8 + 4, bytes);
   }
 
   ScanObservationResult Scan(const RowFingerprint& fingerprint,
@@ -178,6 +241,20 @@ void InstallGraph(ProfileBundle& bundle, FakeBackend& backend,
   bundle.tables[4].rows[1].pattern.assign(
       backend.allocations[4].bytes.begin() + 24,
       backend.allocations[4].bytes.begin() + 32);
+}
+
+void PutReferenceAt(FakeBackend& backend, ProfileBundle& bundle,
+                    std::size_t table_index, std::uintptr_t table_base,
+                    std::uint32_t byte_offset, std::uint16_t target_table,
+                    std::uint32_t target_row) {
+  const auto encoded = EncodePackedReference({target_table, target_row});
+  std::vector<std::uint8_t> bytes(4);
+  std::memcpy(bytes.data(), &encoded, sizeof(encoded));
+  backend.Put(table_base + 3 * 8 + byte_offset, bytes);
+  const auto* allocation = backend.Find(table_base, 8 * 10);
+  Require(allocation != nullptr, "fixture relationship allocation missing");
+  bundle.tables[table_index].rows[1].pattern.assign(
+      allocation->bytes.begin() + 24, allocation->bytes.begin() + 32);
 }
 
 void TestGraphAndRelocation() {
@@ -295,6 +372,7 @@ void TestPersistentUniqueIdentityAndBuildLocalReferences() {
   recruit.table_id = 5000;
   for (auto& row : recruit.rows) row.pattern = Record(5000, row.row_index);
   bundle.tables[3].relationships[0].target_table_id = 5000;
+  LoadSchema(bundle);
   FakeBackend backend;
   InstallGraph(bundle, backend);
   backend.PutReference(0x103000, 3, 5000, 5);
@@ -345,6 +423,7 @@ void TestRelationshipsUseIndependentResolutionSnapshot() {
   auto bundle = Bundle();
   bundle.tables[4].relationships[0].target_table_id = 4288;
   bundle.tables[4].relationships[0].target_row = 5;
+  LoadSchema(bundle);
   FakeBackend backend;
   InstallGraph(bundle, backend);
   backend.PutReference(0x103000, 3, 4269, 4);
@@ -362,6 +441,68 @@ void TestRelationshipsUseIndependentResolutionSnapshot() {
           "relationship validation depended on another relationship outcome");
 }
 
+void TestSchemaAuthoritativeRelationshipFields() {
+  {
+    auto bundle = Bundle();
+    FakeBackend backend;
+    InstallGraph(bundle, backend);
+    Require(State(DiscoverTables(bundle, backend), 428807).state ==
+                TableState::kResolved,
+            "valid packed reference at nonzero schema offset failed");
+  }
+  {
+    auto bundle = Bundle();
+    FakeBackend backend;
+    InstallGraph(bundle, backend);
+    bundle.tables[3].relationships[0].field_name = "RecruitRefTypo";
+    PutReferenceAt(backend, bundle, 3, 0x103000, 0, 4269, 5);
+    Require(State(DiscoverTables(bundle, backend), 428807).state ==
+                TableState::kRelationshipFailed,
+            "missing relationship field used an implicit offset");
+  }
+  {
+    auto bundle = Bundle();
+    auto& field = MutableField(bundle, 4288, "SyntheticValue");
+    field.storage_bytes = 4;
+    field.bit_width = 32;
+    field.maximum = 0xFFFFFFFFll;
+    bundle.tables[3].relationships[0].field_name = "SyntheticValue";
+    FakeBackend backend;
+    InstallGraph(bundle, backend);
+    PutReferenceAt(backend, bundle, 3, 0x103000, 0, 4269, 5);
+    Require(State(DiscoverTables(bundle, backend), 428807).state ==
+                TableState::kRelationshipFailed,
+            "non-reference field validated a packed relationship");
+  }
+  {
+    auto bundle = Bundle();
+    MutableField(bundle, 4288, "RecruitRef").reference_table_id = 5841;
+    FakeBackend backend;
+    InstallGraph(bundle, backend);
+    Require(State(DiscoverTables(bundle, backend), 428807).state ==
+                TableState::kRelationshipFailed,
+            "wrong schema reference target validated");
+  }
+  {
+    auto bundle = Bundle();
+    MutableField(bundle, 4288, "RecruitRef").byte_offset = 7;
+    FakeBackend backend;
+    InstallGraph(bundle, backend);
+    Require(State(DiscoverTables(bundle, backend), 428807).state ==
+                TableState::kRelationshipFailed,
+            "out-of-record relationship field validated");
+  }
+  {
+    auto bundle = Bundle();
+    MutableField(bundle, 4288, "RecruitRef").bit_width = 31;
+    FakeBackend backend;
+    InstallGraph(bundle, backend);
+    Require(State(DiscoverTables(bundle, backend), 428807).state ==
+                TableState::kRelationshipFailed,
+            "non-32-bit packed relationship field validated");
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -373,6 +514,7 @@ int main() {
     TestPersistentUniqueIdentityAndBuildLocalReferences();
     TestDistinctFingerprintsScanOnceGlobally();
     TestRelationshipsUseIndependentResolutionSnapshot();
+    TestSchemaAuthoritativeRelationshipFields();
     std::cout << "frtk discovery smoke passed\n";
     return 0;
   } catch (const std::exception& error) {

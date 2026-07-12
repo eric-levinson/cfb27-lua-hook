@@ -282,16 +282,29 @@ DiscoveryResult DiscoverTables(const ProfileBundle& profile,
         break;
       }
 
-      std::uint32_t byte_offset = 0;
-      std::uint32_t storage_bytes = 4;
-      if (const auto* field = profile.schema.FindField(source_profile.table_id,
-                                                        relationship.field_name)) {
-        byte_offset = field->byte_offset;
-        storage_bytes = field->storage_bytes;
+      const auto* field = profile.schema.FindField(source_profile.table_id,
+                                                    relationship.field_name);
+      if (!field) {
+        Reject(source, TableState::kRelationshipFailed,
+               "RELATIONSHIP_FIELD_MISSING");
+        break;
       }
-      if (storage_bytes == 0 || storage_bytes > 4 ||
-          byte_offset > source_profile.record_size ||
-          storage_bytes > source_profile.record_size - byte_offset ||
+      if (field->encoding != "packed-reference" ||
+          field->storage_bytes != 4 || field->bit_offset != 0 ||
+          field->bit_width != 32) {
+        Reject(source, TableState::kRelationshipFailed,
+               "RELATIONSHIP_FIELD_NOT_PACKED_REFERENCE");
+        break;
+      }
+      if (!field->reference_table_id ||
+          *field->reference_table_id != relationship.target_table_id) {
+        Reject(source, TableState::kRelationshipFailed,
+               "RELATIONSHIP_FIELD_TARGET_MISMATCH");
+        break;
+      }
+      if (field->byte_offset > source_profile.record_size ||
+          field->storage_bytes >
+              source_profile.record_size - field->byte_offset ||
           relationship.source_row >= source_profile.capacity) {
         Reject(source, TableState::kRelationshipFailed,
                "RELATIONSHIP_FIELD_INVALID");
@@ -299,11 +312,12 @@ DiscoveryResult DiscoverTables(const ProfileBundle& profile,
       }
       const auto address = source.descriptor->base +
                            relationship.source_row * source.descriptor->stride +
-                           byte_offset;
-      const std::array requests{ReadRequest{address, storage_bytes}};
+                           field->byte_offset;
+      const std::array requests{
+          ReadRequest{address, field->storage_bytes}};
       std::vector<std::vector<std::uint8_t>> bytes;
       if (!backend.ReadBatch(requests, bytes) || bytes.size() != 1 ||
-          bytes[0].size() != storage_bytes) {
+          bytes[0].size() != field->storage_bytes) {
         Reject(source, TableState::kRelationshipFailed,
                "RELATIONSHIP_READ_FAILED");
         break;
