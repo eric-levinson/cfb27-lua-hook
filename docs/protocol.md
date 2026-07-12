@@ -44,10 +44,14 @@ Error response:
   readable private memory and optionally resume from a continuation cursor.
 - `readMemory { ranges, allowUnsupportedBuild? }` — read a bounded batch of
   readable private-memory ranges.
+- `writeTransaction { transactionId, operations }` — apply a bounded guarded
+  batch with complete preflight comparison, readback, and rollback.
 
 `hello.capabilities` advertises the memory commands as `memoryScan` and
-`memoryRead`, and structured event registration as `telemetry`. They are
-read-only host operations and do not expose a write API.
+`memoryRead`, guarded writes as `memoryWriteTransaction`, and structured event
+registration as `telemetry`. `status.sessionWritesDisabled` reports whether an
+unverifiable rollback has permanently disabled writes for the current host
+session.
 
 ### Structured telemetry
 
@@ -145,6 +149,38 @@ keys. On an unsupported executable, `allowUnsupportedBuild` must be the JSON
 boolean `true` or the command returns `UNSUPPORTED_BUILD`. Successful diagnostic
 requests then return `supportedBuild:false`. This override never enables writes.
 
+### Memory write transactions
+
+`transactionId` is 1–64 ASCII letters, digits, dots, underscores, or hyphens.
+`operations` contains 1–32 objects with exactly `address`, `expectedHex`, and
+`replacementHex`. Addresses use the same canonical uppercase format as memory
+reads. Hex strings are nonempty uppercase byte sequences of equal length. One
+operation is limited to 4,096 bytes and the request is limited to 65,536 bytes.
+
+```json
+{"protocol":1,"id":"write-1","command":"writeTransaction","params":{"transactionId":"recruiting.proof-1","operations":[{"address":"0x7FF612340080","expectedHex":"1020","replacementHex":"1121"}]}}
+```
+
+A successful result records the verified outcome for every operation:
+
+```json
+{"transactionId":"recruiting.proof-1","status":"applied_verified","operations":[{"index":0,"applied":true,"verified":true}]}
+```
+
+The host validates every range and compares every expected byte before the
+first write. It then applies and verifies operations in request order. If an
+apply or readback step fails, it restores attempted operations in reverse order
+and verifies the originals. A verified rollback is returned as
+`TRANSACTION_APPLY_FAILED`, with `rolled_back_verified` transaction details. An
+unverifiable rollback returns `ROLLBACK_VERIFICATION_FAILED`, with
+`rollback_unverified` details, and permanently rejects subsequent transaction
+and Lua writes with `SESSION_WRITES_DISABLED` until the host restarts.
+
+This is request-level host sequencing, not game-thread atomicity: the game may
+mutate memory while preflight, apply, verification, or rollback is running.
+Callers must establish a stable window appropriate to the target data before
+submitting a transaction.
+
 The host retains at most 512 log entries and 1,024 events. Event cursors are
 monotonic for one host session. Tick events are coalesced to at most one per
 second; Lua tick callbacks still run at their normal cadence.
@@ -160,6 +196,11 @@ Memory commands additionally return `MEMORY_ACCESS_DENIED` when a requested
 range is not wholly readable private memory, `SCAN_LIMIT_EXCEEDED` when the
 aggregate scan bound would be crossed, and `TOO_MANY_MATCHES` rather than
 silently truncating a scan. These errors do not include memory or region dumps.
+Guarded writes additionally return `MEMORY_MISMATCH`,
+`TRANSACTION_LIMIT_EXCEEDED`, `TRANSACTION_APPLY_FAILED`,
+`ROLLBACK_VERIFICATION_FAILED`, and `SESSION_WRITES_DISABLED`. Malformed
+transaction shapes, addresses, hex, and overlapping operations return
+`INVALID_REQUEST`.
 
 The unversioned legacy text pipe remains temporarily available for migration,
 but it is not the integration contract for new tools.

@@ -23,5 +23,19 @@ provide, distribute, or document an anticheat bypass.
 5. Readback equals the requested replacement byte.
 
 An unsupported build may load the host for diagnostics, but writes stay
-disabled. Integrations should call `hello`, inspect `writesAllowed`, and retain
-their own higher-level transaction and rollback checks.
+disabled. The native `writeTransaction` command preserves the exact-build and
+anticheat gates, validates and compares every operation before writing, applies
+and verifies in request order, and rolls attempted operations back in reverse
+order after an apply or verification failure.
+
+Transaction sequencing is not game-thread atomicity. The host does not suspend
+the game or provide a stable snapshot; callers must establish a stable window
+for the targeted data. If rollback verification fails, the host permanently
+sets `sessionWritesDisabled`, and both `writeTransaction` and `cfb.write_u8`
+reject all further writes until the process restarts. Integrations should call
+`hello`, inspect `writesAllowed`, check `status.sessionWritesDisabled`, and
+handle the transaction's verified status explicitly.
+
+`CFB27_SMOKE_ALLOW_WRITES=1` is a native test gate recognized only when the
+hosting executable is exactly `cfb27_protocol_smoke.exe`. It does not enable
+writes in the game, MMC, or any other executable.

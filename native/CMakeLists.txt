@@ -64,6 +64,7 @@ target_compile_definitions(cfb27_cryptbase_proxy PRIVATE WIN32_LEAN_AND_MEAN NOM
 add_executable(cfb27_startup_smoke smoke/startup_host_smoke.cpp)
 target_compile_features(cfb27_startup_smoke PRIVATE cxx_std_20)
 target_compile_definitions(cfb27_startup_smoke PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(cfb27_startup_smoke PRIVATE nlohmann_json::nlohmann_json)
 target_link_options(cfb27_startup_smoke PRIVATE /STACK:1048576)
 
 add_executable(cfb27_protocol_smoke smoke/protocol_smoke.cpp)

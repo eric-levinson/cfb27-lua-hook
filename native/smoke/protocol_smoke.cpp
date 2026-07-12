@@ -3,12 +3,15 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 using Json = nlohmann::json;
@@ -151,13 +154,71 @@ bool RequestOversizedFrame(const std::wstring& pipe_name, Json& response) {
   return ok;
 }
 
+bool LegacyEvaluate(const std::wstring& pipe_name, std::string_view source,
+                    Json& response) {
+  HANDLE pipe = OpenPipe(pipe_name);
+  if (pipe == INVALID_HANDLE_VALUE) return false;
+  const std::string request = "EVAL " + std::string(source);
+  DWORD written = 0;
+  std::array<char, 4096> buffer{};
+  DWORD read = 0;
+  const bool ok = WriteFile(pipe, request.data(), static_cast<DWORD>(request.size()),
+                            &written, nullptr) &&
+      written == request.size() &&
+      ReadFile(pipe, buffer.data(), static_cast<DWORD>(buffer.size() - 1),
+               &read, nullptr);
+  CloseHandle(pipe);
+  if (!ok) return false;
+  response = Json::parse(buffer.data(), buffer.data() + read, nullptr, false);
+  return !response.is_discarded();
+}
+
+bool BoundedRequest(const std::wstring& pipe_name, Json request, Json& response,
+                    DWORD timeout_ms = 5000) {
+  struct State {
+    Json response;
+    bool ok{};
+  };
+  auto state = std::make_shared<State>();
+  HANDLE completed = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  if (!completed) return false;
+  std::thread worker([pipe_name, request = std::move(request), state, completed] {
+    state->ok = Request(pipe_name, request, state->response, false);
+    SetEvent(completed);
+  });
+  if (WaitForSingleObject(completed, timeout_ms) != WAIT_OBJECT_0) {
+    worker.detach();
+    return false;
+  }
+  worker.join();
+  CloseHandle(completed);
+  response = std::move(state->response);
+  return state->ok;
+}
+
 int wmain(int argc, wchar_t** argv) {
+  wchar_t smoke_gate[8]{};
+  if (GetEnvironmentVariableW(L"CFB27_SMOKE_ALLOW_WRITES", smoke_gate,
+                              static_cast<DWORD>(std::size(smoke_gate))) != 1 ||
+      smoke_gate[0] != L'1') return 72;
+  Allocation transaction_one(4096);
+  Allocation transaction_two(4096);
+  if (!transaction_one.get() || !transaction_two.get()) return 73;
+  auto* transaction_one_bytes = static_cast<std::uint8_t*>(transaction_one.get());
+  auto* transaction_two_bytes = static_cast<std::uint8_t*>(transaction_two.get());
+  transaction_one_bytes[0] = 0x10;
+  transaction_one_bytes[1] = 0x20;
+  transaction_two_bytes[0] = 0x30;
+  transaction_two_bytes[1] = 0x40;
+
   if (argc != 2 || !LoadLibraryW(argv[1])) return 2;
   Allocation allocation(64 * 1024);
   if (!allocation.get()) return 23;
   auto* sentinel_address = static_cast<std::uint8_t*>(allocation.get()) + 128;
   std::memcpy(sentinel_address, kSentinel.data(), kSentinel.size());
   const std::wstring pipe = L"\\\\.\\pipe\\CFB27LuaHost.v1." +
+      std::to_wstring(GetCurrentProcessId());
+  const std::wstring legacy_pipe = L"\\\\.\\pipe\\CFB27LuaHost." +
       std::to_wstring(GetCurrentProcessId());
   Json response;
   if (!Request(pipe, {{"protocol", 1}, {"id", "hello-1"},
@@ -170,6 +231,197 @@ int wmain(int argc, wchar_t** argv) {
   if (!Request(pipe, {{"protocol", 1}, {"id", "status-1"},
                       {"command", "status"}, {"params", Json::object()}}, response, false)) return 14;
   if (!response.value("ok", false) || !response["result"].contains("ready")) return 15;
+
+  const Json write_params{
+      {"transactionId", "smoke.apply-1"},
+      {"operations", Json::array({
+          {{"address", FormatAddress(reinterpret_cast<std::uintptr_t>(transaction_one_bytes))},
+           {"expectedHex", "1020"}, {"replacementHex", "1121"}},
+          {{"address", FormatAddress(reinterpret_cast<std::uintptr_t>(transaction_two_bytes))},
+           {"expectedHex", "3040"}, {"replacementHex", "3141"}},
+      })},
+  };
+
+  SetEnvironmentVariableW(L"CFB27_SMOKE_ALLOW_WRITES", nullptr);
+  if (!Request(pipe, {{"protocol", 1}, {"id", "write-unsupported"},
+                      {"command", "writeTransaction"}, {"params", write_params}},
+               response, false) || !IsError(response, "UNSUPPORTED_BUILD")) {
+    std::cerr << "writeTransaction RED response: " << response.dump() << '\n';
+    return 75;
+  }
+  if (!SetEnvironmentVariableW(L"CFB27_SMOKE_ALLOW_WRITES", L"1")) return 76;
+
+  if (!Request(pipe, {{"protocol", 1}, {"id", "write-apply"},
+                      {"command", "writeTransaction"}, {"params", write_params}},
+               response, false)) return 77;
+  if (!response.value("ok", false) || response["result"].size() != 3 ||
+      response["result"].value("transactionId", "") != "smoke.apply-1" ||
+      response["result"].value("status", "") != "applied_verified" ||
+      response["result"]["operations"].size() != 2 ||
+      response["result"]["operations"][0] !=
+          Json({{"index", 0}, {"applied", true}, {"verified", true}}) ||
+      response["result"]["operations"][1] !=
+          Json({{"index", 1}, {"applied", true}, {"verified", true}}) ||
+      transaction_one_bytes[0] != 0x11 || transaction_one_bytes[1] != 0x21 ||
+      transaction_two_bytes[0] != 0x31 || transaction_two_bytes[1] != 0x41) return 78;
+
+  transaction_one_bytes[0] = 0x10;
+  transaction_one_bytes[1] = 0x20;
+  transaction_two_bytes[0] = 0x30;
+  transaction_two_bytes[1] = 0x40;
+  Json mismatch_params = write_params;
+  mismatch_params["transactionId"] = "smoke.mismatch-1";
+  mismatch_params["operations"][1]["expectedHex"] = "FFFF";
+  if (!Request(pipe, {{"protocol", 1}, {"id", "write-mismatch"},
+                      {"command", "writeTransaction"}, {"params", mismatch_params}},
+               response, false) || !IsError(response, "MEMORY_MISMATCH") ||
+      transaction_one_bytes[0] != 0x10 || transaction_one_bytes[1] != 0x20 ||
+      transaction_two_bytes[0] != 0x30 || transaction_two_bytes[1] != 0x40) return 79;
+
+  Json overlap_params = write_params;
+  overlap_params["transactionId"] = "smoke.overlap-1";
+  overlap_params["operations"][0]["address"] =
+      FormatAddress(reinterpret_cast<std::uintptr_t>(transaction_one_bytes));
+  overlap_params["operations"][1]["address"] =
+      FormatAddress(reinterpret_cast<std::uintptr_t>(transaction_one_bytes + 1));
+  if (!Request(pipe, {{"protocol", 1}, {"id", "write-overlap"},
+                      {"command", "writeTransaction"}, {"params", overlap_params}},
+               response, false) || !IsError(response, "INVALID_REQUEST")) return 80;
+
+  Json malformed_hex_params = write_params;
+  malformed_hex_params["transactionId"] = "smoke.malformed-1";
+  malformed_hex_params["operations"][0]["replacementHex"] = "1Z";
+  if (!Request(pipe, {{"protocol", 1}, {"id", "write-malformed"},
+                      {"command", "writeTransaction"}, {"params", malformed_hex_params}},
+               response, false) || !IsError(response, "INVALID_REQUEST")) return 81;
+
+  Json invalid_address_params = write_params;
+  invalid_address_params["transactionId"] = "smoke.address-1";
+  invalid_address_params["operations"][0]["address"] = "0x01";
+  if (!Request(pipe, {{"protocol", 1}, {"id", "write-address"},
+                      {"command", "writeTransaction"}, {"params", invalid_address_params}},
+               response, false) || !IsError(response, "INVALID_REQUEST")) return 82;
+
+  Json extra_params = write_params;
+  extra_params["unexpected"] = true;
+  if (!Request(pipe, {{"protocol", 1}, {"id", "write-extra"},
+                      {"command", "writeTransaction"}, {"params", extra_params}},
+               response, false) || !IsError(response, "INVALID_REQUEST")) return 83;
+
+  Json extra_request{
+      {"protocol", 1}, {"id", "write-envelope-extra"},
+      {"command", "writeTransaction"}, {"params", write_params},
+      {"unexpected", true},
+  };
+  if (!Request(pipe, extra_request, response, false) ||
+      !IsError(response, "INVALID_REQUEST")) {
+    std::cerr << "extra request key RED response: " << response.dump() << '\n';
+    return 85;
+  }
+
+  Json extra_operation_params = write_params;
+  extra_operation_params["transactionId"] = "smoke.operation-extra-1";
+  extra_operation_params["operations"][0]["unexpected"] = true;
+  if (!Request(pipe, {{"protocol", 1}, {"id", "write-operation-extra"},
+                      {"command", "writeTransaction"},
+                      {"params", extra_operation_params}},
+               response, false) || !IsError(response, "INVALID_REQUEST")) return 86;
+
+  Json lowercase_hex_params = write_params;
+  lowercase_hex_params["transactionId"] = "smoke.lowercase-1";
+  lowercase_hex_params["operations"][0]["replacementHex"] = "aa21";
+  if (!Request(pipe, {{"protocol", 1}, {"id", "write-lowercase"},
+                      {"command", "writeTransaction"},
+                      {"params", lowercase_hex_params}},
+               response, false) || !IsError(response, "INVALID_REQUEST")) return 87;
+
+  for (const auto& invalid_transaction_id :
+       std::vector<std::string>{"", std::string(65, 'A')}) {
+    Json invalid_id_params = write_params;
+    invalid_id_params["transactionId"] = invalid_transaction_id;
+    if (!Request(pipe, {{"protocol", 1}, {"id", "write-transaction-id"},
+                        {"command", "writeTransaction"},
+                        {"params", invalid_id_params}},
+                 response, false) || !IsError(response, "INVALID_REQUEST")) return 88;
+  }
+
+  if (std::find(capabilities.begin(), capabilities.end(), "memoryWriteTransaction") ==
+      capabilities.end()) return 74;
+  if (!Request(pipe, {{"protocol", 1}, {"id", "status-writes"},
+                      {"command", "status"}, {"params", Json::object()}},
+               response, false) || !response.value("ok", false) ||
+      response["result"].value("sessionWritesDisabled", true)) return 84;
+
+  const std::string smoke_lua_write =
+      "assert(cfb.write_u8(" +
+      std::to_string(reinterpret_cast<std::uintptr_t>(transaction_one_bytes)) +
+      ", 16, 17)); assert(cfb.write_u8(" +
+      std::to_string(reinterpret_cast<std::uintptr_t>(transaction_one_bytes)) +
+      ", 17, 16))";
+  if (!Request(pipe, {{"protocol", 1}, {"id", "lua-write-smoke-gate"},
+                      {"command", "evaluate"},
+                      {"params", {{"source", smoke_lua_write}}}},
+               response, false) || !response.value("ok", false) ||
+      transaction_one_bytes[0] != 0x10) {
+    std::cerr << "Lua smoke write gate RED response: " << response.dump() << '\n';
+    return 94;
+  }
+
+  const std::string lua_expected_mismatch =
+      "cfb.write_u8(" +
+      std::to_string(reinterpret_cast<std::uintptr_t>(transaction_one_bytes)) +
+      ", 255, 17)";
+  if (!Request(pipe, {{"protocol", 1}, {"id", "lua-write-error-unlock"},
+                      {"command", "evaluate"},
+                      {"params", {{"source", lua_expected_mismatch}}}},
+               response, false) || !IsError(response, "SCRIPT_ERROR")) return 97;
+  if (!BoundedRequest(pipe, {{"protocol", 1}, {"id", "write-after-lua-error"},
+                             {"command", "writeTransaction"},
+                             {"params", mismatch_params}},
+                      response) || !IsError(response, "MEMORY_MISMATCH")) {
+    std::cerr << "Lua write error mutex RED: subsequent transaction timed out\n";
+    return 97;
+  }
+
+  Json inaccessible_params = write_params;
+  inaccessible_params["transactionId"] = "smoke.access-denied-1";
+  inaccessible_params["operations"].erase(inaccessible_params["operations"].begin() + 1);
+  inaccessible_params["operations"][0]["address"] = "0x1";
+  if (!Request(pipe, {{"protocol", 1}, {"id", "write-access-denied"},
+                      {"command", "writeTransaction"},
+                      {"params", inaccessible_params}},
+               response, false) || !IsError(response, "MEMORY_ACCESS_DENIED") ||
+      !response["error"].value("details", Json::object()).empty()) return 98;
+
+  Json limit_params = write_params;
+  limit_params["transactionId"] = "smoke.limit-1";
+  limit_params["operations"] = Json::array();
+  for (std::size_t index = 0; index <= 32; ++index) {
+    limit_params["operations"].push_back(write_params["operations"][0]);
+  }
+  if (!Request(pipe, {{"protocol", 1}, {"id", "write-limit"},
+                      {"command", "writeTransaction"}, {"params", limit_params}},
+               response, false) || !IsError(response, "TRANSACTION_LIMIT_EXCEEDED") ||
+      response["error"].value("message", "") !=
+          "Transaction exceeds an operation or byte limit" ||
+      !response["error"].value("details", Json::object()).empty()) return 99;
+
+  if (!SetEnvironmentVariableW(L"CFB27_SMOKE_FORCE_APPLY_FAILURE", L"1")) return 100;
+  Json apply_failure_params = write_params;
+  apply_failure_params["transactionId"] = "smoke.apply-failure-1";
+  apply_failure_params["operations"].erase(
+      apply_failure_params["operations"].begin() + 1);
+  if (!Request(pipe, {{"protocol", 1}, {"id", "write-apply-failure"},
+                      {"command", "writeTransaction"},
+                      {"params", apply_failure_params}},
+               response, false) || !IsError(response, "TRANSACTION_APPLY_FAILED") ||
+      response["error"]["details"].value("transactionId", "") !=
+          "smoke.apply-failure-1" ||
+      response["error"]["details"].value("status", "") != "rolled_back_verified" ||
+      response["error"]["details"]["operations"] !=
+          Json::array({{{"index", 0}, {"applied", false}, {"verified", false}}}) ||
+      transaction_one_bytes[0] != 0x10 || transaction_one_bytes[1] != 0x20) return 100;
+  SetEnvironmentVariableW(L"CFB27_SMOKE_FORCE_APPLY_FAILURE", nullptr);
 
   const Json invalid_request = Json::parse(
       R"({"protocol":18446744073709551615,"id":"bad-1","command":"hello","params":{}})");
@@ -474,6 +726,77 @@ int wmain(int argc, wchar_t** argv) {
         event.value("payload", Json::object()).value("message", "") == "event-proof") ++proof_count;
   }
   if (proof_count != 1) return 22;
+
+  if (!SetEnvironmentVariableW(L"CFB27_SMOKE_FORCE_ROLLBACK_UNVERIFIED", L"1"))
+    return 89;
+  if (!SetEnvironmentVariableW(L"CFB27_SMOKE_HOLD_ROLLBACK", L"1")) return 95;
+  Json rollback_params = write_params;
+  rollback_params["transactionId"] = "smoke.rollback-unverified-1";
+  rollback_params["operations"].erase(rollback_params["operations"].begin() + 1);
+  Json rollback_response;
+  bool rollback_request_ok = false;
+  const auto rollback_started = std::chrono::steady_clock::now();
+  std::thread rollback_thread([&] {
+    rollback_request_ok = Request(
+        pipe, {{"protocol", 1}, {"id", "write-rollback-unverified"},
+               {"command", "writeTransaction"}, {"params", rollback_params}},
+        rollback_response, false);
+  });
+  Sleep(100);
+  const std::string concurrent_lua =
+      "cfb.write_u8(" +
+      std::to_string(reinterpret_cast<std::uintptr_t>(transaction_one_bytes)) +
+      ", 17, 85)";
+  Json concurrent_lua_response;
+  const bool concurrent_lua_ok =
+      LegacyEvaluate(legacy_pipe, concurrent_lua, concurrent_lua_response);
+  rollback_thread.join();
+  const auto rollback_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - rollback_started);
+  if (rollback_elapsed.count() < 400) {
+    std::cerr << "held rollback RED elapsedMs=" << rollback_elapsed.count() << '\n';
+    return 95;
+  }
+  if (!rollback_request_ok ||
+      !IsError(rollback_response, "ROLLBACK_VERIFICATION_FAILED") ||
+      rollback_response["error"]["details"].value("transactionId", "") !=
+          "smoke.rollback-unverified-1" ||
+      rollback_response["error"]["details"].value("status", "") !=
+          "rollback_unverified" ||
+      transaction_one_bytes[0] != 0x10 || transaction_one_bytes[1] != 0x20) {
+    response = rollback_response;
+    std::cerr << "rollback injection RED response: " << response.dump() << '\n';
+    return 90;
+  }
+  if (!concurrent_lua_ok || concurrent_lua_response.value("ok", true) ||
+      concurrent_lua_response.value("result", "").find("session writes are disabled") ==
+          std::string::npos) {
+    std::cerr << "atomic lockdown RED response: " << concurrent_lua_response.dump() << '\n';
+    return 96;
+  }
+  SetEnvironmentVariableW(L"CFB27_SMOKE_FORCE_ROLLBACK_UNVERIFIED", nullptr);
+  SetEnvironmentVariableW(L"CFB27_SMOKE_HOLD_ROLLBACK", nullptr);
+
+  if (!Request(pipe, {{"protocol", 1}, {"id", "status-lockdown"},
+                      {"command", "status"}, {"params", Json::object()}},
+               response, false) || !response.value("ok", false) ||
+      !response["result"].value("sessionWritesDisabled", false) ||
+      response["result"].value("writesAllowed", true)) return 91;
+  if (!Request(pipe, {{"protocol", 1}, {"id", "write-after-lockdown"},
+                      {"command", "writeTransaction"}, {"params", write_params}},
+               response, false) || !IsError(response, "SESSION_WRITES_DISABLED")) return 92;
+
+  const std::string lockdown_lua =
+      "cfb.write_u8(" +
+      std::to_string(reinterpret_cast<std::uintptr_t>(transaction_one_bytes)) +
+      ", 16, 17)";
+  if (!Request(pipe, {{"protocol", 1}, {"id", "lua-write-after-lockdown"},
+                      {"command", "evaluate"},
+                      {"params", {{"source", lockdown_lua}}}},
+               response, false) || !IsError(response, "SCRIPT_ERROR") ||
+      response["error"].value("message", "").find("session writes are disabled") ==
+          std::string::npos ||
+      transaction_one_bytes[0] != 0x10) return 93;
   std::cout << "protocol smoke passed\n";
   return 0;
 }

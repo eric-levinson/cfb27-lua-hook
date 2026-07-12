@@ -3,6 +3,7 @@
 #include <bcrypt.h>
 
 #include "memory_reader.h"
+#include "memory_transaction.h"
 #include "protocol.h"
 #include "telemetry.h"
 
@@ -63,9 +64,11 @@ struct LogEntry {
 std::atomic<bool> g_running{true};
 std::atomic<bool> g_ready{false};
 std::atomic<bool> g_supported_build{false};
+std::atomic<bool> g_session_writes_disabled{false};
 std::atomic<std::uint64_t> g_scripts_run{0};
 std::atomic<std::uint64_t> g_ticks{0};
 std::mutex g_lua_mutex;
+std::mutex g_host_write_mutex;
 std::mutex g_event_mutex;
 std::mutex g_file_log_mutex;
 lua_State* g_lua{};
@@ -184,6 +187,35 @@ bool SupportedBuild() {
   return g_supported_build.load(std::memory_order_acquire);
 }
 
+bool EnvironmentIsOne(const wchar_t* name) {
+  wchar_t value[2]{};
+  return GetEnvironmentVariableW(name, value, static_cast<DWORD>(std::size(value))) == 1 &&
+         value[0] == L'1';
+}
+
+bool SmokeWritesAllowed() {
+  wchar_t executable[MAX_PATH]{};
+  if (!GetModuleFileNameW(nullptr, executable, MAX_PATH)) return false;
+  const auto name = std::filesystem::path(executable).filename().wstring();
+  if (_wcsicmp(name.c_str(), L"cfb27_protocol_smoke.exe") != 0) return false;
+  return EnvironmentIsOne(L"CFB27_SMOKE_ALLOW_WRITES");
+}
+
+bool SmokeRollbackUnverifiedRequested() {
+  return SmokeWritesAllowed() &&
+         EnvironmentIsOne(L"CFB27_SMOKE_FORCE_ROLLBACK_UNVERIFIED");
+}
+
+bool SmokeHoldRollbackRequested() {
+  return SmokeRollbackUnverifiedRequested() &&
+         EnvironmentIsOne(L"CFB27_SMOKE_HOLD_ROLLBACK");
+}
+
+bool SmokeApplyFailureRequested() {
+  return SmokeWritesAllowed() &&
+         EnvironmentIsOne(L"CFB27_SMOKE_FORCE_APPLY_FAILURE");
+}
+
 bool RealAnticheatIsRunning() {
   HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
   if (snapshot == INVALID_HANDLE_VALUE) return true;
@@ -217,6 +249,62 @@ bool RealAnticheatIsRunning() {
   return found;
 }
 
+bool WriteEnvironmentAllowed() {
+  return (SupportedBuild() || SmokeWritesAllowed()) && !RealAnticheatIsRunning();
+}
+
+class SmokeRollbackUnverifiedBackend final : public cfb27::memory::MemoryBackend {
+ public:
+  explicit SmokeRollbackUnverifiedBackend(cfb27::memory::MemoryBackend& backend)
+      : backend_(backend) {}
+
+  bool Validate(std::uintptr_t address, std::size_t size, bool writable) override {
+    return backend_.Validate(address, size, writable);
+  }
+
+  bool Read(std::uintptr_t address, std::span<std::uint8_t> output) override {
+    ++reads_;
+    if (reads_ >= 2) {
+      if (reads_ == 2 && SmokeHoldRollbackRequested()) Sleep(500);
+      return false;
+    }
+    return backend_.Read(address, output);
+  }
+
+  bool Write(std::uintptr_t address,
+             std::span<const std::uint8_t> input) override {
+    return backend_.Write(address, input);
+  }
+
+ private:
+  cfb27::memory::MemoryBackend& backend_;
+  std::size_t reads_{};
+};
+
+class SmokeApplyFailureBackend final : public cfb27::memory::MemoryBackend {
+ public:
+  explicit SmokeApplyFailureBackend(cfb27::memory::MemoryBackend& backend)
+      : backend_(backend) {}
+
+  bool Validate(std::uintptr_t address, std::size_t size, bool writable) override {
+    return backend_.Validate(address, size, writable);
+  }
+
+  bool Read(std::uintptr_t address, std::span<std::uint8_t> output) override {
+    return backend_.Read(address, output);
+  }
+
+  bool Write(std::uintptr_t address,
+             std::span<const std::uint8_t> input) override {
+    if (++writes_ == 1) return false;
+    return backend_.Write(address, input);
+  }
+
+ private:
+  cfb27::memory::MemoryBackend& backend_;
+  std::size_t writes_{};
+};
+
 bool IsAccessible(std::uintptr_t address, std::size_t size, bool writable) {
   if (!address || !size || address + size < address) return false;
   MEMORY_BASIC_INFORMATION info{};
@@ -246,16 +334,32 @@ int LuaWriteU8(lua_State* state) {
   const auto address = static_cast<std::uintptr_t>(luaL_checkinteger(state, 1));
   const int expected = static_cast<int>(luaL_checkinteger(state, 2));
   const int value = static_cast<int>(luaL_checkinteger(state, 3));
-  if (!SupportedBuild()) return luaL_error(state, "unsupported College Football 27 build");
-  if (RealAnticheatIsRunning()) return luaL_error(state, "writes are disabled while EA anticheat is running");
-  if (expected < 0 || expected > 255 || value < 0 || value > 255)
-    return luaL_error(state, "byte values must be between 0 and 255");
-  if (!IsAccessible(address, 1, true)) return luaL_error(state, "address is not writable");
-  auto* target = reinterpret_cast<std::uint8_t*>(address);
-  if (*target != static_cast<std::uint8_t>(expected))
-    return luaL_error(state, "expected byte does not match live memory");
-  *target = static_cast<std::uint8_t>(value);
-  lua_pushboolean(state, *target == static_cast<std::uint8_t>(value));
+  const char* error = nullptr;
+  bool verified = false;
+  {
+    std::lock_guard write_lock(g_host_write_mutex);
+    if (g_session_writes_disabled.load(std::memory_order_acquire)) {
+      error = "session writes are disabled";
+    } else if (!SupportedBuild() && !SmokeWritesAllowed()) {
+      error = "unsupported College Football 27 build";
+    } else if (RealAnticheatIsRunning()) {
+      error = "writes are disabled while EA anticheat is running";
+    } else if (expected < 0 || expected > 255 || value < 0 || value > 255) {
+      error = "byte values must be between 0 and 255";
+    } else if (!IsAccessible(address, 1, true)) {
+      error = "address is not writable";
+    } else {
+      auto* target = reinterpret_cast<std::uint8_t*>(address);
+      if (*target != static_cast<std::uint8_t>(expected)) {
+        error = "expected byte does not match live memory";
+      } else {
+        *target = static_cast<std::uint8_t>(value);
+        verified = *target == static_cast<std::uint8_t>(value);
+      }
+    }
+  }
+  if (error) return luaL_error(state, "%s", error);
+  lua_pushboolean(state, verified);
   return 1;
 }
 
@@ -755,6 +859,46 @@ cfb27::protocol::Json MemoryError(
   return ErrorResponse(id, "INVALID_REQUEST", "Invalid memory request");
 }
 
+cfb27::protocol::Json TransactionResultJson(
+    std::string_view transaction_id,
+    const cfb27::memory::TransactionResult& transaction) {
+  using Json = cfb27::protocol::Json;
+  Json operations = Json::array();
+  for (const auto& operation : transaction.operations) {
+    operations.push_back({
+        {"index", operation.index},
+        {"applied", operation.applied},
+        {"verified", operation.verified},
+    });
+  }
+  return {
+      {"transactionId", transaction_id},
+      {"status", transaction.code},
+      {"operations", std::move(operations)},
+  };
+}
+
+cfb27::protocol::Json TransactionRejected(
+    const std::string& id, std::string_view engine_code) {
+  using cfb27::protocol::ErrorResponse;
+  if (engine_code == "expected_mismatch") {
+    return ErrorResponse(id, "MEMORY_MISMATCH",
+                         "Live memory does not match the transaction preflight");
+  }
+  if (engine_code == "invalid_memory_range" ||
+      engine_code == "preflight_read_failed") {
+    return ErrorResponse(id, "MEMORY_ACCESS_DENIED",
+                         "Transaction memory is not accessible for writing");
+  }
+  if (engine_code == "invalid_operation_count" ||
+      engine_code == "invalid_operation_size" ||
+      engine_code == "transaction_too_large") {
+    return ErrorResponse(id, "TRANSACTION_LIMIT_EXCEEDED",
+                         "Transaction exceeds an operation or byte limit");
+  }
+  return ErrorResponse(id, "INVALID_REQUEST", "Invalid writeTransaction request");
+}
+
 cfb27::protocol::Json LogsResult(std::size_t limit) {
   cfb27::protocol::Json logs = cfb27::protocol::Json::array();
   std::lock_guard lock(g_event_mutex);
@@ -792,7 +936,9 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
 
   const std::string id = request.is_object() && request.contains("id") &&
       request["id"].is_string() ? request["id"].get<std::string>() : "";
-  if (!request.is_object() || !request.contains("protocol") ||
+  if (!request.is_object() ||
+      !HasOnlyKeys(request, {"protocol", "id", "command", "params"}) ||
+      !request.contains("protocol") ||
       !request["protocol"].is_number_integer() ||
       request["protocol"].get<int>() != static_cast<int>(cfb27::protocol::kVersion) ||
       !request.contains("id") || !request["id"].is_string() ||
@@ -808,7 +954,9 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
   }
 
   const bool supported = SupportedBuild();
-  const bool writes_allowed = supported && !RealAnticheatIsRunning();
+  const bool session_writes_disabled =
+      g_session_writes_disabled.load(std::memory_order_acquire);
+  const bool writes_allowed = !session_writes_disabled && WriteEnvironmentAllowed();
   if (command == "hello") {
     return SuccessResponse(id, {
         {"protocolVersion", cfb27::protocol::kVersion},
@@ -816,7 +964,8 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
         {"supportedBuild", supported},
         {"writesAllowed", writes_allowed},
         {"capabilities", {"status", "runScript", "evaluate", "logs", "events",
-                          "memoryScan", "memoryRead", "telemetry"}},
+                          "memoryScan", "memoryRead", "memoryWriteTransaction",
+                          "telemetry"}},
     });
   }
 
@@ -830,10 +979,95 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
         {"ready", g_ready.load(std::memory_order_acquire)},
         {"supportedBuild", supported},
         {"writesAllowed", writes_allowed},
+        {"sessionWritesDisabled", session_writes_disabled},
         {"scriptsRun", g_scripts_run.load(std::memory_order_acquire)},
         {"ticks", g_ticks.load(std::memory_order_acquire)},
         {"lastError", std::move(last_error)},
     });
+  }
+
+  if (command == "writeTransaction") {
+    std::lock_guard write_lock(g_host_write_mutex);
+    if (g_session_writes_disabled.load(std::memory_order_acquire)) {
+      return ErrorResponse(id, "SESSION_WRITES_DISABLED",
+                           "Writes are disabled for the remainder of this host session");
+    }
+    if (!SupportedBuild() && !SmokeWritesAllowed()) {
+      return ErrorResponse(id, "UNSUPPORTED_BUILD",
+                           "Memory writes require the exact supported build");
+    }
+    if (RealAnticheatIsRunning()) {
+      return ErrorResponse(id, "MEMORY_ACCESS_DENIED",
+                           "Writes are disabled while EA anticheat is running");
+    }
+    if (!HasOnlyKeys(params, {"transactionId", "operations"}) ||
+        !params.contains("transactionId") || !params["transactionId"].is_string() ||
+        !params.contains("operations") || !params["operations"].is_array()) {
+      return ErrorResponse(id, "INVALID_REQUEST", "Invalid writeTransaction params");
+    }
+    cfb27::memory::TransactionRequest transaction_request{
+        .transaction_id = params["transactionId"].get<std::string>(),
+    };
+    transaction_request.operations.reserve(params["operations"].size());
+    std::size_t aggregate_bytes = 0;
+    for (const auto& operation : params["operations"]) {
+      if (!operation.is_object() ||
+          !HasOnlyKeys(operation, {"address", "expectedHex", "replacementHex"}) ||
+          !operation.contains("address") || !operation["address"].is_string() ||
+          !operation.contains("expectedHex") ||
+          !operation.contains("replacementHex")) {
+        return ErrorResponse(id, "INVALID_REQUEST", "Invalid transaction operation");
+      }
+      const auto address =
+          CanonicalAddress(operation["address"].get_ref<const std::string&>());
+      auto expected = HexToBytes(operation["expectedHex"]);
+      auto replacement = HexToBytes(operation["replacementHex"]);
+      if (!address || !expected || !replacement ||
+          expected->size() != replacement->size()) {
+        return ErrorResponse(id, "INVALID_REQUEST", "Invalid transaction operation");
+      }
+      if (replacement->size() > cfb27::memory::kMaxOperationBytes ||
+          aggregate_bytes >
+              cfb27::memory::kMaxTransactionBytes - replacement->size()) {
+        return ErrorResponse(id, "TRANSACTION_LIMIT_EXCEEDED",
+                             "Transaction exceeds the byte limit");
+      }
+      aggregate_bytes += replacement->size();
+      transaction_request.operations.push_back({
+          .address = std::move(*address),
+          .expected = std::move(*expected),
+          .replacement = std::move(*replacement),
+      });
+    }
+
+    cfb27::memory::ProcessMemoryBackend process_backend;
+    cfb27::memory::TransactionResult transaction;
+    if (SmokeRollbackUnverifiedRequested()) {
+      SmokeRollbackUnverifiedBackend smoke_backend(process_backend);
+      transaction = cfb27::memory::RunTransaction(transaction_request, smoke_backend);
+    } else if (SmokeApplyFailureRequested()) {
+      SmokeApplyFailureBackend smoke_backend(process_backend);
+      transaction = cfb27::memory::RunTransaction(transaction_request, smoke_backend);
+    } else {
+      transaction = cfb27::memory::RunTransaction(transaction_request, process_backend);
+    }
+    if (transaction.status == cfb27::memory::TransactionStatus::kRejected) {
+      return TransactionRejected(id, transaction.code);
+    }
+    const auto result = TransactionResultJson(
+        transaction_request.transaction_id, transaction);
+    if (transaction.status ==
+        cfb27::memory::TransactionStatus::kRollbackUnverified) {
+      g_session_writes_disabled.store(true, std::memory_order_release);
+      return ErrorResponse(id, "ROLLBACK_VERIFICATION_FAILED",
+                           "Transaction rollback could not be verified", result);
+    }
+    if (transaction.status ==
+        cfb27::memory::TransactionStatus::kRolledBackVerified) {
+      return ErrorResponse(id, "TRANSACTION_APPLY_FAILED",
+                           "Transaction failed and was rolled back", result);
+    }
+    return SuccessResponse(id, result);
   }
 
   if (command == "registerTelemetry") {
