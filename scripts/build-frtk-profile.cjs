@@ -55,8 +55,19 @@ function resolvePrivatePath(value, name, { follow = false } = {}) {
 }
 
 function prepareOutputPath(outputPath) {
-  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  let existingAncestor = path.dirname(outputPath);
+  while (!fs.existsSync(existingAncestor)) {
+    const parent = path.dirname(existingAncestor);
+    if (parent === existingAncestor) {
+      throw new Error('Could not find an existing ancestor for --output');
+    }
+    existingAncestor = parent;
+  }
   const realPrivateRoot = fs.realpathSync(privateRoot);
+  if (isOutsidePrivateRoot(realPrivateRoot, fs.realpathSync(existingAncestor))) {
+    throw new Error('--output must resolve to a file inside the repository .frtk directory');
+  }
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   const realParent = fs.realpathSync(path.dirname(outputPath));
   if (isOutsidePrivateRoot(realPrivateRoot, realParent)) {
     throw new Error('--output must resolve to a file inside the repository .frtk directory');

@@ -94,8 +94,9 @@ function compileRows(table) {
   return rows.sort((left, right) => left.rowIndex - right.rowIndex);
 }
 
-function compileRelationships(table, knownTableIds) {
+function compileRelationships(table, knownTables) {
   if (!Array.isArray(table.relationships)) throw new TypeError('relationships must be an array');
+  const identities = new Set();
   return table.relationships.map((relationship) => {
     if (!hasExactKeys(relationship,
       ['sourceRow', 'fieldName', 'targetTableId', 'targetRow']) ||
@@ -105,15 +106,22 @@ function compileRelationships(table, knownTableIds) {
         !isSafeIntegerBetween(relationship.targetRow, 0, 0x1FFFF)) {
       throw new TypeError('Relationship definition is invalid');
     }
-    if (!knownTableIds.has(relationship.targetTableId)) {
+    const targetTable = knownTables.get(relationship.targetTableId);
+    if (!targetTable) {
       throw new Error('Unknown relationship target table');
     }
+    if (relationship.targetRow >= targetTable.capacity) {
+      throw new RangeError('Relationship target row exceeds target table capacity');
+    }
+    const identity = `${relationship.sourceRow}:${relationship.fieldName}`;
+    if (identities.has(identity)) throw new Error('Duplicate relationship source field identity');
+    identities.add(identity);
     return { ...relationship };
   }).sort((left, right) => left.sourceRow - right.sourceRow ||
     left.fieldName.localeCompare(right.fieldName));
 }
 
-function compileFields(table) {
+function compileFields(table, knownTableIds) {
   if (!AUTHORITY_STATUSES.has(table.authorityStatus)) {
     throw new TypeError('Unknown table authority status');
   }
@@ -132,6 +140,9 @@ function compileFields(table) {
       if (!isSafeIntegerBetween(field.referenceTableId, 0, 0x7FFF)) {
         throw new RangeError('Packed-reference field requires referenceTableId');
       }
+      if (!knownTableIds.has(field.referenceTableId)) {
+        throw new Error('Packed-reference field targets an unknown reference table');
+      }
     } else if (field.referenceTableId !== null) {
       throw new TypeError('Non-reference field referenceTableId must be null');
     }
@@ -147,6 +158,9 @@ function compileFrtkArtifacts({ snapshot, layout } = {}) {
       !Array.isArray(snapshot.tables) || !Array.isArray(layout.tables)) {
     throw new TypeError('Snapshot and layout must use the version-1 compiler input shape');
   }
+  if (snapshot.tables.length === 0 || layout.tables.length === 0) {
+    throw new Error('Snapshot and layout must contain at least one table');
+  }
   const schemaIdentity = requireIdentity(snapshot.schemaIdentity, 'schemaIdentity');
   const buildIdentity = requireIdentity(snapshot.buildIdentity, 'buildIdentity');
   if (layout.schemaIdentity !== schemaIdentity || layout.buildIdentity !== buildIdentity) {
@@ -161,7 +175,8 @@ function compileFrtkArtifacts({ snapshot, layout } = {}) {
   if (layoutById.size !== snapshot.tables.length) {
     throw new Error('Snapshot/layout table identity mismatch');
   }
-  const knownTableIds = new Set(snapshot.tables.map((table) => table.tableId));
+  const knownTables = new Map(snapshot.tables.map((table) => [table.tableId, table]));
+  const knownTableIds = new Set(knownTables.keys());
   const profileTables = [];
   const layoutTables = [];
   for (const source of snapshot.tables) {
@@ -176,7 +191,7 @@ function compileFrtkArtifacts({ snapshot, layout } = {}) {
       capacity: source.capacity,
       recordSize: source.recordSize,
       rows: compileRows(source),
-      relationships: compileRelationships(source, knownTableIds),
+      relationships: compileRelationships(source, knownTables),
     });
     layoutTables.push({
       logicalName: schema.logicalName,
@@ -185,7 +200,7 @@ function compileFrtkArtifacts({ snapshot, layout } = {}) {
       capacity: schema.capacity,
       recordSize: schema.recordSize,
       authorityStatus: schema.authorityStatus,
-      fields: compileFields(schema),
+      fields: compileFields(schema, knownTableIds),
     });
   }
   profileTables.sort((left, right) => left.tableId - right.tableId);

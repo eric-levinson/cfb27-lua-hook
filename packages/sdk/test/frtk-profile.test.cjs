@@ -82,6 +82,49 @@ test('compiler rejects unknown relationship targets and identity mismatch', () =
   assert.throws(() => compileFrtkArtifacts(mismatch), /identity mismatch/i);
 });
 
+test('compiler rejects relationship target rows outside referenced table capacity', () => {
+  const outOfCapacity = makeSyntheticInputs();
+  outOfCapacity.snapshot.tables.find((table) => table.tableId === 4288)
+    .relationships[0].targetRow = 7600;
+  assert.throws(() => compileFrtkArtifacts(outOfCapacity), /target row.*capacity/i);
+});
+
+test('compiler rejects packed-reference fields targeting unknown tables', () => {
+  const unknownFieldTarget = makeSyntheticInputs();
+  unknownFieldTarget.layout.tables.find((table) => table.tableId === 4288)
+    .fields[0].referenceTableId = 9999;
+  assert.throws(() => compileFrtkArtifacts(unknownFieldTarget), /unknown reference table/i);
+});
+
+test('compiler rejects empty snapshot and layout table sets', () => {
+  const empty = makeSyntheticInputs();
+  empty.snapshot.tables = [];
+  empty.layout.tables = [];
+  assert.throws(() => compileFrtkArtifacts(empty), /at least one table/i);
+});
+
+test('compiler rejects duplicate relationship source field identities', () => {
+  const duplicate = makeSyntheticInputs();
+  const relationships = duplicate.snapshot.tables.find((table) => table.tableId === 4288)
+    .relationships;
+  relationships.push({ ...relationships[0], targetRow: 19 });
+  assert.throws(() => compileFrtkArtifacts(duplicate), /duplicate relationship/i);
+});
+
+test('relationship ordering is deterministic for reversed inputs sharing a source row', () => {
+  const firstInputs = makeSyntheticInputs();
+  const secondInputs = makeSyntheticInputs({ reverse: true });
+  const extra = {
+    sourceRow: 19, fieldName: 'SchoolRef', targetTableId: 5841, targetRow: 3,
+  };
+  firstInputs.snapshot.tables.find((table) => table.tableId === 4288).relationships.push(extra);
+  secondInputs.snapshot.tables.find((table) => table.tableId === 4288).relationships.unshift(extra);
+  const first = compileFrtkArtifacts(firstInputs);
+  const second = compileFrtkArtifacts(secondInputs);
+  assert.equal(canonicalStringify(first), canonicalStringify(second));
+  assert.equal(first.profile.profileId, second.profile.profileId);
+});
+
 test('compiler sorts fields and relationships by their contract keys', () => {
   const inputs = makeSyntheticInputs();
   const table = inputs.layout.tables.find((candidate) => candidate.tableId === 4288);
@@ -163,6 +206,33 @@ test('local CLI resolves junction targets before enforcing .frtk containment', (
   ], { cwd: root, encoding: 'utf8' });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /\.frtk/i);
+});
+
+test('local CLI validates output junctions before creating external directories', (t) => {
+  const root = path.resolve(__dirname, '../../..');
+  const local = path.join(root, '.frtk', `mkdir-junction-test-${process.pid}`);
+  const external = fs.mkdtempSync(path.join(os.tmpdir(), 'cfb27-frtk-output-'));
+  fs.mkdirSync(local, { recursive: true });
+  t.after(() => {
+    fs.rmSync(local, { recursive: true, force: true });
+    fs.rmSync(external, { recursive: true, force: true });
+  });
+  const inputs = makeSyntheticInputs();
+  const snapshotPath = path.join(local, 'snapshot.json');
+  const layoutPath = path.join(local, 'layout.json');
+  fs.writeFileSync(snapshotPath, JSON.stringify(inputs.snapshot));
+  fs.writeFileSync(layoutPath, JSON.stringify(inputs.layout));
+  const linked = path.join(local, 'linked');
+  fs.symlinkSync(external, linked, process.platform === 'win32' ? 'junction' : 'dir');
+  const result = childProcess.spawnSync(process.execPath, [
+    path.join(root, 'scripts/build-frtk-profile.cjs'),
+    '--snapshot', snapshotPath,
+    '--layout', layoutPath,
+    '--output', path.join(linked, 'created', 'profile.json'),
+  ], { cwd: root, encoding: 'utf8' });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /\.frtk/i);
+  assert.equal(fs.existsSync(path.join(external, 'created')), false);
 });
 
 test('release package declarations exclude local profiles, saves, schemas, and raw dumps', () => {
