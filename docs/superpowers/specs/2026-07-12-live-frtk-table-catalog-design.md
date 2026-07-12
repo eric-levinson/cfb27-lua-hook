@@ -10,6 +10,12 @@ Turn the verified CFB27 Lua hook into a reusable live Dynasty data bridge. A ses
 
 The first delivery is the generic discovery and table-access substrate. Recruiting is the first proving domain, but recruiting policy, UI, Electron integration, and engine tuning are outside this delivery.
 
+### Operator-effort constraint
+
+The user must not become a manual field-by-field calibration mechanism. Table discovery, stride derivation, field-layout loading, and relationship validation operate in bulk from saved profiles, schema data, and batched memory observations.
+
+Live participation is limited to a small number of explicit gates: launch at a known screen, perform a requested screen transition, and approve one reversible authority probe. If bulk discovery cannot resolve a layout, development returns to offline fixtures or improved discovery instrumentation; it does not fall back to asking the user to inspect or change a long sequence of individual fields.
+
 ## Evidence and Constraints
 
 - CFB27 save research identifies the relevant table graph and IDs: `Recruit` 4269, `RecruitingBoard` 4251, CPU `RecruitTarget` 4288, `UserRecruitTarget` 4168, board arrays 5847, and top-school arrays 5842.
@@ -94,6 +100,8 @@ The implementation may initially support numeric primitives, packed references, 
 
 Field access resolves through a versioned schema layout supplied to the host; callers never calculate process addresses. A table lookup can use a stable logical name or table ID, but the descriptor must match the active profile/build.
 
+The host loads all supported field definitions for a cataloged table together. Adding a table may require one schema/profile artifact, but must not require a separate live calibration pass for every field.
+
 ### 5. Guarded writes and authority
 
 All writes use the existing guarded-transaction engine:
@@ -167,6 +175,8 @@ Live gates occur only after offline and synthetic verification is clean:
 
 The user must be told explicitly before CFB27 or MMC needs to be closed, launched, or relaunched. Neither application is manipulated automatically.
 
+These gates validate the catalog and authority model as a system. They are not repeated once per field.
+
 ## Delivery Boundary
 
 This delivery is complete when:
@@ -174,6 +184,7 @@ This delivery is complete when:
 - profiles can identify at least Player, Recruit, RecruitingBoard, and RecruitTarget-family tables in synthetic fixtures;
 - the session catalog rejects ambiguous and stale candidates;
 - typed Lua/SDK reads work through catalog descriptors;
+- all supported fields for a cataloged table load from one versioned schema/profile without field-by-field live calibration;
 - guarded field transactions exist but remain policy-gated by authority status;
 - all automated tests and independent reviews pass;
 - a discovery-only live gate catalogs the targeted recruiting graph in CFB27.
