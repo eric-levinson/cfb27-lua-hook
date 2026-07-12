@@ -29,6 +29,6 @@ Fields contain `name`, `encoding`, `byteOffset`, `storageBytes`, `bitOffset`, `b
 
 ## Determinism
 
-Profile and layout tables are sorted by table ID. Rows are sorted by row index, fields by byte offset, bit offset, then name, and relationships by source row then field name. Patterns are masked before emission so unselected record bits cannot affect output.
+Profile and layout tables are sorted by table ID. Rows are sorted by row index, fields by byte offset, bit offset, then name, and relationships by source row then field name. Name tie-breakers use ascending UTF-8 bytewise ordinal order, independent of locale (so uppercase ASCII sorts before lowercase ASCII). Patterns are masked before emission so unselected record bits cannot affect output.
 
 `profileId` is the uppercase SHA-256 digest of canonical version-1 profile content before the ID is inserted. Paths, timestamps, process addresses, generated-at values, and raw unmasked records are neither emitted nor hashed.

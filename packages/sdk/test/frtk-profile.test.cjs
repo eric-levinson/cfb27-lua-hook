@@ -143,6 +143,30 @@ test('compiler sorts fields and relationships by their contract keys', () => {
   assert.deepEqual(profile.relationships.map((relationship) => relationship.sourceRow), [19, 37]);
 });
 
+test('compiler uses UTF-8 bytewise name ordering for tied mixed-case keys', () => {
+  const inputs = makeSyntheticInputs();
+  const snapshot = inputs.snapshot.tables.find((table) => table.tableId === 4288);
+  snapshot.relationships = [
+    { sourceRow: 19, fieldName: 'alpha', targetTableId: 4269, targetRow: 37 },
+    { sourceRow: 19, fieldName: 'Beta', targetTableId: 4269, targetRow: 19 },
+  ];
+  const layout = inputs.layout.tables.find((table) => table.tableId === 4288);
+  layout.fields.push({
+    name: 'alpha', encoding: 'bitfield', byteOffset: 4, storageBytes: 1,
+    bitOffset: 0, bitWidth: 2, minimum: 0, maximum: 3, referenceTableId: null,
+  });
+  layout.fields.push({
+    name: 'Beta', encoding: 'bitfield', byteOffset: 4, storageBytes: 1,
+    bitOffset: 0, bitWidth: 2, minimum: 0, maximum: 3, referenceTableId: null,
+  });
+
+  const artifacts = compileFrtkArtifacts(inputs);
+  const profile = artifacts.profile.tables.find((table) => table.tableId === 4288);
+  const schema = artifacts.layout.tables.find((table) => table.tableId === 4288);
+  assert.deepEqual(profile.relationships.map(({ fieldName }) => fieldName), ['Beta', 'alpha']);
+  assert.deepEqual(schema.fields.map(({ name }) => name), ['RecruitRef', 'Beta', 'alpha']);
+});
+
 test('local CLI writes only inside .frtk and refuses overwrite without force', (t) => {
   const root = path.resolve(__dirname, '../../..');
   const local = path.join(root, '.frtk', `test-${process.pid}`);

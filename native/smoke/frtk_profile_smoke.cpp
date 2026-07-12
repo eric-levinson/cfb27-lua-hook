@@ -226,6 +226,24 @@ void TestCanonicalOrdering() {
   std::swap(source_fields[0], source_fields[1]);
   RequireRejectedContaining(fields, "field order",
                             "noncanonical field order accepted");
+
+  auto mixed_case = ValidBundle();
+  mixed_case["profile"]["tables"][1]["relationships"] = json::array({
+      {{"sourceRow", 19}, {"fieldName", "Beta"},
+       {"targetTableId", 4269}, {"targetRow", 19}},
+      {{"sourceRow", 19}, {"fieldName", "alpha"},
+       {"targetTableId", 4269}, {"targetRow", 37}},
+  });
+  mixed_case["profile"]["profileId"] =
+      "51A687B6984D0D05BFC2DCCAFB54F42CB0B444CD6C20423E0C9D8D8B704C88F9";
+  const auto canonical_result = cfb27::frtk::ParseProfile(mixed_case);
+  Require(canonical_result.ok(), "bytewise mixed-case relationship order rejected");
+  std::swap(mixed_case["profile"]["tables"][1]["relationships"][0],
+            mixed_case["profile"]["tables"][1]["relationships"][1]);
+  mixed_case["profile"]["profileId"] =
+      "AFA6A3DDCFB94D52FF2341DFEBE4CED4AFC118FE5D8CF30CB7F41E4F4A21AC16";
+  RequireRejectedContaining(mixed_case, "relationship order",
+                            "locale-style mixed-case relationship order accepted");
 }
 
 void TestDuplicatesAndRelationships() {

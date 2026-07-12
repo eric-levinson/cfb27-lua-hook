@@ -14,6 +14,10 @@ const AUTHORITY_STATUSES = new Set([
   'discovery_only', 'commit_adapter_required', 'direct_verified',
 ]);
 
+function compareUtf8Ordinal(left, right) {
+  return Buffer.compare(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8'));
+}
+
 function requireIdentity(value, name) {
   if (typeof value !== 'string' || value.length < 1 || value.length > 128) {
     throw new TypeError(`${name} must be a nonempty bounded string`);
@@ -118,7 +122,7 @@ function compileRelationships(table, knownTables) {
     identities.add(identity);
     return { ...relationship };
   }).sort((left, right) => left.sourceRow - right.sourceRow ||
-    left.fieldName.localeCompare(right.fieldName));
+    compareUtf8Ordinal(left.fieldName, right.fieldName));
 }
 
 function compileFields(table, knownTableIds) {
@@ -149,7 +153,7 @@ function compileFields(table, knownTableIds) {
     return { ...field };
   });
   return fields.sort((left, right) => left.byteOffset - right.byteOffset ||
-    left.bitOffset - right.bitOffset || left.name.localeCompare(right.name));
+    left.bitOffset - right.bitOffset || compareUtf8Ordinal(left.name, right.name));
 }
 
 function compileFrtkArtifacts({ snapshot, layout } = {}) {

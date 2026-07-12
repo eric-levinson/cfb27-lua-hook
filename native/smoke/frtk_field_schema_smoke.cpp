@@ -122,6 +122,18 @@ void TestSchemaRegistry() {
   Require(!registry.Load(field_order, &error) &&
               error.find("field order") != std::string::npos,
           "noncanonical field order accepted");
+  auto mixed_case = ValidLayout();
+  mixed_case["tables"][1]["fields"] = json::array({
+      Field("Beta", "bitfield", 4, 1, 0, 2, 0, 3),
+      Field("alpha", "bitfield", 4, 1, 0, 2, 0, 3),
+  });
+  Require(registry.Load(mixed_case, &error),
+          "bytewise mixed-case field order rejected");
+  std::swap(mixed_case["tables"][1]["fields"][0],
+            mixed_case["tables"][1]["fields"][1]);
+  Require(!registry.Load(mixed_case, &error) &&
+              error.find("field order") != std::string::npos,
+          "locale-style mixed-case field order accepted");
 }
 
 void TestPackedReferences() {
