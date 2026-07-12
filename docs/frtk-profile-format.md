@@ -21,7 +21,7 @@ The output file contains `{ "profile": ..., "layout": ... }` in canonical JSON k
 
 The snapshot root has exactly `schemaIdentity`, `buildIdentity`, and `tables`. Each table supplies `logicalName`, `tableId`, `uniqueId`, `capacity`, `recordSize`, `rows`, and `relationships`. A row contains `rowIndex`, uppercase `recordHex`, and an equal-length uppercase `maskHex`. Each table needs at least three distinct occupied row patterns and at least 64 selected mask bits across its rows.
 
-A relationship contains `sourceRow`, `fieldName`, `targetTableId`, and `targetRow`. Every target table ID must be present in the same snapshot. Logical name alone is never table identity; callers must provide both `tableId` and `uniqueId`, including for tables named `Team`.
+A relationship contains `sourceRow`, `fieldName`, `targetTableId`, and `targetRow`. Every target table ID must be present in the same build-specific snapshot and must resolve through that profile to one required Unique ID. Unique ID is the persistent table identity. Logical names are display labels only, and table IDs are current-build routing values for packed references; neither may be used as a persistent/public selector.
 
 The layout root has the same identity keys and a `tables` array. Table identity and dimensions must exactly match the snapshot. Each table adds an `authorityStatus` and all of its `fields`. Authority is one of `discovery_only`, `commit_adapter_required`, or `direct_verified`.
 

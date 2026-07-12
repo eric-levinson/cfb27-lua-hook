@@ -17,7 +17,7 @@
 - The user must not perform field-by-field calibration. Profiles load all supported fields for a table together; live gates validate the system, not each field.
 - Generated profiles, schema files, save files, raw record bytes, process addresses, and memory dumps remain local under ignored `.frtk/` and are never committed or packaged.
 - Commit only synthetic FrTk fixtures. Active code must not import `archive/`.
-- Table identity uses schema/build identity plus table ID and unique ID when available. Logical name alone is insufficient because CFB27 contains same-name tables such as `Team`.
+- The table header Unique ID is the only persistent table identity and is always required. Logical names are display labels, and table IDs are current-build/session routing values used only to decode packed references. Neither name nor table ID may select a table across builds.
 - Every discovered table requires at least three distinct occupied row fingerprints and consistent pairwise stride/base derivation.
 - Validate packed references as `(tableId << 17) | rowIndex`; follow the encoded target table, including the valid 5840/5841 overflow pair.
 - Never infer authority from address order, allocation size alone, or the historical 40 MiB observation.
@@ -99,7 +99,7 @@ The synthetic fixture must programmatically construct arbitrary, non-game-derive
 | ProspectTargetSchool | 5840 | 4 | 41010 |
 | ProspectTargetSchoolOverflow | 5841 | 4 | 41010 |
 
-Assert two shuffled inputs compile to byte-identical canonical JSON and identical `profileId`. Reject fewer than three distinct occupied rows, duplicate row indexes, wrong record length, masks with fewer than 64 selected bits, duplicate table IDs, logical-name-only Team selection, unknown relationship targets, and layout/profile identity mismatch.
+Assert two shuffled inputs compile to byte-identical canonical JSON and identical `profileId`. Reject fewer than three distinct occupied rows, duplicate row indexes, wrong record length, masks with fewer than 64 selected bits, duplicate table IDs, duplicate Unique IDs, logical-name-only Team selection, unknown relationship targets, and layout/profile identity mismatch.
 
 - [ ] **Step 5: Verify profile RED, implement minimal compiler, then verify GREEN**
 
@@ -274,7 +274,7 @@ git commit -m "Discover FrTk table layouts"
 
 - [ ] **Step 1: Write catalog lifecycle RED tests**
 
-Assert install advances generation, handles resolve only in their generation, logical name and table ID agree, explicit invalidation stales every handle, `game_ready:false` invalidation is idempotent, allocation loss/sentinel mismatch quarantines the table, and relationship failure quarantines dependent descriptors. Catalog summaries must omit base/allocation addresses.
+Assert install advances generation, handles resolve only in their generation, public lookup uses Unique ID, current-build table ID remains internal, explicit invalidation stales every handle, `game_ready:false` invalidation is idempotent, allocation loss/sentinel mismatch quarantines the table, and relationship failure quarantines dependent descriptors. Catalog summaries must omit base/allocation addresses.
 
 - [ ] **Step 2: Write record-access RED tests**
 
@@ -287,8 +287,8 @@ Expected: missing catalog/access modules.
 - [ ] **Step 4: Implement generation-scoped descriptors and record access**
 
 ```cpp
-struct TableHandle { std::uint16_t table_id; std::uint64_t generation; };
-struct TableDescriptor { std::uint16_t table_id; std::uintptr_t base_address;
+struct TableHandle { std::uint32_t unique_id; std::uint64_t generation; };
+struct TableDescriptor { std::uint32_t unique_id; std::uint16_t session_table_id; std::uintptr_t base_address;
   std::uint32_t stride, capacity; std::uintptr_t allocation_base; std::size_t allocation_size;
   std::string profile_id; std::uint64_t lifecycle_generation; Evidence evidence; };
 ```
@@ -415,12 +415,12 @@ git commit -m "Add FrTk SDK and CLI clients"
 - Modify: `docs/lua-api.md`
 
 **Interfaces:**
-- Produces `CFB27.db:GetTable(nameOrId)`, `table:GetRecord(row)`, `record:GetField(name)`, and `CFB27.db:Transaction(callback)`.
+- Produces `CFB27.db:GetTableByUniqueId(uniqueId)`, `table:GetRecord(row)`, `record:GetField(name)`, and `CFB27.db:Transaction(callback)`.
 - Produces transaction method `tx:SetField(record, fieldName, value)` but refuses non-`direct_verified` tables.
 
 - [ ] **Step 1: Write failing embedded-Lua smoke cases**
 
-With a synthetic installed catalog, assert table lookup by exact logical name/ID, record and field reads, full-table field availability from one layout load, stale userdata after invalidation, row/field/type errors, forbidden raw-address access, successful synthetic `direct_verified` transaction, and recruiting `discovery_only` rejection.
+With a synthetic installed catalog, assert table lookup only by Unique ID, rejection of name/table-ID selectors, record and field reads, full-table field availability from one layout load, stale userdata after invalidation, row/field/type errors, forbidden raw-address access, successful synthetic `direct_verified` transaction, and recruiting `discovery_only` rejection.
 
 - [ ] **Step 2: Build and verify RED**
 

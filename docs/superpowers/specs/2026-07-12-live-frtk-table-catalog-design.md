@@ -26,6 +26,7 @@ Live participation is limited to a small number of explicit gates: launch at a k
 - Recruit and RecruitTarget physical field offsets and record strides are not yet authoritative.
 - FC26 Live Editor demonstrates the desired generic Lua interaction model, but its native implementation and title-specific offsets are not reusable.
 - Direct Player-table writes have failed to update authoritative state, while a response-path hook persisted edits. Discovery and mutation authority therefore remain separate questions.
+- Franchise table names and table IDs are not stable identities across game updates. The table header Unique ID is the persistent identity; table IDs are current-build routing values used by packed references only.
 
 ## Selected Approach
 
@@ -44,7 +45,7 @@ This is preferred over:
 The profile builder consumes a known save snapshot plus schema-derived table information. For each requested table it emits a versioned profile containing:
 
 - schema/build identity;
-- table ID, capacity, and known record size when available;
+- required table Unique ID, current-build table ID, capacity, and known record size when available;
 - at least three independently selected occupied rows;
 - row indexes and exact or masked byte fingerprints;
 - stable-field masks that exclude volatile or unknown bytes;
@@ -74,7 +75,7 @@ The catalog owns validated, session-scoped descriptors:
 
 ```text
 TableDescriptor {
-  tableId, baseAddress, stride, capacity,
+  uniqueId, sessionTableId, baseAddress, stride, capacity,
   allocationBase, allocationSize,
   profileId, evidence, lifecycleGeneration
 }
@@ -87,7 +88,7 @@ Descriptors are invalidated when lifecycle generation changes, an allocation dis
 The initial host-facing interface mirrors the useful FC26 concepts while preserving CFB27 safeguards:
 
 ```lua
-local recruits = CFB27.db:GetTable("Recruit")
+local recruits = CFB27.db:GetTableByUniqueId(1873209313)
 local record = recruits:GetRecord(row)
 local value = record:GetField("CommitScore")
 
@@ -98,7 +99,7 @@ end)
 
 The implementation may initially support numeric primitives, packed references, and fixed-width bitfields. Unsupported field encodings return explicit errors.
 
-Field access resolves through a versioned schema layout supplied to the host; callers never calculate process addresses. A table lookup can use a stable logical name or table ID, but the descriptor must match the active profile/build.
+Field access resolves through a versioned schema layout supplied to the host; callers never calculate process addresses. Public table lookup uses the table Unique ID. Logical names are display labels only, and the current-build table ID remains internal for packed-reference routing and validation.
 
 The host loads all supported field definitions for a cataloged table together. Adding a table may require one schema/profile artifact, but must not require a separate live calibration pass for every field.
 
