@@ -77,8 +77,18 @@ Discovery advances generation on every attempt and installs no partial catalog
 when a required table is unresolved. Inspection returns sanitized identity,
 capacity, authority, generation, and bounded evidence only.
 
-Typed reads accept 1–64 record selectors and return numbers or packed
-references represented as `{ uniqueId, row }`. Typed transactions accept
+Typed reads accept 1–64 record selectors. Each result has fixed keys
+`uniqueId`, `row`, and `values`; `values` is an ordered array of fixed-shape
+`{ field, value }` entries. A value is a number or a packed reference represented
+as `{ uniqueId, row }`. Field names are data values and are never JSON property
+names, including names such as `address`, `bytesHex`, `mask`, `offset`, `range`,
+`operation`, and `tableId`. For example:
+
+```json
+{"generation":4,"records":[{"uniqueId":900001,"row":0,"values":[{"field":"CommitScore","value":123},{"field":"RecruitLink","value":{"uniqueId":900002,"row":7}}]}]}
+```
+
+Typed transactions accept
 1–128 logical changes, revalidate the catalog, reread complete records, encode
 fields through the layout, and pass the host-internal plan to the existing
 guarded engine. Only `direct_verified` tables may proceed; other authority

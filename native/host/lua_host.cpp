@@ -1305,10 +1305,12 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
                            "FRTK_FIELD_INVALID";
         return ErrorResponse(id, code, "FrTk record read failed");
       }
-      Json values = Json::object();
+      Json values = Json::array();
       try {
         for (const auto& field : read.fields)
-          values[field.name] = DecodedFieldJson(field.value, g_frtk_profile->schema);
+          values.push_back({{"field", field.name},
+                            {"value", DecodedFieldJson(
+                                          field.value, g_frtk_profile->schema)}});
       } catch (...) {
         return ErrorResponse(id, "FRTK_FIELD_INVALID", "FrTk field value is invalid");
       }

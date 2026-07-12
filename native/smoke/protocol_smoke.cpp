@@ -193,7 +193,7 @@ bool RequestOversizedFrame(const std::wstring& pipe_name, Json& response) {
 bool ContainsSensitiveKey(const Json& value) {
   static const std::array<std::string_view, 8> forbidden{
       "address", "hex", "bytes", "mask", "offset", "range", "operation",
-      "tableId"};
+      "tableid"};
   if (value.is_object()) {
     for (const auto& [key, child] : value.items()) {
       std::string lower = key;
@@ -271,7 +271,39 @@ Json SyntheticBundle(std::span<const std::uint8_t> records,
                         {{"name", "Stage"}, {"encoding", "unsigned"},
                          {"byteOffset", 2}, {"storageBytes", 1}, {"bitOffset", 0},
                          {"bitWidth", 8}, {"minimum", 0}, {"maximum", 255},
-                         {"referenceTableId", nullptr}}
+                         {"referenceTableId", nullptr}},
+                        {{"name", "address"}, {"encoding", "unsigned"},
+                         {"byteOffset", 3}, {"storageBytes", 1}, {"bitOffset", 0},
+                         {"bitWidth", 8}, {"minimum", 0}, {"maximum", 255},
+                         {"referenceTableId", nullptr}},
+                        {{"name", "bytesHex"}, {"encoding", "unsigned"},
+                         {"byteOffset", 4}, {"storageBytes", 1}, {"bitOffset", 0},
+                         {"bitWidth", 8}, {"minimum", 0}, {"maximum", 255},
+                         {"referenceTableId", nullptr}},
+                        {{"name", "mask"}, {"encoding", "unsigned"},
+                         {"byteOffset", 5}, {"storageBytes", 1}, {"bitOffset", 0},
+                         {"bitWidth", 8}, {"minimum", 0}, {"maximum", 255},
+                         {"referenceTableId", nullptr}},
+                        {{"name", "offset"}, {"encoding", "unsigned"},
+                         {"byteOffset", 6}, {"storageBytes", 1}, {"bitOffset", 0},
+                         {"bitWidth", 8}, {"minimum", 0}, {"maximum", 255},
+                         {"referenceTableId", nullptr}},
+                        {{"name", "range"}, {"encoding", "unsigned"},
+                         {"byteOffset", 7}, {"storageBytes", 1}, {"bitOffset", 0},
+                         {"bitWidth", 8}, {"minimum", 0}, {"maximum", 255},
+                         {"referenceTableId", nullptr}},
+                        {{"name", "operation"}, {"encoding", "unsigned"},
+                         {"byteOffset", 8}, {"storageBytes", 1}, {"bitOffset", 0},
+                         {"bitWidth", 8}, {"minimum", 0}, {"maximum", 255},
+                         {"referenceTableId", nullptr}},
+                        {{"name", "tableId"}, {"encoding", "unsigned"},
+                         {"byteOffset", 9}, {"storageBytes", 1}, {"bitOffset", 0},
+                         {"bitWidth", 8}, {"minimum", 0}, {"maximum", 255},
+                         {"referenceTableId", nullptr}},
+                        {{"name", "Link"}, {"encoding", "packed-reference"},
+                         {"byteOffset", 10}, {"storageBytes", 4}, {"bitOffset", 0},
+                         {"bitWidth", 32}, {"minimum", 0}, {"maximum", 4294967295ull},
+                         {"referenceTableId", 1200}}
                     })}};
   Json layout{{"formatVersion", 1},
               {"schemaIdentity", "synthetic-protocol-v1"},
@@ -347,6 +379,12 @@ int wmain(int argc, wchar_t** argv) {
   }
   frtk_bytes[0] = 0x34; frtk_bytes[1] = 0x12; frtk_bytes[2] = 7;
   frtk_bytes[16] = 0x78; frtk_bytes[17] = 0x56; frtk_bytes[18] = 8;
+  for (std::uint32_t row = 0; row < 3; ++row) {
+    for (std::size_t field = 3; field <= 9; ++field)
+      frtk_bytes[row * 16 + field] = static_cast<std::uint8_t>(field + row * 10);
+    const std::uint32_t packed = (1200u << 17) | row;
+    std::memcpy(frtk_bytes + row * 16 + 10, &packed, sizeof(packed));
+  }
 
   if (argc != 2) return 2;
   HMODULE host = LoadLibraryW(argv[1]);
@@ -406,6 +444,17 @@ int wmain(int argc, wchar_t** argv) {
                                   {"layout", bundle["layout"]},
                                   {"unexpected", true}}}}, response, false) ||
       !IsError(response, "INVALID_REQUEST")) return 109;
+  auto nested_profile_extra = bundle;
+  nested_profile_extra["profile"]["unexpected"] = true;
+  if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-load-nested-extra"},
+                      {"command", "loadFrtkProfile"},
+                      {"params", nested_profile_extra}}, response, false) ||
+      !IsError(response, "FRTK_PROFILE_INVALID")) return 128;
+  if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-load-wrong-type"},
+                      {"command", "loadFrtkProfile"},
+                      {"params", {{"profile", "not-an-object"},
+                                  {"layout", bundle["layout"]}}}}, response, false) ||
+      !IsError(response, "FRTK_PROFILE_INVALID")) return 129;
   auto wrong_identity = bundle;
   wrong_identity["layout"]["schemaIdentity"] = "wrong";
   if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-wrong-identity"},
@@ -423,6 +472,18 @@ int wmain(int argc, wchar_t** argv) {
     std::cerr << "loadFrtkProfile RED response: " << response.dump() << '\n';
     return 113;
   }
+  for (const auto& invalid_discover : std::vector<Json>{
+           {{"logicalName", "SyntheticRecords"}}, {{"tableId", 1200}},
+           {{"uniqueId", 900001}}}) {
+    if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-discover-selector"},
+                        {"command", "discoverFrtkCatalog"},
+                        {"params", invalid_discover}}, response, false) ||
+        !IsError(response, "INVALID_REQUEST")) return 130;
+  }
+  if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-discover-wrong-type"},
+                      {"command", "discoverFrtkCatalog"},
+                      {"params", Json::array()}}, response, false) ||
+      !IsError(response, "INVALID_REQUEST")) return 135;
   if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-discover"},
                       {"command", "discoverFrtkCatalog"}, {"params", Json::object()}},
                response, false) || !response.value("ok", false) ||
@@ -432,6 +493,15 @@ int wmain(int argc, wchar_t** argv) {
   }
   auto generation = response["result"].value("generation", 0ull);
   if (!generation) return 115;
+  for (const auto& invalid_inspect : std::vector<Json>{
+           {{"generation", "1"}},
+           {{"generation", generation}, {"logicalName", "SyntheticRecords"}},
+           {{"generation", generation}, {"tableId", 1200}}}) {
+    if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-inspect-invalid"},
+                        {"command", "inspectFrtkCatalog"},
+                        {"params", invalid_inspect}}, response, false) ||
+        !IsError(response, "INVALID_REQUEST")) return 131;
+  }
   if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-inspect"},
                       {"command", "inspectFrtkCatalog"},
                       {"params", {{"generation", generation}}}}, response, false) ||
@@ -440,7 +510,9 @@ int wmain(int argc, wchar_t** argv) {
   Json frtk_read_params{{"generation", generation},
       {"records", Json::array({
           {{"uniqueId", 900001}, {"row", 0},
-           {"fields", Json::array({"Score", "Stage"})}},
+           {"fields", Json::array({"Score", "Stage", "address", "bytesHex",
+                                    "mask", "offset", "range", "operation",
+                                    "tableId", "Link"})}},
           {{"uniqueId", 900001}, {"row", 1},
            {"fields", Json::array({"Stage", "Score"})}}
       })}};
@@ -449,9 +521,47 @@ int wmain(int argc, wchar_t** argv) {
                response, false) || !response.value("ok", false) ||
       ContainsSensitiveKey(response["result"]) ||
       response["result"]["records"][0]["values"] !=
-          Json({{"Score", 0x1234}, {"Stage", 7}}) ||
+          Json::array({
+              {{"field", "Score"}, {"value", 0x1234}},
+              {{"field", "Stage"}, {"value", 7}},
+              {{"field", "address"}, {"value", 3}},
+              {{"field", "bytesHex"}, {"value", 4}},
+              {{"field", "mask"}, {"value", 5}},
+              {{"field", "offset"}, {"value", 6}},
+              {{"field", "range"}, {"value", 7}},
+              {{"field", "operation"}, {"value", 8}},
+              {{"field", "tableId"}, {"value", 9}},
+              {{"field", "Link"},
+               {"value", {{"uniqueId", 900001}, {"row", 0}}}}
+          }) ||
       response["result"]["records"][1]["values"] !=
-          Json({{"Stage", 8}, {"Score", 0x5678}})) return 117;
+          Json::array({{{"field", "Stage"}, {"value", 8}},
+                       {{"field", "Score"}, {"value", 0x5678}}})) return 117;
+  const std::vector<Json> invalid_reads{
+      {{"generation", generation}, {"records", "not-an-array"}},
+      {{"generation", generation}, {"records", Json::array()}, {"unexpected", true}},
+      {{"generation", generation}, {"records", Json::array({
+          {{"uniqueId", 900001}, {"row", 0}, {"fields", Json::array({"Score"})},
+           {"unexpected", true}}})}},
+      {{"generation", generation}, {"records", Json::array({
+          {{"logicalName", "SyntheticRecords"}, {"row", 0},
+           {"fields", Json::array({"Score"})}}})}},
+      {{"generation", generation}, {"records", Json::array({
+          {{"tableId", 1200}, {"row", 0}, {"fields", Json::array({"Score"})}}})}},
+      {{"generation", generation}, {"records", Json::array({
+          {{"uniqueId", "900001"}, {"row", 0},
+           {"fields", Json::array({"Score"})}}})}},
+      {{"generation", generation}, {"records", Json::array({
+          {{"uniqueId", 900001}, {"row", "0"},
+           {"fields", Json::array({"Score"})}}})}},
+      {{"generation", generation}, {"records", Json::array({
+          {{"uniqueId", 900001}, {"row", 0}, {"fields", Json::array({7})}}})}},
+  };
+  for (const auto& invalid_read : invalid_reads) {
+    if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-read-invalid"},
+                        {"command", "readFrtkRecords"}, {"params", invalid_read}},
+                 response, false) || !IsError(response, "INVALID_REQUEST")) return 132;
+  }
   const Json transaction_params{{"transactionId", "frtk.denied-1"},
       {"generation", generation},
       {"changes", Json::array({{{"uniqueId", 900001}, {"row", 0},
@@ -461,6 +571,39 @@ int wmain(int argc, wchar_t** argv) {
                       {"params", transaction_params}}, response, false) ||
       !IsError(response, "FRTK_AUTHORITY_UNPROVEN") ||
       ContainsSensitiveKey(response["error"])) return 118;
+  const std::vector<std::pair<Json, const char*>> invalid_transactions{
+      {{{"transactionId", "frtk.bad"}, {"generation", generation},
+        {"changes", "not-an-array"}}, "INVALID_REQUEST"},
+      {{{"transactionId", "frtk.bad"}, {"generation", generation},
+        {"changes", Json::array()}, {"unexpected", true}}, "INVALID_REQUEST"},
+      {{{"transactionId", "frtk.bad"}, {"generation", generation},
+       {"changes", Json::array({{{"uniqueId", 900001}, {"row", 0},
+                                  {"field", "Score"}, {"value", 1},
+                                  {"unexpected", true}}})}}, "INVALID_REQUEST"},
+      {{{"transactionId", "frtk.bad"}, {"generation", generation},
+       {"changes", Json::array({{{"logicalName", "SyntheticRecords"}, {"row", 0},
+                                  {"field", "Score"}, {"value", 1}}})}}, "INVALID_REQUEST"},
+      {{{"transactionId", "frtk.bad"}, {"generation", generation},
+       {"changes", Json::array({{{"tableId", 1200}, {"row", 0},
+                                  {"field", "Score"}, {"value", 1}}})}}, "INVALID_REQUEST"},
+      {{{"transactionId", "frtk.bad"}, {"generation", generation},
+       {"changes", Json::array({{{"uniqueId", 900001}, {"row", 0},
+                                  {"field", "Link"},
+                                  {"value", {{"uniqueId", 900001}, {"row", 0},
+                                             {"unexpected", true}}}}})}},
+       "FRTK_FIELD_INVALID"},
+      {{{"transactionId", "frtk.bad"}, {"generation", generation},
+       {"changes", Json::array({{{"uniqueId", 900001}, {"row", 0},
+                                  {"field", "Link"},
+                                  {"value", {{"uniqueId", "900001"}, {"row", 0}}}}})}},
+       "FRTK_FIELD_INVALID"},
+  };
+  for (const auto& [invalid_transaction, expected_code] : invalid_transactions) {
+    if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-transaction-invalid"},
+                        {"command", "transactFrtkFields"},
+                        {"params", invalid_transaction}}, response, false) ||
+        !IsError(response, expected_code)) return 133;
+  }
   set_game_ready(FALSE);
   if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-game-not-ready"},
                       {"command", "readFrtkRecords"}, {"params", frtk_read_params}},
@@ -475,6 +618,14 @@ int wmain(int argc, wchar_t** argv) {
                       {"command", "invalidateFrtkCatalog"},
                       {"params", {{"reason", "arbitrary"}}}}, response, false) ||
       !IsError(response, "INVALID_REQUEST")) return 119;
+  for (const auto& invalid_invalidate : std::vector<Json>{
+           {{"reason", 7}},
+           {{"reason", "caller_transition"}, {"unexpected", true}}}) {
+    if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-invalidate-invalid"},
+                        {"command", "invalidateFrtkCatalog"},
+                        {"params", invalid_invalidate}}, response, false) ||
+        !IsError(response, "INVALID_REQUEST")) return 134;
+  }
   if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-invalidate"},
                       {"command", "invalidateFrtkCatalog"},
                       {"params", {{"reason", "caller_transition"}}}}, response, false) ||
