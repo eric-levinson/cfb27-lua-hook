@@ -936,13 +936,20 @@ function createClient({ pid, pipeName, timeoutMs = 3000 } = {}) {
       let bundle;
       try { bundle = JSON.parse(source); }
       catch { throw new Cfb27HookError('FRTK_PROFILE_INVALID', FRTK_ERROR_MESSAGES.FRTK_PROFILE_INVALID); }
-      return loadFrtkProfile(bundle);
+      try {
+        return await loadFrtkProfile(bundle);
+      } catch (error) {
+        if (error?.code === 'INVALID_REQUEST' || error?.code === 'FRTK_PROFILE_INVALID') {
+          throw new Cfb27HookError('FRTK_PROFILE_INVALID', FRTK_ERROR_MESSAGES.FRTK_PROFILE_INVALID);
+        }
+        throw error;
+      }
     },
     async discoverFrtkCatalog(options = {}) {
       if (!hasExactKeys(options, [])) throw invalidRequest('discoverFrtkCatalog accepts no selectors');
+      frtkAuthority.clear();
       const result = await frtkRequest(FRTK_CAPABILITIES.catalog, 'discoverFrtkCatalog', {},
         validateDiscoveryResult);
-      frtkAuthority.clear();
       return result;
     },
     async inspectFrtkCatalog(options = {}) {

@@ -39,10 +39,10 @@ Commands:
                 Validate and load a typed FrTk profile
   frtk catalog discover <.frtk/profile.json>
                 Load a profile and discover the typed catalog
-  frtk catalog inspect
-                Rediscover and inspect the current typed catalog
-  frtk records read <table> --row N --field <name>...
-                Read typed fields by logical table display name
+  frtk catalog inspect <.frtk/profile.json>
+                Load a profile, discover, and inspect the typed catalog
+  frtk records read <.frtk/profile.json> <uniqueId> --row N --field <name>...
+                Load a profile and read typed fields by numeric Unique ID
   telemetry register <type...>
                 Register structured telemetry type names
 
@@ -138,7 +138,9 @@ function rejectMisplacedDeveloperOptions(command, positionals, options) {
   }
   const frtkProfileFile = command === 'frtk' &&
     ((positionals[0] === 'profile' && positionals[1] === 'validate') ||
-     (positionals[0] === 'catalog' && positionals[1] === 'discover'));
+     (positionals[0] === 'catalog' &&
+       (positionals[1] === 'discover' || positionals[1] === 'inspect')) ||
+     (positionals[0] === 'records' && positionals[1] === 'read'));
   if (operation !== 'transact' && !frtkProfileFile && options.allowExternalFile) {
     throw usageError('--allow-external-file is only valid for memory transact or FrTk profile files');
   }
@@ -424,27 +426,42 @@ async function main(argv, {
         await client.loadFrtkProfileFromFile(file, { fileSystem });
         result = await discoverAndInspect(client);
       } else if (group === 'catalog' && operation === 'inspect') {
-        if (extra.length || options.row !== undefined || options.fields.length ||
-            options.allowExternalFile) throw usageError('frtk catalog inspect accepts no arguments');
-        result = await discoverAndInspect(await createLiveClient(sdk));
+        if (extra.length !== 1 || options.row !== undefined || options.fields.length) {
+          throw usageError('frtk catalog inspect requires exactly one profile JSON file');
+        }
+        const file = await resolveFrtkProfileFile(extra[0], {
+          fileSystem, cwd, allowExternalFile: options.allowExternalFile,
+        });
+        const client = await createLiveClient(sdk);
+        await client.loadFrtkProfileFromFile(file, { fileSystem });
+        result = await discoverAndInspect(client);
       } else if (group === 'records' && operation === 'read') {
-        if (extra.length !== 1 || options.row === undefined || options.fields.length < 1 ||
-            options.fields.length > 64 || options.allowExternalFile ||
+        if (extra.length !== 2 || options.row === undefined || options.fields.length < 1 ||
+            options.fields.length > 64 ||
             options.fields.some((field) => typeof field !== 'string' || field.length < 1 ||
               field.length > 128)) {
-          throw usageError('frtk records read requires one table, --row, and 1 to 64 --field options');
+          throw usageError('frtk records read requires one profile, numeric Unique ID, --row, and 1 to 64 --field options');
         }
-        const tableName = extra[0];
-        if (tableName.length < 1 || tableName.length > 128) {
-          throw usageError('FrTk table display name is invalid');
+        const [profileFile, uniqueIdText] = extra;
+        if (!/^(?:0|[1-9][0-9]{0,9})$/.test(uniqueIdText)) {
+          throw usageError('FrTk records read requires a numeric Unique ID');
         }
+        const uniqueId = Number(uniqueIdText);
+        if (!Number.isSafeInteger(uniqueId) || uniqueId > 0xFFFFFFFF) {
+          throw usageError('FrTk Unique ID must be from 0 to 4294967295');
+        }
+        const file = await resolveFrtkProfileFile(profileFile, {
+          fileSystem, cwd, allowExternalFile: options.allowExternalFile,
+        });
         const client = await createLiveClient(sdk);
+        await client.loadFrtkProfileFromFile(file, { fileSystem });
         const catalog = await discoverAndInspect(client);
-        const matches = catalog.tables.filter((table) => table.logicalName === tableName);
-        if (matches.length !== 1) throw usageError('FrTk table display name is unknown or ambiguous');
+        if (!catalog.tables.some((table) => table.uniqueId === uniqueId)) {
+          throw usageError('FrTk Unique ID is not present in the discovered catalog');
+        }
         result = await client.readFrtkRecords({
           generation: catalog.generation,
-          records: [{ uniqueId: matches[0].uniqueId, row: options.row, fields: options.fields }],
+          records: [{ uniqueId, row: options.row, fields: options.fields }],
         });
       } else {
         throw usageError('frtk requires profile validate, catalog discover/inspect, or records read');

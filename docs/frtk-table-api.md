@@ -9,7 +9,8 @@ negotiates the corresponding protocol-v1 capability and fails closed with
 - `loadFrtkProfile({ profile, layout })` clones and loads an in-memory bundle.
 - `loadFrtkProfileFromFile(path)` is the only SDK operation that reads raw
   profile JSON. Parse and file errors return `FRTK_PROFILE_INVALID` without the
-  path or source text.
+  path or source text. Syntactically valid bundles rejected by local or host
+  schema validation use the same sanitized error.
 - `discoverFrtkCatalog()` returns `{ generation, tableCount }`.
 - `inspectFrtkCatalog({ generation })` returns `{ generation, tables }` with
   sanitized summaries. A table has `uniqueId`, `logicalName`,
@@ -21,6 +22,11 @@ negotiates the corresponding protocol-v1 capability and fails closed with
 Generations are lifecycle tokens. Loading, discovering, or invalidating clears
 locally cached authority. Callers must use the latest generation; stale access
 returns `FRTK_CATALOG_STALE`.
+
+The CLI is intentionally stateless: catalog inspection and record reads each
+require a profile path, then load, discover, and operate within that invocation.
+Every discovery creates a fresh generation and stales prior handles. CLI record
+selectors are numeric Unique IDs; logical names appear only in output.
 
 ## Typed reads
 
