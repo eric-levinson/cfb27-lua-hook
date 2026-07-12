@@ -510,6 +510,27 @@ test('frtk records read loads its profile and accepts only a numeric uniqueId se
   assert.equal(output.stdout.includes('address'), false);
 });
 
+test('frtk records read human output includes the validated lifecycle generation', async () => {
+  const { io, output } = memoryIo();
+  const client = {
+    loadFrtkProfileFromFile: async () => ({ tableCount: 1 }),
+    discoverFrtkCatalog: async () => ({ generation: 12, tableCount: 1 }),
+    inspectFrtkCatalog: async () => ({ generation: 12, tables: [{
+      uniqueId: 900001, logicalName: 'Recruit', authorityStatus: 'direct_verified', capacity: 35,
+      profileId: 'p1', generation: 12, evidence: [],
+    }] }),
+    readFrtkRecords: async () => ({ generation: 12, records: [{
+      uniqueId: 900001, row: 7, values: [{ field: 'Score', value: 123 }],
+    }] }),
+  };
+  const sdk = { discoverGame: async () => ({ pid: 27 }), createClient: () => client };
+  assert.equal(await main(['frtk', 'records', 'read', '.frtk/profile.json', '900001',
+    '--row', '7', '--field', 'Score'], {
+    sdk, io, fileSystem: memoryFileSystem(async () => '{}'), cwd: 'C:\\workspace',
+  }), 0);
+  assert.match(output.stdout, /generation 12/i);
+});
+
 test('frtk catalog inspect is stateless and loads a contained profile before discovery', async () => {
   const calls = [];
   const client = {

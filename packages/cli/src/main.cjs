@@ -63,7 +63,7 @@ Options:
                           Explicitly allow unsupported-build diagnostics
   --include-allocation-metadata
                           Include session-only allocation topology in scan matches
-  --allow-external-file   Allow a transaction JSON file outside the current directory
+  --allow-external-file   Allow a FrTk profile outside .frtk or transaction JSON outside CWD
   --row <index>           Typed FrTk record row
   --field <name>          Typed FrTk field name; may be repeated
   -h, --help              Show this help`;
@@ -266,6 +266,7 @@ function printCommandSuccess(io, command, result, json) {
     return;
   }
   if (command === 'frtk records read') {
+    io.out(`FrTk records generation ${result.generation}`);
     for (const record of result.records) {
       io.out(`Table ${record.uniqueId}, row ${record.row}`);
       for (const entry of record.values) io.out(`${entry.field}: ${JSON.stringify(entry.value)}`);
