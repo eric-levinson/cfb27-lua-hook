@@ -273,7 +273,7 @@ function cloneWriteTransactionOptions(options) {
     totalBytes += byteLength;
     const start = BigInt(operation.address);
     const end = start + BigInt(byteLength);
-    if (end > MAX_UINT64 + 1n) {
+    if (end > MAX_UINT64) {
       throw invalidRequest('writeTransaction operation exceeds the address space');
     }
     ranges.push({ start, end });
@@ -359,6 +359,13 @@ function validateWriteTransactionErrorResponse(response, expectedId, params) {
   return error.code;
 }
 
+function validateWriteTransactionSuccessResponse(response, expectedId) {
+  if (!hasExactKeys(response, ['protocol', 'id', 'ok', 'result']) ||
+      response.protocol !== 1 || response.id !== expectedId || response.ok !== true) {
+    throw invalidResponse('Host returned a malformed writeTransaction success response');
+  }
+}
+
 function sanitizeWriteTransactionError(error) {
   const code = typeof error?.code === 'string' &&
     Object.hasOwn(WRITE_TRANSACTION_ERROR_MESSAGES, error.code)
@@ -399,7 +406,10 @@ function createClient({ pid, pipeName, timeoutMs = 3000 } = {}) {
   }
   const resolvedPipeName = pipeName || `\\\\.\\pipe\\CFB27LuaHost.v1.${pid}`;
 
-  function request(command, params = {}, { hostErrorValidator } = {}) {
+  function request(command, params = {}, {
+    hostErrorValidator,
+    successResponseValidator,
+  } = {}) {
     if (typeof command !== 'string' || !command || !params || typeof params !== 'object') {
       return Promise.reject(new Cfb27HookError('INVALID_REQUEST', 'Command and params are invalid'));
     }
@@ -459,6 +469,14 @@ function createClient({ pid, pipeName, timeoutMs = 3000 } = {}) {
                 finish(error);
               }
               return;
+            }
+            if (typeof successResponseValidator === 'function') {
+              try {
+                successResponseValidator(response, id);
+              } catch (error) {
+                finish(error);
+                return;
+              }
             }
             if (!response || response.protocol !== 1) {
               finish(new Cfb27HookError('PROTOCOL_MISMATCH', 'Host protocol version does not match'));
@@ -578,6 +596,7 @@ function createClient({ pid, pipeName, timeoutMs = 3000 } = {}) {
         const result = await request('writeTransaction', params, {
           hostErrorValidator: (response, id) =>
             validateWriteTransactionErrorResponse(response, id, params),
+          successResponseValidator: validateWriteTransactionSuccessResponse,
         });
         return validateWriteTransactionResult(result, params);
       } catch (error) {

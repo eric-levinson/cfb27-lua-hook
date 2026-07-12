@@ -224,9 +224,6 @@ TransactionResult RunTransaction(const TransactionRequest& request,
       return RollBack(prepared, attempted, std::move(results), backend);
     }
     results[index].applied = true;
-  }
-
-  for (std::size_t index = 0; index < request.operations.size(); ++index) {
     std::vector<std::uint8_t> readback(
         request.operations[index].replacement.size());
     if (!backend.Read(prepared[index].address, readback) ||

@@ -41,6 +41,7 @@ class FakeMemoryBackend final : public MemoryBackend {
     fail_restore_read = false;
     rollback_started = false;
     write_addresses.clear();
+    apply_calls.clear();
   }
 
   bool Validate(std::uintptr_t address, std::size_t size, bool) override {
@@ -49,6 +50,9 @@ class FakeMemoryBackend final : public MemoryBackend {
 
   bool Read(std::uintptr_t address, std::span<std::uint8_t> output) override {
     ++read_calls;
+    if (write_calls > 0) {
+      apply_calls.push_back("read:" + std::to_string(address));
+    }
     if (fail_verification_read && write_calls > 0 && !rollback_started) {
       fail_verification_read = false;
       rollback_started = true;
@@ -64,6 +68,7 @@ class FakeMemoryBackend final : public MemoryBackend {
              std::span<const std::uint8_t> input) override {
     const int call_index = write_calls++;
     write_addresses.push_back(address);
+    apply_calls.push_back("write:" + std::to_string(address));
     if (!rollback_started && call_index == fail_write_index) {
       rollback_started = true;
       return false;
@@ -84,6 +89,7 @@ class FakeMemoryBackend final : public MemoryBackend {
   bool fail_restore_read{};
   bool rollback_started{};
   std::vector<std::uintptr_t> write_addresses;
+  std::vector<std::string> apply_calls;
 };
 
 TransactionRequest ValidRequest(const FakeMemoryBackend& backend) {
@@ -122,6 +128,9 @@ void TestApplyAndPreflight() {
   Require(RunTransaction(valid, backend).status == Status::kAppliedVerified,
           "happy path");
   Require(backend.bytes == expected_after, "replacement present");
+  Require(backend.apply_calls == std::vector<std::string>({
+              "write:16", "read:16", "write:32", "read:32"}),
+          "each operation is verified before the next write");
 
   backend.Reset();
   backend.bytes[0x10] ^= 1;
@@ -156,6 +165,12 @@ void TestRollbackOutcomes() {
           "verification read failure rolls back");
   Require(backend.bytes == backend.original,
           "verification read failure restores originals");
+  Require(backend.write_addresses ==
+              std::vector<std::uintptr_t>({0x10, 0x10}),
+          "first verification failure never attempts the second write");
+  Require(backend.apply_calls == std::vector<std::string>({
+              "write:16", "read:16", "write:16", "read:16"}),
+          "failed first operation is restored and verified");
 
   backend.Reset();
   backend.fail_write_index = 1;

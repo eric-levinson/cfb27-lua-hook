@@ -233,6 +233,9 @@ test('writeTransaction rejects malformed or unsafe requests before creating a so
       { ...VALID_TRANSACTION_REQUEST, operations: [{
         address: '0xFFFFFFFFFFFFFFFF', expectedHex: '0000', replacementHex: '1111',
       }] },
+      { ...VALID_TRANSACTION_REQUEST, operations: [{
+        address: '0xFFFFFFFFFFFFFFFF', expectedHex: '00', replacementHex: '11',
+      }] },
     ];
     for (const input of cases) {
       await assert.rejects(
@@ -244,6 +247,34 @@ test('writeTransaction rejects malformed or unsafe requests before creating a so
   } finally {
     net.createConnection = originalCreateConnection;
   }
+});
+
+test('writeTransaction accepts a one-byte range immediately below the uint64 ceiling', async (t) => {
+  const request = {
+    transactionId: 'boundary.valid-1',
+    operations: [{
+      address: '0xFFFFFFFFFFFFFFFE', expectedHex: '00', replacementHex: '11',
+    }],
+  };
+  const client = await fakeClient(t, () => ({
+    transactionId: request.transactionId,
+    status: 'applied_verified',
+    operations: [{ index: 0, applied: true, verified: true }],
+  }));
+  assert.equal((await client.writeTransaction(request)).status, 'applied_verified');
+});
+
+test('writeTransaction rejects a one-byte range at the uint64 ceiling', async () => {
+  const client = createClient({ pipeName: testPipeName('unused'), timeoutMs: 25 });
+  await assert.rejects(
+    Promise.resolve().then(() => client.writeTransaction({
+      transactionId: 'boundary.invalid-1',
+      operations: [{
+        address: '0xFFFFFFFFFFFFFFFF', expectedHex: '00', replacementHex: '11',
+      }],
+    })),
+    (error) => error.code === 'INVALID_REQUEST',
+  );
 });
 
 test('writeTransaction strictly validates every host result property', async (t) => {
@@ -355,6 +386,34 @@ test('writeTransaction validates raw host error envelopes before generic convers
       assert.equal(error.message.includes('0x7FF612340000'), false);
       assert.equal(error.message.includes('1020'), false);
       assert.equal(error.message.includes('DEADBEEF'), false);
+      return true;
+    });
+  }
+});
+
+test('writeTransaction rejects hostile raw success envelopes', async (t) => {
+  const responseFactories = [
+    (request) => ({ protocol: 1, id: request.id, ok: true,
+      result: VALID_TRANSACTION_RESULT, address: '0x7FF612340000' }),
+    (request) => ({ protocol: 1, id: request.id, ok: true,
+      result: VALID_TRANSACTION_RESULT, bytesHex: 'DEADBEEF' }),
+    (request) => ({ id: request.id, ok: true, result: VALID_TRANSACTION_RESULT }),
+    () => ({ protocol: 1, ok: true, result: VALID_TRANSACTION_RESULT }),
+    (request) => ({ protocol: 1, id: request.id, result: VALID_TRANSACTION_RESULT }),
+    (request) => ({ protocol: 1, id: request.id, ok: true }),
+    (request) => ({ protocol: 2, id: request.id, ok: true, result: VALID_TRANSACTION_RESULT }),
+    (request) => ({ protocol: 1, id: `${request.id}-hostile`, ok: true,
+      result: VALID_TRANSACTION_RESULT }),
+    (request) => ({ protocol: 1, id: request.id, ok: 'true',
+      result: VALID_TRANSACTION_RESULT }),
+    (request) => ({ protocol: 1, id: request.id, ok: true, result: null }),
+  ];
+  let index = 0;
+  const client = await fakeRawResponseClient(t, (request) => responseFactories[index++](request));
+  for (const ignored of responseFactories) {
+    await assert.rejects(client.writeTransaction(VALID_TRANSACTION_REQUEST), (error) => {
+      assert.equal(error.code, 'INVALID_RESPONSE');
+      assert.equal(error.details, undefined);
       return true;
     });
   }

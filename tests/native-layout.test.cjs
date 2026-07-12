@@ -24,3 +24,23 @@ test('active native tree contains only host, proxy, and smoke entry points', () 
   assert.doesNotMatch(cmake, /hook\.cpp|injector\.cpp|response_guard\.cpp/);
   assert.doesNotMatch(cmake, /archive[\\/]/);
 });
+
+test('Windows CI enables writes only for the protocol smoke step', () => {
+  const workflow = fs.readFileSync(
+    path.join(root, '.github/workflows/windows-ci.yml'),
+    'utf8',
+  );
+  const lines = workflow.split(/\r?\n/);
+  const command = '      - run: native/build-release/Release/cfb27_protocol_smoke.exe ' +
+    'native/build-release/Release/cfb27_lua_host.dll';
+  const stepStart = lines.indexOf(command);
+  assert.notEqual(stepStart, -1, 'protocol smoke command must remain exact');
+  const nextStep = lines.findIndex((line, index) => index > stepStart && line.startsWith('      - '));
+  const step = lines.slice(stepStart, nextStep === -1 ? lines.length : nextStep);
+  assert.deepEqual(step, [
+    command,
+    '        env:',
+    "          CFB27_SMOKE_ALLOW_WRITES: '1'",
+  ]);
+  assert.equal(lines.filter((line) => line.includes('CFB27_SMOKE_ALLOW_WRITES')).length, 1);
+});

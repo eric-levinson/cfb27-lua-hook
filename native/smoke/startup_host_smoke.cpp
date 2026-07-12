@@ -74,15 +74,75 @@ bool Request(const std::wstring& pipe_name, const Json& request, Json& response)
 
 std::optional<std::size_t> MatchingBrace(const std::string& source,
                                          std::size_t opening) {
+  enum class LexicalState { kCode, kLineComment, kBlockComment, kString, kChar };
+  LexicalState state = LexicalState::kCode;
   std::size_t depth = 0;
+  bool escaped = false;
   for (std::size_t index = opening; index < source.size(); ++index) {
-    if (source[index] == '{') {
-      ++depth;
-    } else if (source[index] == '}' && --depth == 0) {
-      return index;
+    const char current = source[index];
+    const char next = index + 1 < source.size() ? source[index + 1] : '\0';
+    switch (state) {
+      case LexicalState::kCode:
+        if (current == '/' && next == '/') {
+          state = LexicalState::kLineComment;
+          ++index;
+        } else if (current == '/' && next == '*') {
+          state = LexicalState::kBlockComment;
+          ++index;
+        } else if (current == '"') {
+          state = LexicalState::kString;
+          escaped = false;
+        } else if (current == '\'') {
+          state = LexicalState::kChar;
+          escaped = false;
+        } else if (current == '{') {
+          ++depth;
+        } else if (current == '}' && depth > 0 && --depth == 0) {
+          return index;
+        }
+        break;
+      case LexicalState::kLineComment:
+        if (current == '\n') state = LexicalState::kCode;
+        break;
+      case LexicalState::kBlockComment:
+        if (current == '*' && next == '/') {
+          state = LexicalState::kCode;
+          ++index;
+        }
+        break;
+      case LexicalState::kString:
+      case LexicalState::kChar:
+        if (escaped) {
+          escaped = false;
+        } else if (current == '\\') {
+          escaped = true;
+        } else if ((state == LexicalState::kString && current == '"') ||
+                   (state == LexicalState::kChar && current == '\'')) {
+          state = LexicalState::kCode;
+        }
+        break;
     }
   }
   return std::nullopt;
+}
+
+bool VerifyMatchingBraceFixtures(std::string& error) {
+  const std::vector<std::string> fixtures = {
+      R"({ // } closes only a comment
+          int value = 1;
+        })",
+      R"({ /* } closes only a block comment */ int value = 1; })",
+      R"({ const char brace = '}'; int value = 1; })",
+      R"fixture({ const char* braces = "escaped quote: \" }"; int value = 1; })fixture",
+  };
+  for (const auto& fixture : fixtures) {
+    const auto closing = MatchingBrace(fixture, 0);
+    if (!closing || *closing != fixture.size() - 1) {
+      error = "brace matcher treated a comment or literal brace as syntax";
+      return false;
+    }
+  }
+  return true;
 }
 
 bool CallsOccurAfter(const std::string& source, std::string_view call,
@@ -161,6 +221,11 @@ bool VerifyLuaWriteU8Source(const std::filesystem::path& path,
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
+  std::string matcher_error;
+  if (!VerifyMatchingBraceFixtures(matcher_error)) {
+    std::cerr << "startup source matcher RED: " << matcher_error << '\n';
+    return 8;
+  }
   if (argc < 2 || argc > 3) {
     std::wcerr << L"usage: startup_host_smoke <cfb27_lua_host.dll> [lua_host.cpp]\n";
     return 2;
