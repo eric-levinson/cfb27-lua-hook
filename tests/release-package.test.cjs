@@ -36,6 +36,7 @@ test('release rejects archive and generated/private material', () => {
     'docs/dynasty.sav',
     'docs/memory.dmp',
     'docs/memory.dump',
+    'docs/record.raw',
     'docs/schema.json',
     'docs/profile.json',
   ]) {
@@ -51,6 +52,7 @@ test('actual TGZ and ZIP validation reject every raw save, dump, schema, and pro
       ['nested', 'dynasty.sav'],
       ['nested', 'memory.dmp'],
       ['nested', 'memory.dump'],
+      ['nested', 'record.raw'],
       ['nested', 'schema.json'],
       ['nested', 'profile.json'],
     ];

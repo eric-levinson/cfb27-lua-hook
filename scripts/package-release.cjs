@@ -29,7 +29,7 @@ function assertPrivatePathPolicy(entry, { archive = false } = {}) {
   const segments = lower.split('/');
   if (segments.some((segment) => DENIED_SEGMENTS.has(segment)) ||
       segments.some((segment) => DENIED_RAW_JSON_NAMES.has(segment)) ||
-      /\.(obj|pdb|log|bin|gz|xml|pyc|sav|dmp|dump)$/i.test(lower) ||
+      /\.(obj|pdb|log|bin|gz|xml|pyc|sav|dmp|dump|raw)$/i.test(lower) ||
       lower.endsWith('docs/development/restructure-pr-body.md')) {
     throw new Error(`${archive ? 'Archive' : 'Release'} entry is not allowed: ${entry}`);
   }

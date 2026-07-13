@@ -38,3 +38,9 @@ No installation, game launch, or MMC launch was performed.
 - Both native `Identity` helpers now call strict `IsValidUtf8`; profile parsing and direct `SchemaRegistry::Load` reject programmatically constructed UTF-8 surrogate byte sequences.
 
 Follow-up strict TDD evidence: the new SDK test first reached the unused pipe instead of returning `INVALID_REQUEST`, while both native smokes first accepted invalid identity bytes. After implementation, the focused suite passed. The fresh full gate then passed the Visual Studio Release build, all 11 native smokes, `npm run check`, all 163 Node tests, package preview, and independent stage/ZIP/two-TGZ rescans. The refreshed ZIP SHA-256 is `4892C124D8997B545D27BA3E71C4EAB9939E86AD37B5EB94DAE28129B1CE6BC3`.
+
+## Raw Record Artifact Follow-up
+
+- The shared private-extension policy now rejects `.raw` files in staging, npm TGZ payloads, and release ZIP payloads.
+- Strict TDD reproduced the gap with a real TGZ containing `nested/record.raw`, then confirmed stage parity and real TGZ/ZIP rejection after the one-token policy extension.
+- Fresh verification passed `npm run check`, all 163 Node tests, package preview, and independent stage/ZIP/two-TGZ rescans. The refreshed ZIP SHA-256 is `77F5D81C7938D0465FA40E3EE99559D5058406AD2B3CB6E49982C3D67CFEEC5C`.
