@@ -515,6 +515,47 @@ int wmain(int argc, wchar_t** argv) {
                       {"params", {{"generation", generation}}}}, response, false) ||
       !response.value("ok", false) || ContainsSensitiveKey(response["result"]) ||
       response["result"]["tables"][0].value("uniqueId", 0) != 900001) return 116;
+  if (!SetEnvironmentVariableW(L"CFB27_SMOKE_FRTK_TIMEOUT", L"1")) return 139;
+  const auto timeout_started = std::chrono::steady_clock::now();
+  if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-timeout"},
+                      {"command", "discoverFrtkCatalog"},
+                      {"params", Json::object()}}, response, false) ||
+      !IsError(response, "FRTK_DISCOVERY_TIMEOUT") ||
+      !response["error"].value("details", Json::object()).empty() ||
+      ContainsSensitiveKey(response["error"])) {
+    std::cerr << "frtk timeout response: " << response.dump() << '\n';
+    return 140;
+  }
+  const auto timeout_elapsed =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - timeout_started);
+  if (timeout_elapsed >= std::chrono::milliseconds(500)) {
+    std::cerr << "frtk timeout elapsedMs=" << timeout_elapsed.count() << '\n';
+    return 141;
+  }
+  if (!Request(pipe, {{"protocol", 1}, {"id", "status-after-frtk-timeout"},
+                      {"command", "status"}, {"params", Json::object()}},
+               response, false) || !response.value("ok", false)) {
+    std::cerr << "status after frtk timeout: " << response.dump() << '\n';
+    return 142;
+  }
+  if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-timeout-stale"},
+                      {"command", "inspectFrtkCatalog"},
+                      {"params", {{"generation", generation}}}}, response, false) ||
+      !IsError(response, "FRTK_CATALOG_STALE")) {
+    std::cerr << "frtk timeout stale response: " << response.dump() << '\n';
+    return 143;
+  }
+  SetEnvironmentVariableW(L"CFB27_SMOKE_FRTK_TIMEOUT", nullptr);
+  if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-after-timeout"},
+                      {"command", "discoverFrtkCatalog"},
+                      {"params", Json::object()}}, response, false) ||
+      !response.value("ok", false)) {
+    std::cerr << "frtk after timeout response: " << response.dump() << '\n';
+    return 144;
+  }
+  generation = response["result"].value("generation", 0ull);
+  if (!generation) return 145;
   Json frtk_read_params{{"generation", generation},
       {"records", Json::array({
           {{"uniqueId", 900001}, {"row", 0},

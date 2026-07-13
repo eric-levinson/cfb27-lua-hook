@@ -86,6 +86,9 @@ bounded to 32 MiB of eligible memory using 4 MiB read chunks. Automatic scans
 accept 1–4,096 pages and default to the 4,096-page, 128 GiB ceiling. Use
 `client.scanMemoryPage(options)` when a trusted main-process caller needs manual
 page control; its `nextCursor` may be passed only to the next page request.
+A typed FrTk discovery scan is an internal, separately bounded operation and
+may use reviewed 4-byte fingerprints; this does not lower the public raw-memory
+scan minimum of 8 bytes.
 A batch read contains at most 64 ranges of 64 KiB each and at most 256 KiB
 total. Unsupported game builds
 require `allowUnsupportedBuild: true` and report `supportedBuild: false`.

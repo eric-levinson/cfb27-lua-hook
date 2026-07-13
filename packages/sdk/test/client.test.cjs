@@ -181,6 +181,7 @@ test('SDK publishes stable typed FrTk error codes', () => {
   for (const code of [
     'FRTK_PROFILE_INVALID',
     'FRTK_DISCOVERY_FAILED',
+    'FRTK_DISCOVERY_TIMEOUT',
     'FRTK_CATALOG_STALE',
     'FRTK_FIELD_INVALID',
     'FRTK_AUTHORITY_UNPROVEN',
@@ -288,6 +289,20 @@ test('discoverFrtkCatalog rejects public selectors before host I/O', async () =>
     (error) => error.code === 'INVALID_REQUEST');
   await assert.rejects(client.discoverFrtkCatalog({ uniqueId: 900001 }),
     (error) => error.code === 'INVALID_REQUEST');
+});
+
+test('discoverFrtkCatalog preserves a sanitized native timeout error', async (t) => {
+  const client = await fakeRawResponseClient(t, (request) => request.command === 'hello'
+    ? { protocol: 1, id: request.id, ok: true,
+      result: { protocolVersion: 1, hostVersion: '0.2.0', supportedBuild: true,
+        writesAllowed: false, capabilities: ['frtkCatalogV1'] } }
+    : { protocol: 1, id: request.id, ok: false,
+      error: { code: 'FRTK_DISCOVERY_TIMEOUT', message: 'secret 0xDEADBEEF',
+        details: { address: '0xDEADBEEF' } } });
+  await assert.rejects(client.discoverFrtkCatalog(), (error) =>
+    error.code === 'FRTK_DISCOVERY_TIMEOUT' &&
+    error.message === 'FrTk discovery exceeded its native operation budget' &&
+    !error.message.includes('0xDEADBEEF'));
 });
 
 test('typed FrTk field selectors reject invalid Unicode and UTF-8 overflow before I/O', async () => {

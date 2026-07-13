@@ -78,7 +78,8 @@ class Backend final : public DiscoveryBackend {
   std::size_t mutate_on_call{};
   std::size_t maximum_ranges{};
   std::size_t maximum_bytes{};
-  ScanObservationResult Scan(const RowFingerprint&, std::size_t) override {
+  ScanObservationResult Scan(const RowFingerprint&, std::size_t,
+                             const DiscoveryDeadline&) override {
     return {};
   }
   bool ReadBatch(std::span<const ReadRequest> requests,
@@ -103,7 +104,8 @@ class Backend final : public DiscoveryBackend {
     }
     return true;
   }
-  bool AllocationExists(std::uintptr_t, std::size_t) override {
+  bool AllocationExists(std::uintptr_t, std::size_t,
+                        const DiscoveryDeadline&) override {
     return allocation_ok;
   }
 };

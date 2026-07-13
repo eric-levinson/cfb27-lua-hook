@@ -67,6 +67,7 @@ const FRTK_CAPABILITIES = Object.freeze({
 const FRTK_ERROR_MESSAGES = Object.freeze({
   FRTK_PROFILE_INVALID: 'FrTk profile is invalid',
   FRTK_DISCOVERY_FAILED: 'Required FrTk tables were not resolved',
+  FRTK_DISCOVERY_TIMEOUT: 'FrTk discovery exceeded its native operation budget',
   FRTK_CATALOG_STALE: 'FrTk catalog generation is stale',
   FRTK_FIELD_INVALID: 'FrTk field or value is invalid',
   FRTK_AUTHORITY_UNPROVEN: 'FrTk write authority is unproven',

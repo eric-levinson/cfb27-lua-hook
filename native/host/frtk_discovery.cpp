@@ -83,8 +83,12 @@ const TableDiscovery* DiscoveryResult::FindTableByUniqueId(
 }
 
 DiscoveryResult DiscoverTables(const ProfileBundle& profile,
-                               DiscoveryBackend& backend) {
+                               DiscoveryBackend& backend,
+                               const DiscoveryDeadline& deadline) {
   DiscoveryResult result;
+  const auto timed_out = [] {
+    return DiscoveryResult{.valid = false, .code = "OPERATION_TIMEOUT"};
+  };
   std::set<std::uint32_t> unique_ids;
   std::set<std::uint16_t> table_ids;
   for (const auto& profile_table : profile.tables) {
@@ -109,6 +113,7 @@ DiscoveryResult DiscoverTables(const ProfileBundle& profile,
 
   for (std::size_t table_index = 0; table_index < profile.tables.size();
        ++table_index) {
+    if (deadline.Expired()) return timed_out();
     const auto& profile_table = profile.tables[table_index];
     auto& discovered = result.tables[table_index];
     if (profile_table.rows.size() < 3 || profile_table.record_size == 0) {
@@ -120,10 +125,15 @@ DiscoveryResult DiscoverTables(const ProfileBundle& profile,
     scans.reserve(profile_table.rows.size());
     bool scan_incomplete = false;
     for (const auto& fingerprint : profile_table.rows) {
+      if (deadline.Expired()) return timed_out();
       const FingerprintKey key{fingerprint.pattern, fingerprint.mask};
       auto [cached, inserted] = scan_cache.try_emplace(key);
       if (inserted) {
-        cached->second = backend.Scan(fingerprint, kMaxFingerprintMatches);
+        cached->second = backend.Scan(fingerprint, kMaxFingerprintMatches,
+                                      deadline);
+      }
+      if (cached->second.code == "OPERATION_TIMEOUT" || deadline.Expired()) {
+        return timed_out();
       }
       scans.push_back(cached->second);
       scan_incomplete = scan_incomplete || !scans.back().complete;
@@ -139,6 +149,7 @@ DiscoveryResult DiscoverTables(const ProfileBundle& profile,
       for (std::size_t b = a + 1; b + 1 < profile_table.rows.size(); ++b) {
         for (std::size_t c = b + 1; c < profile_table.rows.size(); ++c) {
           for (const auto& ma : scans[a].matches) {
+            if (deadline.Expired()) return timed_out();
             for (const auto& mb : scans[b].matches) {
               for (const auto& mc : scans[c].matches) {
                 const auto ab = PairStride(profile_table.rows[a], ma,
@@ -181,7 +192,7 @@ DiscoveryResult DiscoverTables(const ProfileBundle& profile,
                         std::numeric_limits<std::uintptr_t>::max() -
                             ma.allocation_base ||
                     base + extent > ma.allocation_base + ma.allocation_size ||
-                    !backend.AllocationExists(base, extent)) {
+                    !backend.AllocationExists(base, extent, deadline)) {
                   allocation_invalid = true;
                   continue;
                 }
@@ -204,6 +215,7 @@ DiscoveryResult DiscoverTables(const ProfileBundle& profile,
     std::vector<Candidate> stable_candidates;
     bool unstable = false;
     for (const auto& [base, candidate] : structural_candidates) {
+      if (deadline.Expired()) return timed_out();
       std::vector<ReadRequest> requests;
       for (const auto& fingerprint : profile_table.rows) {
         if (MultiplyOverflows(fingerprint.row_index,
@@ -259,6 +271,7 @@ DiscoveryResult DiscoverTables(const ProfileBundle& profile,
   }
   for (std::size_t source_index = 0; source_index < profile.tables.size();
        ++source_index) {
+    if (deadline.Expired()) return timed_out();
     const auto& source_profile = profile.tables[source_index];
     auto& source = result.tables[source_index];
     if (source.state != TableState::kResolved) continue;

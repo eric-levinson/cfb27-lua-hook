@@ -124,7 +124,8 @@ class Backend final : public DiscoveryBackend, public cfb27::memory::MemoryBacke
  public:
   std::map<std::uintptr_t, std::vector<std::uint8_t>> records;
   std::size_t reads{};
-  ScanObservationResult Scan(const RowFingerprint&, std::size_t) override { return {}; }
+  ScanObservationResult Scan(const RowFingerprint&, std::size_t,
+                             const DiscoveryDeadline&) override { return {}; }
   bool ReadBatch(std::span<const ReadRequest> requests,
                  std::vector<std::vector<std::uint8_t>>& output) override {
     output.clear();
@@ -145,7 +146,8 @@ class Backend final : public DiscoveryBackend, public cfb27::memory::MemoryBacke
     }
     return true;
   }
-  bool AllocationExists(std::uintptr_t, std::size_t) override { return true; }
+  bool AllocationExists(std::uintptr_t, std::size_t,
+                        const DiscoveryDeadline&) override { return true; }
   bool Validate(std::uintptr_t address, std::size_t size, bool) override {
     return std::any_of(records.begin(), records.end(), [&](const auto& item) {
       return address >= item.first && address + size >= address &&

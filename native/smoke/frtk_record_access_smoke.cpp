@@ -75,7 +75,8 @@ class Backend final : public DiscoveryBackend, public cfb27::memory::MemoryBacke
   std::map<std::uintptr_t, std::vector<std::uint8_t>> records;
   std::map<std::uintptr_t, std::vector<std::uint8_t>> validation_reads;
   std::size_t record_reads{};
-  ScanObservationResult Scan(const RowFingerprint&, std::size_t) override { return {}; }
+  ScanObservationResult Scan(const RowFingerprint&, std::size_t,
+                             const DiscoveryDeadline&) override { return {}; }
   bool ReadBatch(std::span<const ReadRequest> requests,
                  std::vector<std::vector<std::uint8_t>>& out) override {
     out.clear();
@@ -87,7 +88,8 @@ class Backend final : public DiscoveryBackend, public cfb27::memory::MemoryBacke
     }
     return true;
   }
-  bool AllocationExists(std::uintptr_t, std::size_t) override { return true; }
+  bool AllocationExists(std::uintptr_t, std::size_t,
+                        const DiscoveryDeadline&) override { return true; }
   bool Validate(std::uintptr_t address, std::size_t size, bool) override {
     return records.contains(address) && records[address].size() == size;
   }
@@ -112,7 +114,8 @@ class LinearBackend final : public DiscoveryBackend,
     for (std::size_t index = 0; index < value.size(); ++index)
       bytes[address + index] = value[index];
   }
-  ScanObservationResult Scan(const RowFingerprint&, std::size_t) override {
+  ScanObservationResult Scan(const RowFingerprint&, std::size_t,
+                             const DiscoveryDeadline&) override {
     return {};
   }
   bool ReadBatch(std::span<const ReadRequest> requests,
@@ -125,7 +128,8 @@ class LinearBackend final : public DiscoveryBackend,
     }
     return true;
   }
-  bool AllocationExists(std::uintptr_t, std::size_t) override { return true; }
+  bool AllocationExists(std::uintptr_t, std::size_t,
+                        const DiscoveryDeadline&) override { return true; }
   bool Validate(std::uintptr_t address, std::size_t size, bool) override {
     for (std::size_t index = 0; index < size; ++index)
       if (!bytes.contains(address + index)) return false;

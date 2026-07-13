@@ -3,11 +3,13 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <iostream>
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -155,9 +157,16 @@ class FakeBackend final : public DiscoveryBackend {
   }
 
   ScanObservationResult Scan(const RowFingerprint& fingerprint,
-                             std::size_t max_matches) override {
+                             std::size_t max_matches,
+                             const DiscoveryDeadline& deadline) override {
     ++scan_count;
     max_requested_matches = std::max(max_requested_matches, max_matches);
+    if (slow_after_scan && scan_count >= slow_after_scan) {
+      while (!deadline.Expired()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      return {.complete = false, .code = "OPERATION_TIMEOUT"};
+    }
     ScanObservationResult result{.complete = true};
     for (const auto& allocation : allocations) {
       for (std::size_t offset = 0;
@@ -197,8 +206,15 @@ class FakeBackend final : public DiscoveryBackend {
     return true;
   }
 
-  bool AllocationExists(std::uintptr_t base, std::size_t size) override {
+  bool AllocationExists(std::uintptr_t base, std::size_t size,
+                        const DiscoveryDeadline& deadline) override {
     ++allocation_checks;
+    if (slow_allocation) {
+      while (!deadline.Expired()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      return false;
+    }
     return Find(base, size) != nullptr;
   }
 
@@ -220,6 +236,8 @@ class FakeBackend final : public DiscoveryBackend {
   std::size_t max_batch_size{};
   std::size_t allocation_checks{};
   bool mutate_reread{};
+  std::size_t slow_after_scan{};
+  bool slow_allocation{};
 };
 
 const TableDiscovery& State(const DiscoveryResult& result,
@@ -426,6 +444,40 @@ void TestDistinctFingerprintsScanOnceGlobally() {
           "discovery requested more than eight matches for a fingerprint");
 }
 
+void TestDeadlineRejectsPartialDiscovery() {
+  auto bundle = Bundle();
+  FakeBackend backend;
+  InstallGraph(bundle, backend);
+  backend.slow_after_scan = 4;
+  const auto started = std::chrono::steady_clock::now();
+  const auto result = DiscoverTables(
+      bundle, backend,
+      DiscoveryDeadline(std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(25)));
+  const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - started);
+  Require(!result.valid && result.code == "OPERATION_TIMEOUT",
+          "deadline returns deterministic discovery timeout");
+  Require(result.tables.empty(), "deadline does not publish partial tables");
+  Require(elapsed < std::chrono::milliseconds(500),
+          "native deadline terminates well before SDK timeout");
+}
+
+void TestDeadlineBoundsAllocationValidation() {
+  auto bundle = Bundle();
+  bundle.tables.resize(1);
+  FakeBackend backend;
+  backend.PutTable(bundle.tables[0], 0x100000);
+  backend.slow_allocation = true;
+  const auto result = DiscoverTables(
+      bundle, backend,
+      DiscoveryDeadline(std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(25)));
+  Require(!result.valid && result.code == "OPERATION_TIMEOUT" &&
+              result.tables.empty(),
+          "allocation validation deadline publishes no partial table");
+}
+
 void TestRelationshipsUseIndependentResolutionSnapshot() {
   auto bundle = Bundle();
   bundle.tables[4].relationships[0].target_table_id = 4288;
@@ -520,6 +572,8 @@ int main() {
     TestStabilityAndRelationships();
     TestPersistentUniqueIdentityAndBuildLocalReferences();
     TestDistinctFingerprintsScanOnceGlobally();
+    TestDeadlineRejectsPartialDiscovery();
+    TestDeadlineBoundsAllocationValidation();
     TestRelationshipsUseIndependentResolutionSnapshot();
     TestSchemaAuthoritativeRelationshipFields();
     std::cout << "frtk discovery smoke passed\n";

@@ -4,12 +4,30 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <chrono>
 #include <optional>
 #include <span>
 #include <string>
 #include <vector>
 
 namespace cfb27::frtk {
+
+class DiscoveryDeadline {
+ public:
+  DiscoveryDeadline() = default;
+  explicit DiscoveryDeadline(std::chrono::steady_clock::time_point deadline)
+      : deadline_(deadline) {}
+  [[nodiscard]] bool Expired() const {
+    return std::chrono::steady_clock::now() >= deadline_;
+  }
+  [[nodiscard]] std::chrono::steady_clock::time_point time_point() const {
+    return deadline_;
+  }
+
+ private:
+  std::chrono::steady_clock::time_point deadline_{
+      std::chrono::steady_clock::time_point::max()};
+};
 
 struct ScanObservation {
   std::uintptr_t address{};
@@ -32,11 +50,13 @@ class DiscoveryBackend {
  public:
   virtual ~DiscoveryBackend() = default;
   virtual ScanObservationResult Scan(const RowFingerprint& fingerprint,
-                                     std::size_t max_matches) = 0;
+                                     std::size_t max_matches,
+                                     const DiscoveryDeadline& deadline) = 0;
   virtual bool ReadBatch(
       std::span<const ReadRequest> requests,
       std::vector<std::vector<std::uint8_t>>& out) = 0;
-  virtual bool AllocationExists(std::uintptr_t base, std::size_t size) = 0;
+  virtual bool AllocationExists(std::uintptr_t base, std::size_t size,
+                                const DiscoveryDeadline& deadline = {}) = 0;
 };
 
 enum class TableState {
@@ -79,6 +99,7 @@ struct DiscoveryResult {
 };
 
 DiscoveryResult DiscoverTables(const ProfileBundle& profile,
-                               DiscoveryBackend& backend);
+                               DiscoveryBackend& backend,
+                               const DiscoveryDeadline& deadline = {});
 
 }  // namespace cfb27::frtk

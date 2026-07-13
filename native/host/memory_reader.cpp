@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <charconv>
 #include <cctype>
+#include <cstring>
 #include <limits>
 #include <system_error>
 #include <unordered_map>
@@ -64,14 +65,6 @@ bool IsWithinOneEligibleRegion(std::uintptr_t address, std::size_t length) {
   return address + length <= base + info.RegionSize;
 }
 
-bool PatternMatches(const std::uint8_t* bytes, const ScanRequest& request) {
-  for (std::size_t i = 0; i < request.pattern.size(); ++i) {
-    if ((bytes[i] & request.mask.data()[i]) !=
-        (request.pattern.data()[i] & request.mask.data()[i])) return false;
-  }
-  return true;
-}
-
 bool OverlapsRange(std::uintptr_t candidate, std::size_t candidate_length,
                    const void* excluded_data, std::size_t excluded_length) {
   if (excluded_data == nullptr || excluded_length == 0) return false;
@@ -104,6 +97,69 @@ bool ProductionRead(const void* source, void* destination, std::size_t length,
 
 }  // namespace
 
+std::size_t detail::MaskedPatternMatcher::selected_byte_count() const {
+  return checks_.size();
+}
+
+std::size_t detail::MaskedPatternMatcher::anchor_offset() const {
+  return checks_.empty() ? 0 : checks_.front().offset;
+}
+
+std::optional<std::size_t> detail::MaskedPatternMatcher::FindNext(
+    std::span<const std::uint8_t> bytes, std::size_t first_candidate,
+    std::size_t candidate_end, MatchStatistics* statistics) const {
+  if (first_candidate >= candidate_end || pattern_size_ > bytes.size() ||
+      candidate_end > bytes.size() - pattern_size_ + 1) {
+    return std::nullopt;
+  }
+  if (checks_.empty()) return first_candidate;
+  auto candidate = first_candidate;
+  while (candidate < candidate_end) {
+    const auto& anchor = checks_.front();
+    if (anchor.mask == 0xFF) {
+      const auto* begin = bytes.data() + candidate + anchor.offset;
+      const auto count = candidate_end - candidate;
+      const auto* found = static_cast<const std::uint8_t*>(
+          std::memchr(begin, anchor.value, count));
+      if (found == nullptr) return std::nullopt;
+      candidate += static_cast<std::size_t>(found - begin);
+    }
+    if (statistics) ++statistics->candidates_checked;
+    bool matches = true;
+    for (const auto& check : checks_) {
+      if (statistics) ++statistics->selected_byte_comparisons;
+      if ((bytes[candidate + check.offset] & check.mask) != check.value) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) return candidate;
+    ++candidate;
+  }
+  return std::nullopt;
+}
+
+std::optional<detail::MaskedPatternMatcher> detail::CompileMaskedPattern(
+    std::span<const std::uint8_t> pattern,
+    std::span<const std::uint8_t> mask) {
+  if (pattern.empty() || pattern.size() != mask.size()) return std::nullopt;
+  MaskedPatternMatcher matcher;
+  matcher.pattern_size_ = pattern.size();
+  for (std::size_t offset = 0; offset < mask.size(); ++offset) {
+    if (mask[offset] == 0) continue;
+    matcher.checks_.push_back(
+        {.offset = offset, .mask = mask[offset],
+         .value = static_cast<std::uint8_t>(pattern[offset] & mask[offset])});
+  }
+  const auto full_anchor = std::find_if(
+      matcher.checks_.begin(), matcher.checks_.end(),
+      [](const auto& check) { return check.mask == 0xFF; });
+  if (full_anchor != matcher.checks_.end()) {
+    std::iter_swap(matcher.checks_.begin(), full_anchor);
+  }
+  return matcher;
+}
+
 MappedBytes::~MappedBytes() {
   if (view_ != nullptr) {
     SecureZeroMemory(view_, size_);
@@ -127,7 +183,8 @@ struct AllocationExtent {
 std::optional<AllocationMetadata> ResolveAllocationMetadata(
     std::uintptr_t match_address, const MEMORY_BASIC_INFORMATION& match_info,
     std::uintptr_t maximum, ScanQueryFunction query,
-    std::unordered_map<std::uintptr_t, AllocationExtent>& extents) {
+    std::unordered_map<std::uintptr_t, AllocationExtent>& extents,
+    const std::function<bool()>& should_cancel) {
   const auto allocation_base =
       reinterpret_cast<std::uintptr_t>(match_info.AllocationBase);
   if (allocation_base == 0 || match_address < allocation_base) return std::nullopt;
@@ -139,6 +196,7 @@ std::optional<AllocationMetadata> ResolveAllocationMetadata(
     DWORD allocation_protection = 0;
     bool first = true;
     while (cursor <= maximum) {
+      if (should_cancel && should_cancel()) return std::nullopt;
       MEMORY_BASIC_INFORMATION info{};
       if (query(reinterpret_cast<const void*>(cursor), &info, sizeof(info)) !=
           sizeof(info)) {
@@ -339,12 +397,18 @@ BatchReadResult ReadMemoryBatch(const std::vector<ReadRange>& ranges) {
 ScanResult ScanPrivateMemory(const ScanRequest& request, ScanReadFunction read,
                              ScanQueryFunction query) {
   ScanResult result;
-  if (request.pattern.size() < kMinPatternBytes ||
+  const auto minimum_pattern_bytes =
+      request.purpose == ScanPurpose::kFrtkInternal ? kMinFrtkPatternBytes
+                                                    : kMinPatternBytes;
+  const auto matcher = detail::CompileMaskedPattern(request.pattern.bytes(),
+                                                     request.mask.bytes());
+  if (request.pattern.size() < minimum_pattern_bytes ||
       request.pattern.size() > kMaxPatternBytes ||
       request.mask.size() != request.pattern.size() || request.max_matches == 0 ||
       request.max_matches > kMaxMatches ||
       SizeAddOverflows(request.context_before, request.context_after) ||
-      request.context_before + request.context_after > kMaxContextBytes) {
+      request.context_before + request.context_after > kMaxContextBytes ||
+      !matcher) {
     result.code = kInvalidRequest;
     return result;
   }
@@ -379,6 +443,11 @@ ScanResult ScanPrivateMemory(const ScanRequest& request, ScanReadFunction read,
   result.matches.reserve(request.max_matches + 1);
 
   while (cursor <= maximum) {
+    if (request.should_cancel && request.should_cancel()) {
+      result.matches.clear();
+      result.code = "OPERATION_TIMEOUT";
+      return result;
+    }
     MEMORY_BASIC_INFORMATION info{};
     if (query_region(reinterpret_cast<const void*>(cursor), &info, sizeof(info)) != sizeof(info)) {
       result.code = kMemoryAccessDenied;
@@ -421,6 +490,11 @@ ScanResult ScanPrivateMemory(const ScanRequest& request, ScanReadFunction read,
     const auto lookahead = std::min<std::uintptr_t>(
         request.pattern.size() - 1, region_end - after_unique);
     const auto read_bytes = static_cast<std::size_t>(unique_bytes + lookahead);
+    if (request.should_cancel && request.should_cancel()) {
+      result.matches.clear();
+      result.code = "OPERATION_TIMEOUT";
+      return result;
+    }
     std::size_t copied = 0;
     if (!read_chunk(reinterpret_cast<const void*>(cursor), scan_buffer->data(), read_bytes,
                     copied) || copied != read_bytes) {
@@ -430,15 +504,31 @@ ScanResult ScanPrivateMemory(const ScanRequest& request, ScanReadFunction read,
 
     if (read_bytes >= request.pattern.size()) {
       const auto last_offset = read_bytes - request.pattern.size();
-      for (std::size_t offset = 0; offset <= last_offset; ++offset) {
+      constexpr std::size_t kCancellationCandidateWindow = 4096;
+      std::size_t offset = 0;
+      while (offset <= last_offset) {
+        if (request.should_cancel && request.should_cancel()) {
+          result.matches.clear();
+          result.code = "OPERATION_TIMEOUT";
+          return result;
+        }
+        const auto candidate_end = std::min(
+            last_offset + 1, offset + kCancellationCandidateWindow);
+        const auto found = matcher->FindNext(scan_buffer->bytes(), offset,
+                                             candidate_end);
+        if (!found) {
+          offset = candidate_end;
+          continue;
+        }
+        offset = *found;
         const auto match_address = cursor + offset;
         if (match_address >= after_unique) break;
         if (OverlapsRange(match_address, request.pattern.size(), request.pattern.data(),
                           request.pattern.size()) ||
             OverlapsRange(match_address, request.pattern.size(), request.mask.data(),
                           request.mask.size()) ||
-            OverlapsMatchContext(match_address, request.pattern.size(), result) ||
-            !PatternMatches(scan_buffer->data() + offset, request)) {
+            OverlapsMatchContext(match_address, request.pattern.size(), result)) {
+          ++offset;
           continue;
         }
 
@@ -464,10 +554,13 @@ ScanResult ScanPrivateMemory(const ScanRequest& request, ScanReadFunction read,
         match.context = std::move(*context);
         if (request.include_allocation_metadata) {
           match.allocation = ResolveAllocationMetadata(
-              match_address, info, maximum, query_region, allocation_extents);
+              match_address, info, maximum, query_region, allocation_extents,
+              request.should_cancel);
           if (!match.allocation) {
             result.matches.clear();
-            result.code = kMemoryAccessDenied;
+            result.code = request.should_cancel && request.should_cancel()
+                              ? "OPERATION_TIMEOUT"
+                              : kMemoryAccessDenied;
             return result;
           }
         }
@@ -477,6 +570,7 @@ ScanResult ScanPrivateMemory(const ScanRequest& request, ScanReadFunction read,
           result.code = "TOO_MANY_MATCHES";
           return result;
         }
+        ++offset;
       }
     }
 

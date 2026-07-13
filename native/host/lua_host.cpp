@@ -265,10 +265,12 @@ class ProcessDiscoveryBackend final : public cfb27::frtk::DiscoveryBackend {
  public:
   cfb27::frtk::ScanObservationResult Scan(
       const cfb27::frtk::RowFingerprint& fingerprint,
-      std::size_t max_matches) override {
+      std::size_t max_matches,
+      const cfb27::frtk::DiscoveryDeadline& deadline) override {
     cfb27::frtk::ScanObservationResult output{.complete = false};
     std::optional<std::string> cursor;
     for (std::size_t page = 0; page < 4096; ++page) {
+      if (deadline.Expired()) return {.code = "OPERATION_TIMEOUT"};
       auto pattern = cfb27::memory::MappedBytes::CopyFrom(fingerprint.pattern);
       auto mask = cfb27::memory::MappedBytes::CopyFrom(fingerprint.mask);
       if (!pattern || !mask) return {.code = "scan_setup_failed"};
@@ -276,7 +278,9 @@ class ProcessDiscoveryBackend final : public cfb27::frtk::DiscoveryBackend {
           .pattern = std::move(*pattern), .mask = std::move(*mask),
           .max_matches = max_matches, .context_before = 0,
           .context_after = 0, .cursor = cursor,
-          .include_allocation_metadata = true};
+          .include_allocation_metadata = true,
+          .purpose = cfb27::memory::ScanPurpose::kFrtkInternal,
+          .should_cancel = [&deadline] { return deadline.Expired(); }};
       auto result = cfb27::memory::ScanPrivateMemory(request);
       if (!result.code.empty()) return {.code = result.code};
       for (const auto& match : result.matches) {
@@ -317,13 +321,16 @@ class ProcessDiscoveryBackend final : public cfb27::frtk::DiscoveryBackend {
     return true;
   }
 
-  bool AllocationExists(std::uintptr_t base, std::size_t size) override {
+  bool AllocationExists(
+      std::uintptr_t base, std::size_t size,
+      const cfb27::frtk::DiscoveryDeadline& deadline) override {
     if (!base || !size || size > std::numeric_limits<std::uintptr_t>::max() - base)
       return false;
     std::uintptr_t cursor = base;
     const auto end = base + size;
     std::uintptr_t allocation_base = 0;
     while (cursor < end) {
+      if (deadline.Expired()) return false;
       MEMORY_BASIC_INFORMATION info{};
       if (VirtualQuery(reinterpret_cast<const void*>(cursor), &info, sizeof(info)) !=
               sizeof(info) || info.State != MEM_COMMIT || info.RegionSize == 0)
@@ -1238,8 +1245,24 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
     std::lock_guard lock(g_frtk_mutex);
     if (!g_frtk_profile)
       return ErrorResponse(id, "FRTK_PROFILE_INVALID", "No FrTk profile is loaded");
+    constexpr auto kDiscoveryBudget = std::chrono::milliseconds(2000);
+    const auto discovery_budget =
+        SmokeWritesAllowed() &&
+                EnvironmentIsOne(L"CFB27_SMOKE_FRTK_TIMEOUT")
+            ? std::chrono::milliseconds(0)
+            : kDiscoveryBudget;
+    const cfb27::frtk::DiscoveryDeadline deadline(
+        std::chrono::steady_clock::now() + discovery_budget);
     ProcessDiscoveryBackend backend;
-    const auto discovery = cfb27::frtk::DiscoverTables(*g_frtk_profile, backend);
+    const auto discovery = cfb27::frtk::DiscoverTables(
+        *g_frtk_profile, backend, deadline);
+    if (!discovery.valid && discovery.code == "OPERATION_TIMEOUT") {
+      cfb27::frtk::DiscoveryResult rejected{.valid = false,
+                                            .code = "discovery_failed"};
+      (void)g_frtk_catalog.Install(*g_frtk_profile, rejected);
+      return ErrorResponse(id, "FRTK_DISCOVERY_TIMEOUT",
+                           "FrTk discovery exceeded its native operation budget");
+    }
     const bool complete = discovery.valid &&
         discovery.tables.size() == g_frtk_profile->tables.size() &&
         std::all_of(discovery.tables.begin(), discovery.tables.end(),
