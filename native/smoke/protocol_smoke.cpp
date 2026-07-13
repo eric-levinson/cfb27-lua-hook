@@ -378,13 +378,16 @@ int wmain(int argc, wchar_t** argv) {
     frtk_bytes[index] = static_cast<std::uint8_t>(
         ((seed >> ((index % 8) * 8)) + index * 73 + (index / 16) * 41) & 0xFF);
   }
-  frtk_bytes[0] = 0x34; frtk_bytes[1] = 0x12; frtk_bytes[2] = 7;
-  frtk_bytes[16] = 0x78; frtk_bytes[17] = 0x56; frtk_bytes[18] = 8;
+  frtk_bytes[0] = 0x12; frtk_bytes[1] = 0x34; frtk_bytes[2] = 7;
+  frtk_bytes[16] = 0x56; frtk_bytes[17] = 0x78; frtk_bytes[18] = 8;
   for (std::uint32_t row = 0; row < 3; ++row) {
     for (std::size_t field = 3; field <= 9; ++field)
       frtk_bytes[row * 16 + field] = static_cast<std::uint8_t>(field + row * 10);
     const std::uint32_t packed = (1200u << 17) | row;
-    std::memcpy(frtk_bytes + row * 16 + 10, &packed, sizeof(packed));
+    frtk_bytes[row * 16 + 10] = static_cast<std::uint8_t>(packed >> 24);
+    frtk_bytes[row * 16 + 11] = static_cast<std::uint8_t>(packed >> 16);
+    frtk_bytes[row * 16 + 12] = static_cast<std::uint8_t>(packed >> 8);
+    frtk_bytes[row * 16 + 13] = static_cast<std::uint8_t>(packed);
   }
 
   if (argc != 2) return 2;
@@ -560,7 +563,7 @@ int wmain(int argc, wchar_t** argv) {
                       {"command", "evaluate"},
                       {"params", {{"source", lua_database_source}}}},
                response, false) || !response.value("ok", false) ||
-      frtk_bytes[0] != 0x34 || frtk_bytes[1] != 0x12) return 138;
+      frtk_bytes[0] != 0x12 || frtk_bytes[1] != 0x34) return 138;
   const std::vector<Json> invalid_reads{
       {{"generation", generation}, {"records", "not-an-array"}},
       {{"generation", generation}, {"records", Json::array()}, {"unexpected", true}},

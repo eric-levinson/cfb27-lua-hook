@@ -74,6 +74,18 @@ test('profile identity binds the complete canonical field layout', () => {
   assert.notEqual(first.profile.profileId, second.profile.profileId);
 });
 
+test('compiler accepts a 32-bit field spanning a five-byte MSB-first window', () => {
+  const inputs = makeSyntheticInputs();
+  const table = inputs.layout.tables[0];
+  table.fields = [{
+    name: 'FiveByteWindow', encoding: 'unsigned', byteOffset: 0, storageBytes: 5,
+    bitOffset: 4, bitWidth: 32, minimum: 0, maximum: 0xFFFFFFFF,
+    referenceTableId: null,
+  }];
+  const artifacts = compileFrtkArtifacts(inputs);
+  assert.equal(artifacts.layout.tables[0].fields[0].storageBytes, 5);
+});
+
 test('version-1 compiler rejects attempts to promote file artifact authority', () => {
   for (const authorityStatus of ['commit_adapter_required', 'direct_verified']) {
     const inputs = makeSyntheticInputs();

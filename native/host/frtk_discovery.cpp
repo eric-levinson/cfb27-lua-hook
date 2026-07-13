@@ -63,10 +63,10 @@ void Reject(TableDiscovery& table, TableState state, std::string code) {
   table.evidence.push_back({.code = std::move(code)});
 }
 
-std::uint32_t ReadLittleEndian(std::span<const std::uint8_t> bytes) {
+std::uint32_t ReadBigEndian(std::span<const std::uint8_t> bytes) {
   std::uint32_t value{};
   for (std::size_t i = 0; i < bytes.size() && i < sizeof(value); ++i) {
-    value |= static_cast<std::uint32_t>(bytes[i]) << (i * 8);
+    value = (value << 8) | bytes[i];
   }
   return value;
 }
@@ -322,7 +322,7 @@ DiscoveryResult DiscoverTables(const ProfileBundle& profile,
                "RELATIONSHIP_READ_FAILED");
         break;
       }
-      const auto decoded = DecodePackedReference(ReadLittleEndian(bytes[0]));
+      const auto decoded = DecodePackedReference(ReadBigEndian(bytes[0]));
       if (decoded.table_id != relationship.target_table_id ||
           decoded.row_index != relationship.target_row ||
           target.unique_id != target_profile->unique_id) {

@@ -23,6 +23,13 @@ Generations are lifecycle tokens. Loading, discovering, or invalidating clears
 locally cached authority. Callers must use the latest generation; stale access
 returns `FRTK_CATALOG_STALE`.
 
+Version-1 layouts describe FrTk physical record storage: `byteOffset` selects
+the first byte, `bitOffset` counts from the most-significant bit of a one- to
+five-byte big-endian storage window, and writes preserve every unrelated bit.
+Packed-reference numbers remain `(tableId << 17) | row`, stored in exactly four
+big-endian bytes. These details stay inside the typed host; public callers pass
+field names and typed values, not byte or bit positions.
+
 The CLI is intentionally stateless: catalog inspection and record reads each
 require a profile path, then load, discover, and operate within that invocation.
 Every discovery creates a fresh generation and stales prior handles. CLI record

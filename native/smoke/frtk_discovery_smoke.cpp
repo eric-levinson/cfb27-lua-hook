@@ -147,7 +147,10 @@ class FakeBackend final : public DiscoveryBackend {
                     std::uint16_t target_table, std::uint32_t target_row) {
     std::vector<std::uint8_t> bytes(4);
     const auto encoded = EncodePackedReference({target_table, target_row});
-    std::memcpy(bytes.data(), &encoded, sizeof(encoded));
+    bytes[0] = static_cast<std::uint8_t>(encoded >> 24);
+    bytes[1] = static_cast<std::uint8_t>(encoded >> 16);
+    bytes[2] = static_cast<std::uint8_t>(encoded >> 8);
+    bytes[3] = static_cast<std::uint8_t>(encoded);
     Put(table_base + source_row * 8 + 4, bytes);
   }
 

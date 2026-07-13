@@ -176,10 +176,10 @@ EvidenceFixture BoundedEvidenceFixture(std::size_t sentinel_count,
     const auto packed = static_cast<std::uint32_t>(100u << 17);
     const auto address = base + 4;
     fixture.backend.reads[address] = {
-        static_cast<std::uint8_t>(packed),
-        static_cast<std::uint8_t>(packed >> 8),
+        static_cast<std::uint8_t>(packed >> 24),
         static_cast<std::uint8_t>(packed >> 16),
-        static_cast<std::uint8_t>(packed >> 24)};
+        static_cast<std::uint8_t>(packed >> 8),
+        static_cast<std::uint8_t>(packed)};
     const auto insertion = std::find(fixture.expected_addresses.begin(),
                                      fixture.expected_addresses.end(), base);
     fixture.expected_addresses.insert(insertion +
@@ -198,7 +198,7 @@ Backend ValidBackend() {
   Backend backend;
   backend.reads = {{0x1000, {1, 2}}, {0x1008, {3, 4}}, {0x1010, {5, 6}},
                    {0x2000, {7, 8}}, {0x2008, {9, 10}}, {0x2010, {11, 12}},
-                   {0x200C, {2, 0, 44, 0}}};
+                   {0x200C, {0, 44, 0, 2}}};
   return backend;
 }
 
@@ -320,7 +320,7 @@ void TestLifecycleAndRevalidation() {
 
   catalog.Install(profile, discovery);
   backend = ValidBackend();
-  backend.reads[0x200C] = {3, 0, 44, 0};
+  backend.reads[0x200C] = {0, 44, 0, 3};
   Require(!catalog.Revalidate(backend) && !catalog.GetHandle(330033) &&
               catalog.GetHandle(220022).has_value(),
           "relationship failure did not quarantine dependent descriptor");

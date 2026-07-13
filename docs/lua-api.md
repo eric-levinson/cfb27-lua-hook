@@ -31,6 +31,12 @@ only inside typed decoding and write planning and are never accepted from Lua.
 References whose Unique ID or decoded build-local target is not active in the
 current catalog fail closed.
 
+The installed version-1 layout maps each field from its first physical byte and
+an MSB-first bit offset within a one- to five-byte big-endian storage window.
+Field writes preserve bits outside that window's field mask. Packed references
+use `(tableId << 17) | row` in exactly four big-endian bytes; Lua continues to
+see only `{ uniqueId = ..., row = ... }`, never those build-local bits or IDs.
+
 `Transaction` records typed changes during its callback, rejects nesting and
 duplicate changes to the same record field, rereads complete records, and
 submits one guarded transaction. Writes are available only when the installed

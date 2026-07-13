@@ -162,8 +162,8 @@ LinearBackend EvidenceBackend() {
   backend.Store(0x1000, {0x11, 0x2F, 0, 0, 0, 0, 0, 0});
   backend.Store(0x1008, {0, 0, 0, 0, 0, 0, 0, 0});
   backend.Store(0x1010, {0, 0, 0, 0, 0, 0, 0, 0});
-  backend.Store(0x2000, {0xA1, 0x34, 0x12, 0x78, 2, 0, 44, 0});
-  backend.Store(0x2008, {0xA1, 0x44, 0x33, 0x78, 2, 0, 44, 0});
+  backend.Store(0x2000, {0xA1, 0x12, 0x34, 0x78, 0, 44, 0, 2});
+  backend.Store(0x2008, {0xA1, 0x33, 0x44, 0x78, 0, 44, 0, 2});
   return backend;
 }
 
@@ -172,7 +172,7 @@ void TestReadsAndValidation() {
   SessionCatalog catalog;
   catalog.Install(profile, Discovery());
   Backend backend;
-  backend.records[0x2000] = {0xAD, 0x34, 0x12, 0, 2, 0, 44, 0};
+  backend.records[0x2000] = {0x9D, 0x12, 0x34, 0, 0, 44, 0, 2};
   RecordAccessor accessor(catalog, profile.schema, backend, backend);
   const auto handle = *catalog.GetHandle(330033);
   const auto read = accessor.ReadFields(handle, 0, {"Flags", "Score", "TargetRef"});
@@ -201,7 +201,7 @@ void TestReadsAndValidation() {
   Require(!unsupported_read.ok && unsupported_read.code == "FIELD_INVALID",
           "unsupported field encoding did not fail closed");
 
-  backend.records[0x2000] = {0, 0, 0, 0, 3, 0, 44, 0};
+  backend.records[0x2000] = {0, 0, 0, 0, 0, 44, 0, 3};
   Require(!accessor.ReadFields(handle, 0, {"TargetRef"}).ok,
           "packed-reference target row bounds ignored");
 }
@@ -211,7 +211,7 @@ void TestPlansAndAuthority() {
   SessionCatalog catalog;
   catalog.Install(profile, Discovery());
   Backend backend;
-  backend.records[0x2000] = {0xA1, 0x34, 0x12, 0x78, 0x56, 4, 0, 44};
+  backend.records[0x2000] = {0xA1, 0x12, 0x34, 0x56, 0x78, 4, 0, 44};
   RecordAccessor accessor(catalog, profile.schema, backend, backend);
   const auto handle = *catalog.GetHandle(330033);
   const auto plan = accessor.PlanFieldWrites(
@@ -219,8 +219,8 @@ void TestPlansAndAuthority() {
                   {"Other", std::int64_t{0x9ABC}}});
   Require(plan.ok && plan.operations.size() == 1,
           "adjacent changes were not collapsed into a minimal byte run");
-  Require(plan.operations[0].expected == std::vector<std::uint8_t>({0xA1, 0x34, 0x12, 0x78, 0x56}) &&
-              plan.operations[0].replacement == std::vector<std::uint8_t>({0xB5, 0x78, 0x56, 0xBC, 0x9A}),
+  Require(plan.operations[0].expected == std::vector<std::uint8_t>({0xA1, 0x12, 0x34, 0x56, 0x78}) &&
+              plan.operations[0].replacement == std::vector<std::uint8_t>({0xA9, 0x56, 0x78, 0x9A, 0xBC}),
           "bitfield write damaged adjacent bits or byte-run contents");
   const auto bad_reference = accessor.PlanFieldWrites(
       handle, 0, {{"TargetRef", PackedReference{22, 3}}});
@@ -267,7 +267,7 @@ void TestPackedReferenceRequiresActiveTarget() {
   catalog.Install(profile, Discovery());
   Backend backend;
   backend.validation_reads[0x1000] = {9};
-  backend.records[0x2000] = {0, 0, 0, 0, 2, 0, 44, 0};
+  backend.records[0x2000] = {0, 0, 0, 0, 0, 44, 0, 2};
   Require(!catalog.Revalidate(backend) && !catalog.GetHandle(220022) &&
               catalog.GetHandle(330033),
           "fixture did not quarantine only packed-reference target");
@@ -301,7 +301,7 @@ void TestEvidenceBoundTransactionRejectsStaleReadableCopy() {
     const auto result =
         cfb27::memory::RunTransaction(guarded.request, backend);
     Require(result.status == cfb27::memory::TransactionStatus::kRejected &&
-                backend.write_calls == 0 && backend.bytes[0x2001] == 0x34,
+                backend.write_calls == 0 && backend.bytes[0x2001] == 0x12,
             "stale readable descriptor copy received a field write");
   }
 }
@@ -326,7 +326,7 @@ void TestEvidenceMergeMultiRecordAndGeneration() {
       [](const auto& operation) { return operation.address == "0x2000"; });
   Require(overlap != guarded.request.operations.end() &&
               overlap->expected == std::vector<std::uint8_t>({0xA1}) &&
-              overlap->replacement == std::vector<std::uint8_t>({0xB5}),
+              overlap->replacement == std::vector<std::uint8_t>({0xA9}),
           "field/sentinel overlap dropped evidence or changed unrequested bits");
   Require(cfb27::memory::RunTransaction(guarded.request, backend).status ==
               cfb27::memory::TransactionStatus::kAppliedVerified,

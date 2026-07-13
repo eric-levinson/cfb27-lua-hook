@@ -25,10 +25,14 @@ A relationship contains `sourceRow`, `fieldName`, `targetTableId`, and `targetRo
 
 The layout root has the same identity keys and a `tables` array. Table identity and dimensions must exactly match the snapshot. Each table adds an `authorityStatus` and all of its `fields`. Authority is one of `discovery_only`, `commit_adapter_required`, or `direct_verified`.
 
-Fields contain `name`, `encoding`, `byteOffset`, `storageBytes`, `bitOffset`, `bitWidth`, `minimum`, `maximum`, and `referenceTableId`. Encodings are `unsigned`, `signed`, `bitfield`, and `packed-reference`. Non-reference fields use `null` for `referenceTableId`. Packed references occupy 32 bits and encode `(tableId << 17) | rowIndex`.
+Fields contain `name`, `encoding`, `byteOffset`, `storageBytes`, `bitOffset`, `bitWidth`, `minimum`, `maximum`, and `referenceTableId`. Encodings are `unsigned`, `signed`, `bitfield`, and `packed-reference`. Non-reference fields use `null` for `referenceTableId`.
+
+Version 1 uses the FrTk physical record layout. `byteOffset` is the first physical byte containing the field, and `bitOffset` counts from the most-significant bit of the `storageBytes` window. The window is assembled in big-endian byte order. For a window of `storageBytes * 8` bits, extraction shifts right by `storageBytes * 8 - bitOffset - bitWidth`; encoding uses the same position and preserves every bit outside the field mask. `storageBytes` is from 1 through 5 so an unaligned field of up to 32 bits can cross five bytes.
+
+Schema export derives layout only from the field's physical `offset`, never `indexOffset`: `byteOffset = floor(offset / 8)`, `bitOffset = offset % 8`, and `storageBytes = ceil((bitOffset + length) / 8)`. Packed references remain exactly four bytes with `bitOffset: 0` and `bitWidth: 32`; their numeric encoding is `(tableId << 17) | rowIndex`, stored as four big-endian record bytes.
 
 ## Determinism
 
 Profile and layout tables are sorted by table ID. Rows are sorted by row index, fields by byte offset, bit offset, then name, and relationships by source row then field name. Name tie-breakers use ascending UTF-8 bytewise ordinal order, independent of locale (so uppercase ASCII sorts before lowercase ASCII). Patterns are masked before emission so unselected record bits cannot affect output.
 
-`profileId` is the uppercase SHA-256 digest of canonical version-1 profile content before the ID is inserted. Paths, timestamps, process addresses, generated-at values, and raw unmasked records are neither emitted nor hashed.
+`profileId` is the uppercase SHA-256 digest of the canonical version-1 profile and complete field-layout artifact before the ID is inserted. Layout changes therefore change profile identity naturally while JS and native loaders retain canonical digest parity. Paths, timestamps, process addresses, generated-at values, and raw unmasked records are neither emitted nor hashed. File artifacts remain `discovery_only`; digest identity never promotes write authority.

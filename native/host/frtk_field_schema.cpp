@@ -111,7 +111,7 @@ void ValidateDefinition(std::span<const std::uint8_t> record,
   if (definition.bit_width < 1 || definition.bit_width > 32) {
     throw std::range_error("bitWidth must be from 1 through 32");
   }
-  if (definition.storage_bytes < 1 || definition.storage_bytes > 4 ||
+  if (definition.storage_bytes < 1 || definition.storage_bytes > 5 ||
       definition.byte_offset > record.size() ||
       definition.storage_bytes > record.size() - definition.byte_offset) {
     throw std::range_error("Field storage exceeds the record bounds");
@@ -157,9 +157,7 @@ std::uint64_t ReadStorage(std::span<const std::uint8_t> record,
                           const FieldDefinition& definition) {
   std::uint64_t result = 0;
   for (std::uint32_t index = 0; index < definition.storage_bytes; ++index) {
-    result |= static_cast<std::uint64_t>(
-                  record[definition.byte_offset + index])
-              << (index * 8);
+    result = (result << 8) | record[definition.byte_offset + index];
   }
   return result;
 }
@@ -179,9 +177,9 @@ FieldDefinition ParseField(const json& field, std::uint32_t record_size) {
       field.at("byteOffset"), 0, std::numeric_limits<std::uint32_t>::max(),
       "Invalid byteOffset"));
   result.storage_bytes = static_cast<std::uint32_t>(
-      IntegerBetween(field.at("storageBytes"), 1, 4, "Invalid storageBytes"));
+      IntegerBetween(field.at("storageBytes"), 1, 5, "Invalid storageBytes"));
   result.bit_offset = static_cast<std::uint32_t>(
-      IntegerBetween(field.at("bitOffset"), 0, 31, "Invalid bitOffset"));
+      IntegerBetween(field.at("bitOffset"), 0, 39, "Invalid bitOffset"));
   result.bit_width = static_cast<std::uint32_t>(
       IntegerBetween(field.at("bitWidth"), 1, 32, "Invalid bitWidth"));
   result.minimum = IntegerBetween(field.at("minimum"),
@@ -374,8 +372,10 @@ DecodedField DecodeField(std::span<const std::uint8_t> record,
   ValidateDefinition(record, definition);
   const std::uint64_t width_mask =
       (std::uint64_t{1} << definition.bit_width) - 1;
+  const auto shift = definition.storage_bytes * 8 - definition.bit_offset -
+                     definition.bit_width;
   const std::uint64_t raw =
-      (ReadStorage(record, definition) >> definition.bit_offset) & width_mask;
+      (ReadStorage(record, definition) >> shift) & width_mask;
   if (definition.encoding == "packed-reference") {
     return DecodePackedReference(raw);
   }
@@ -418,14 +418,18 @@ std::vector<std::uint8_t> EncodeField(
                                 ? (std::uint64_t{1} << definition.bit_width) +
                                       numeric_value
                                 : static_cast<std::uint64_t>(numeric_value);
-  const std::uint64_t field_mask = width_mask << definition.bit_offset;
+  const auto shift = definition.storage_bytes * 8 - definition.bit_offset -
+                     definition.bit_width;
+  const std::uint64_t field_mask = width_mask << shift;
   const std::uint64_t updated_storage =
       (ReadStorage(record, definition) & ~field_mask) |
-      ((raw << definition.bit_offset) & field_mask);
+      ((raw << shift) & field_mask);
   std::vector<std::uint8_t> updated(record.begin(), record.end());
-  for (std::uint32_t index = 0; index < definition.storage_bytes; ++index) {
+  auto remaining = updated_storage;
+  for (std::uint32_t index = definition.storage_bytes; index-- > 0;) {
     updated[definition.byte_offset + index] =
-        static_cast<std::uint8_t>((updated_storage >> (index * 8)) & 0xFF);
+        static_cast<std::uint8_t>(remaining & 0xFF);
+    remaining >>= 8;
   }
   return updated;
 }

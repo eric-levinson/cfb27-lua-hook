@@ -30,10 +30,10 @@ bool MaskedMatches(const RowFingerprint& fingerprint,
   return true;
 }
 
-std::uint32_t ReadLittleEndian(const std::vector<std::uint8_t>& bytes) {
+std::uint32_t ReadBigEndian(const std::vector<std::uint8_t>& bytes) {
   std::uint32_t value{};
   for (std::size_t index = 0; index < bytes.size() && index < 4; ++index) {
-    value |= static_cast<std::uint32_t>(bytes[index]) << (index * 8);
+    value = (value << 8) | bytes[index];
   }
   return value;
 }
@@ -272,7 +272,7 @@ bool SessionCatalog::Revalidate(DiscoveryBackend& backend,
         quarantined.insert(check.source_unique_id);
         continue;
       }
-      const auto decoded = DecodePackedReference(ReadLittleEndian(first.bytes[index]));
+      const auto decoded = DecodePackedReference(ReadBigEndian(first.bytes[index]));
       if (decoded.table_id != check.relationship->target_table_id ||
           decoded.row_index != check.relationship->target_row) {
         quarantined.insert(check.source_unique_id);

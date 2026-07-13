@@ -33,7 +33,7 @@ function normalizeDefinition(record, definition) {
     throw new RangeError('bitWidth must be from 1 through 32');
   }
   if (!isSafeIntegerBetween(byteOffset, 0, Number.MAX_SAFE_INTEGER) ||
-      !isSafeIntegerBetween(storageBytes, 1, 4) || byteOffset + storageBytes > record.length) {
+      !isSafeIntegerBetween(storageBytes, 1, 5) || byteOffset + storageBytes > record.length) {
     throw new RangeError('Field storage exceeds the record bounds');
   }
   if (!isSafeIntegerBetween(bitOffset, 0, storageBytes * 8 - 1) ||
@@ -63,15 +63,17 @@ function normalizeDefinition(record, definition) {
 function readStorage(record, byteOffset, storageBytes) {
   let result = 0n;
   for (let index = 0; index < storageBytes; index += 1) {
-    result |= BigInt(record[byteOffset + index]) << BigInt(index * 8);
+    result = (result << 8n) | BigInt(record[byteOffset + index]);
   }
   return result;
 }
 
 function extractRaw(record, normalized) {
   const mask = (1n << BigInt(normalized.bitWidth)) - 1n;
+  const shift = BigInt((normalized.storageBytes * 8) - normalized.bitOffset -
+    normalized.bitWidth);
   return (readStorage(record, normalized.byteOffset, normalized.storageBytes) >>
-    BigInt(normalized.bitOffset)) & mask;
+    shift) & mask;
 }
 
 function decodeField(record, definition) {
@@ -98,15 +100,19 @@ function encodeField(record, definition, value) {
   }
   const width = BigInt(normalized.bitWidth);
   const raw = numericValue < 0 ? (1n << width) + BigInt(numericValue) : BigInt(numericValue);
-  const fieldMask = ((1n << width) - 1n) << BigInt(normalized.bitOffset);
+  const shift = BigInt((normalized.storageBytes * 8) - normalized.bitOffset -
+    normalized.bitWidth);
+  const fieldMask = ((1n << width) - 1n) << shift;
   const storage = readStorage(record, normalized.byteOffset, normalized.storageBytes);
   const updatedStorage = (storage & ~fieldMask) |
-    ((raw << BigInt(normalized.bitOffset)) & fieldMask);
+    ((raw << shift) & fieldMask);
   const updated = Buffer.from(record);
-  for (let index = 0; index < normalized.storageBytes; index += 1) {
+  let remaining = updatedStorage;
+  for (let index = normalized.storageBytes - 1; index >= 0; index -= 1) {
     updated[normalized.byteOffset + index] = Number(
-      (updatedStorage >> BigInt(index * 8)) & 0xFFn,
+      remaining & 0xFFn,
     );
+    remaining >>= 8n;
   }
   return updated;
 }

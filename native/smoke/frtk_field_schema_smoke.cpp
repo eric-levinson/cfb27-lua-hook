@@ -81,6 +81,50 @@ FieldDefinition Definition(std::string encoding, std::uint32_t byte_offset,
   return result;
 }
 
+std::vector<std::uint8_t> SyntheticRecord(std::size_t length,
+                                          std::uint8_t seed) {
+  std::vector<std::uint8_t> result(length);
+  for (std::size_t index = 0; index < length; ++index) {
+    result[index] = static_cast<std::uint8_t>(seed + index * 0x31);
+  }
+  return result;
+}
+
+std::vector<std::uint8_t> EncodeMsbFirstOracle(
+    std::span<const std::uint8_t> record, const FieldDefinition& definition,
+    std::int64_t numeric_value) {
+  const auto width = definition.bit_width;
+  const auto shift = definition.storage_bytes * 8 - definition.bit_offset - width;
+  std::uint64_t storage = 0;
+  for (std::uint32_t index = 0; index < definition.storage_bytes; ++index) {
+    storage = (storage << 8) | record[definition.byte_offset + index];
+  }
+  const std::uint64_t raw = numeric_value < 0
+                                ? (std::uint64_t{1} << width) + numeric_value
+                                : static_cast<std::uint64_t>(numeric_value);
+  const auto width_mask = (std::uint64_t{1} << width) - 1;
+  const auto field_mask = width_mask << shift;
+  storage = (storage & ~field_mask) | ((raw << shift) & field_mask);
+  std::vector<std::uint8_t> result(record.begin(), record.end());
+  for (std::uint32_t index = definition.storage_bytes; index-- > 0;) {
+    result[definition.byte_offset + index] =
+        static_cast<std::uint8_t>(storage & 0xFF);
+    storage >>= 8;
+  }
+  return result;
+}
+
+std::uint64_t DecodeLittleEndianLsbFirst(
+    std::span<const std::uint8_t> record, const FieldDefinition& definition) {
+  std::uint64_t storage = 0;
+  for (std::uint32_t index = 0; index < definition.storage_bytes; ++index) {
+    storage |= static_cast<std::uint64_t>(record[definition.byte_offset + index])
+               << (index * 8);
+  }
+  return (storage >> definition.bit_offset) &
+         ((std::uint64_t{1} << definition.bit_width) - 1);
+}
+
 void TestSchemaRegistry() {
   cfb27::frtk::SchemaRegistry registry;
   std::string error;
@@ -97,6 +141,14 @@ void TestSchemaRegistry() {
           "field lookup failed");
   Require(registry.FindField(4288, "Missing") == nullptr,
           "unknown field resolved");
+
+  auto five_byte = ValidLayout();
+  five_byte["tables"][0]["fields"] = json::array({
+      Field("FiveByteWindow", "unsigned", 0, 5, 4, 32, 0,
+            0xFFFFFFFFull),
+  });
+  Require(registry.LoadTrustedForTesting(five_byte, &error),
+          "five-byte storage window rejected by schema parser");
 
   auto extra = ValidLayout();
   extra["tables"][0]["fields"][0]["surprise"] = true;
@@ -182,7 +234,8 @@ void TestFieldCodecs() {
                                                 DecodedField{std::int64_t{73}});
   Require(std::get<std::int64_t>(cfb27::frtk::DecodeField(updated, bitfield)) == 73,
           "bitfield round trip failed");
-  Require((updated[0] & 0x1F) == 0x05 && (updated[1] & 0xF0) == 0x50,
+  Require((updated[0] & 0xF8) == (original[0] & 0xF8) &&
+              (updated[1] & 0x0F) == (original[1] & 0x0F),
           "bitfield damaged unrelated bits");
   Require(original == std::vector<std::uint8_t>({0xA5, 0x5A}),
           "input record was mutated");
@@ -195,7 +248,8 @@ void TestFieldCodecs() {
     Require(std::get<std::int64_t>(
                 cfb27::frtk::DecodeField(encoded, signed_field)) == value,
             "signed round trip failed");
-    Require(encoded[0] == 0xAA && (encoded[2] & 0xE0) == 0xA0,
+    Require(encoded[0] == 0xAA && (encoded[1] & 0xC0) == 0x40 &&
+                (encoded[2] & 0x07) == 0x02,
             "signed codec damaged unrelated bits");
   }
   RequireThrows(
@@ -227,6 +281,80 @@ void TestFieldCodecs() {
       "wrong packed target accepted");
 }
 
+void TestFrTkEndianGoldenVectors() {
+  auto reference = Definition("packed-reference", 0, 4, 0, 32, 0,
+                              0xFFFFFFFFull);
+  reference.reference_table_id = 4288;
+  const PackedReference reference_value{4288, 37};
+  const auto packed = cfb27::frtk::EncodePackedReference(reference_value);
+  const std::vector<std::uint8_t> reference_record{
+      static_cast<std::uint8_t>(packed >> 24),
+      static_cast<std::uint8_t>(packed >> 16),
+      static_cast<std::uint8_t>(packed >> 8),
+      static_cast<std::uint8_t>(packed),
+  };
+  Require(std::get<PackedReference>(
+              cfb27::frtk::DecodeField(reference_record, reference)) ==
+              reference_value,
+          "big-endian packed reference decode failed");
+  Require(cfb27::frtk::EncodeField(SyntheticRecord(4, 0x17), reference,
+                                   DecodedField{reference_value}) ==
+              reference_record,
+          "big-endian packed reference encode failed");
+  Require(DecodeLittleEndianLsbFirst(reference_record, reference) != packed,
+          "little-endian packed reference unexpectedly matched");
+
+  const auto unsigned_field = Definition("bitfield", 1, 2, 3, 10, 0, 1023);
+  const auto unsigned_original = SyntheticRecord(4, 0x29);
+  const auto unsigned_expected =
+      EncodeMsbFirstOracle(unsigned_original, unsigned_field, 0x2D3);
+  const auto unsigned_encoded = cfb27::frtk::EncodeField(
+      unsigned_original, unsigned_field, DecodedField{std::int64_t{0x2D3}});
+  Require(unsigned_encoded == unsigned_expected,
+          "10-bit JS/native golden vector mismatch");
+  Require(std::get<std::int64_t>(cfb27::frtk::DecodeField(
+              unsigned_expected, unsigned_field)) == 0x2D3,
+          "10-bit MSB-first decode failed");
+  Require((unsigned_encoded[1] & 0xE0) == (unsigned_original[1] & 0xE0) &&
+              (unsigned_encoded[2] & 0x07) ==
+                  (unsigned_original[2] & 0x07),
+          "10-bit encode damaged prefix or suffix bits");
+  Require(DecodeLittleEndianLsbFirst(unsigned_expected, unsigned_field) !=
+              0x2D3,
+          "little-endian 10-bit interpretation unexpectedly matched");
+
+  const auto signed_field = Definition("signed", 1, 2, 2, 11, -1024, 1023);
+  const auto signed_original = SyntheticRecord(4, 0x6B);
+  const auto signed_expected =
+      EncodeMsbFirstOracle(signed_original, signed_field, -317);
+  const auto signed_encoded = cfb27::frtk::EncodeField(
+      signed_original, signed_field, DecodedField{std::int64_t{-317}});
+  Require(signed_encoded == signed_expected,
+          "signed 11-bit JS/native golden vector mismatch");
+  Require(std::get<std::int64_t>(cfb27::frtk::DecodeField(
+              signed_expected, signed_field)) == -317,
+          "signed 11-bit MSB-first decode failed");
+  Require((signed_encoded[1] & 0xC0) == (signed_original[1] & 0xC0) &&
+              (signed_encoded[2] & 0x07) == (signed_original[2] & 0x07),
+          "signed encode damaged prefix or suffix bits");
+
+  const auto five_byte =
+      Definition("unsigned", 1, 5, 4, 32, 0, 0xFFFFFFFFull);
+  const auto five_original = SyntheticRecord(8, 0x3D);
+  const auto five_expected =
+      EncodeMsbFirstOracle(five_original, five_byte, 0x89ABCDEFull);
+  const auto five_encoded = cfb27::frtk::EncodeField(
+      five_original, five_byte, DecodedField{std::int64_t{0x89ABCDEFull}});
+  Require(five_encoded == five_expected,
+          "five-byte JS/native golden vector mismatch");
+  Require(std::get<std::int64_t>(cfb27::frtk::DecodeField(
+              five_expected, five_byte)) == 0x89ABCDEFull,
+          "five-byte 32-bit decode failed");
+  Require((five_encoded[1] & 0xF0) == (five_original[1] & 0xF0) &&
+              (five_encoded[5] & 0x0F) == (five_original[5] & 0x0F),
+          "five-byte encode damaged prefix or suffix bits");
+}
+
 void TestInvalidDefinitions() {
   auto invalid_signed = Definition("signed", 0, 2, 0, 11, -1025, 1023);
   RequireThrows([&] { cfb27::frtk::DecodeField(std::vector<std::uint8_t>(2),
@@ -249,6 +377,7 @@ int main() {
     TestSchemaRegistry();
     TestPackedReferences();
     TestFieldCodecs();
+    TestFrTkEndianGoldenVectors();
     TestInvalidDefinitions();
     std::cout << "frtk field schema smoke passed\n";
     return 0;

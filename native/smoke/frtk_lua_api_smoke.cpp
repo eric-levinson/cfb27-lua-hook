@@ -182,10 +182,10 @@ void TestReadsErrorsAndInvalidation() {
   SessionCatalog catalog;
   catalog.Install(profile, Discovery());
   Backend backend;
-  backend.records[0x1000] = {0x34, 0x12, 0x0A, 0, 1, 0, 66, 0,
-                             0, 0, 110, 0};
-  backend.records[0x100C] = {7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-  backend.records[0x2000] = {9, 0, 0, 0, 0, 0, 0, 0};
+  backend.records[0x1000] = {0x12, 0x34, 0x5A, 0, 0, 66, 0, 1,
+                             0, 110, 0, 0};
+  backend.records[0x100C] = {0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  backend.records[0x2000] = {0, 9, 0, 0, 0, 0, 0, 0};
   lua_State* state = luaL_newstate();
   luaL_openlibs(state);
   std::mutex catalog_mutex;
@@ -244,9 +244,9 @@ void TestTransactions() {
   SessionCatalog catalog;
   catalog.Install(profile, Discovery());
   Backend backend;
-  backend.records[0x1000] = {1, 0, 0, 0, 1, 0, 66, 0, 0, 0, 110, 0};
+  backend.records[0x1000] = {0, 1, 0, 0, 0, 66, 0, 1, 0, 110, 0, 0};
   backend.records[0x100C] = std::vector<std::uint8_t>(12);
-  backend.records[0x2000] = {9, 0, 0, 0, 0, 0, 0, 0};
+  backend.records[0x2000] = {0, 9, 0, 0, 0, 0, 0, 0};
   lua_State* state = luaL_newstate();
   luaL_openlibs(state);
   std::mutex catalog_mutex;
@@ -356,9 +356,9 @@ void TestTransactionAllocationFailureRecovery() {
   SessionCatalog catalog;
   catalog.Install(profile, Discovery());
   Backend backend;
-  backend.records[0x1000] = {1, 0, 0, 0, 1, 0, 66, 0, 0, 0, 110, 0};
+  backend.records[0x1000] = {0, 1, 0, 0, 0, 66, 0, 1, 0, 110, 0, 0};
   backend.records[0x100C] = std::vector<std::uint8_t>(12);
-  backend.records[0x2000] = {9, 0, 0, 0, 0, 0, 0, 0};
+  backend.records[0x2000] = {0, 9, 0, 0, 0, 0, 0, 0};
   FailOnceAllocator allocator;
   allocator.target_size = sizeudata(0, sizeof(std::uint32_t));
   lua_State* state = lua_newstate(Allocate, &allocator);
