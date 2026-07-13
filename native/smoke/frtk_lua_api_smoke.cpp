@@ -3,7 +3,9 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -12,10 +14,45 @@
 extern "C" {
 #include <lauxlib.h>
 #include <lualib.h>
+#include <lobject.h>
 }
 
 namespace {
 using namespace cfb27::frtk;
+
+struct FailOnceAllocator {
+  int failures_remaining{};
+  size_t target_size{};
+  bool failed{};
+};
+
+void* Allocate(void* user, void* pointer, size_t, size_t size) {
+  auto* allocator = static_cast<FailOnceAllocator*>(user);
+  if (size == 0) {
+    std::free(pointer);
+    return nullptr;
+  }
+  if (allocator->failures_remaining > 0 && size == allocator->target_size) {
+    --allocator->failures_remaining;
+    allocator->failed = true;
+    return nullptr;
+  }
+  return std::realloc(pointer, size);
+}
+
+int ArmAllocationFailure(lua_State* state) {
+  auto* allocator = static_cast<FailOnceAllocator*>(
+      lua_touserdata(state, lua_upvalueindex(1)));
+  allocator->failures_remaining = (std::numeric_limits<int>::max)();
+  return 0;
+}
+
+int DisarmAllocationFailure(lua_State* state) {
+  auto* allocator = static_cast<FailOnceAllocator*>(
+      lua_touserdata(state, lua_upvalueindex(1)));
+  allocator->failures_remaining = 0;
+  return 0;
+}
 
 void Require(bool value, const char* message) {
   if (!value) throw std::runtime_error(message);
@@ -285,12 +322,61 @@ void TestTransactions() {
   )lua");
   lua_close(state);
 }
+
+void TestTransactionAllocationFailureRecovery() {
+  auto profile = Bundle();
+  SessionCatalog catalog;
+  catalog.Install(profile, Discovery());
+  Backend backend;
+  backend.records[0x1000] = {1, 0, 0, 0, 1, 0, 66, 0, 0, 0, 110, 0};
+  backend.records[0x100C] = std::vector<std::uint8_t>(12);
+  backend.records[0x2000] = {9, 0, 0, 0, 0, 0, 0, 0};
+  FailOnceAllocator allocator;
+  allocator.target_size = sizeudata(0, sizeof(std::uint32_t));
+  lua_State* state = lua_newstate(Allocate, &allocator);
+  Require(state != nullptr, "failed to create allocator-test Lua state");
+  luaL_openlibs(state);
+  std::mutex catalog_mutex;
+  LuaDatabaseApi api(catalog, profile.schema, backend, backend,
+      [&](const cfb27::memory::TransactionRequest& request) {
+        return cfb27::memory::RunTransaction(request, backend);
+      }, &catalog_mutex);
+  api.Register(state);
+  lua_pushlightuserdata(state, &allocator);
+  lua_pushcclosure(state, ArmAllocationFailure, 1);
+  lua_setglobal(state, "arm_transaction_allocation_failure");
+  lua_pushlightuserdata(state, &allocator);
+  lua_pushcclosure(state, DisarmAllocationFailure, 1);
+  lua_setglobal(state, "disarm_transaction_allocation_failure");
+
+  Run(state, R"lua(
+    local record = CFB27.db:GetTableByUniqueId(330033):GetRecord(0)
+    local before = record:GetField("Score")
+    local ok = pcall(function()
+      arm_transaction_allocation_failure()
+      CFB27.db:Transaction(function(tx)
+        tx:SetField(record, "Score", 9)
+      end)
+    end)
+    disarm_transaction_allocation_failure()
+    assert(not ok)
+    assert(record:GetField("Score") == before)
+    assert(CFB27.db:Transaction(function(tx)
+      tx:SetField(record, "Score", 10)
+    end))
+    assert(record:GetField("Score") == 10)
+  )lua");
+  Require(allocator.failed,
+          "transaction userdata allocation failure was not exercised");
+  lua_close(state);
+}
 }  // namespace
 
 int main() {
   try {
     TestReadsErrorsAndInvalidation();
     TestTransactions();
+    TestTransactionAllocationFailureRecovery();
     std::cout << "frtk Lua API smoke passed\n";
     return 0;
   } catch (const std::exception& error) {

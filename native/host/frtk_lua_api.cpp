@@ -133,14 +133,15 @@ int ProtectedReferenceParts(lua_State* state, int index) {
   return lua_pcall(state, 1, 2, 0);
 }
 
-int RunTransactionCallback(lua_State* state) {
+int TransactionCallbackThunk(lua_State* state) {
   // LUA_LONGJMP_LEAF: automatic state below is POD only.
-  lua_pushvalue(state, 2);
+  lua_pushvalue(state, 1);
   auto* value = static_cast<TransactionUserdata*>(
       lua_newuserdatauv(state, sizeof(TransactionUserdata), 0));
   value->magic = kTransactionMagic;
   luaL_setmetatable(state, kTransactionMetatable);
-  return lua_pcall(state, 1, 0, 0);
+  lua_call(state, 1, 0);
+  return 0;
 }
 
 void CreateMetatable(lua_State* state, const char* name,
@@ -624,9 +625,11 @@ int LuaDatabaseApi::Transaction(lua_State* state) {
   if (!api) return RaiseLiteral(state, "CFB27 database API is not registered");
   if (!lua_isfunction(state, 2))
     return RaiseLiteral(state, "transaction callback must be a function");
+  lua_pushcfunction(state, TransactionCallbackThunk);
+  lua_pushvalue(state, 2);
   const PreparedStatus begin = api->BeginTransaction();
   if (begin == PreparedStatus::kError) return Raise(state, api);
-  const int callback_status = RunTransactionCallback(state);
+  const int callback_status = lua_pcall(state, 1, 0, 0);
   if (callback_status != LUA_OK) {
     api->AbortTransaction();
     return lua_error(state);

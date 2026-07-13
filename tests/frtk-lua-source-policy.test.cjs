@@ -35,7 +35,7 @@ const callbacks = [
 
 const leafHelpers = [
   'ProtectedReferenceParts',
-  'RunTransactionCallback',
+  'TransactionCallbackThunk',
   'LuaDatabaseApi::Raise',
   'LuaDatabaseApi::RaiseLiteral',
 ];
@@ -57,4 +57,23 @@ test('FrTk Lua callbacks do not perform C++ exception translation beside Lua err
     assert.doesNotMatch(body, /throw\s|std::runtime_error|error\.what\(\)/,
       `${name} must prepare errors before entering Lua error paths`);
   }
+});
+
+test('transaction activation is followed only by a protected Lua call', () => {
+  const body = bodyOf('LuaDatabaseApi::Transaction');
+  const thunk = body.indexOf('lua_pushcfunction(state, TransactionCallbackThunk)');
+  const begin = body.indexOf('api->BeginTransaction()');
+  const protectedCall = body.indexOf('lua_pcall(state, 1, 0, 0)', begin);
+  assert.ok(thunk >= 0 && thunk < begin,
+    'the protected transaction thunk must be on the stack before activation');
+  assert.ok(protectedCall > begin,
+    'transaction activation must enter lua_pcall immediately');
+  assert.doesNotMatch(body.slice(begin, protectedCall),
+    /lua_(?:newuserdatauv|L_setmetatable|pushlstring|pushstring|createtable|getfield)/,
+    'active transaction state must not precede an unprotected Lua allocation/error');
+
+  const thunkBody = bodyOf('TransactionCallbackThunk');
+  assert.match(thunkBody, /lua_newuserdatauv/);
+  assert.match(thunkBody, /luaL_setmetatable/);
+  assert.match(thunkBody, /lua_call\(state, 1, 0\)/);
 });
