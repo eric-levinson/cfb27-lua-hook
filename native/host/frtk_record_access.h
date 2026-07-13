@@ -30,8 +30,26 @@ struct FieldChange {
 struct FieldWritePlan {
   bool ok{};
   std::string code;
+  CatalogEvidenceSnapshot evidence;
   std::vector<memory::TransactionOperation> operations;
 };
+
+struct GuardedFieldTransaction {
+  bool ok{};
+  std::string code;
+  memory::TransactionRequest request;
+};
+
+GuardedFieldTransaction FinalizeFieldTransaction(
+    const SessionCatalog& catalog, std::string transaction_id,
+    std::span<const FieldWritePlan> plans);
+inline GuardedFieldTransaction FinalizeFieldTransaction(
+    const SessionCatalog& catalog, std::string transaction_id,
+    std::initializer_list<FieldWritePlan> plans) {
+  return FinalizeFieldTransaction(
+      catalog, std::move(transaction_id),
+      std::span<const FieldWritePlan>(plans.begin(), plans.size()));
+}
 
 class RecordAccessor {
  public:

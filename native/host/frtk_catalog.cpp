@@ -129,7 +129,9 @@ void SessionCatalog::AdvanceLifecycle(bool game_ready) {
   }
 }
 
-bool SessionCatalog::Revalidate(DiscoveryBackend& backend) {
+bool SessionCatalog::Revalidate(DiscoveryBackend& backend,
+                                CatalogEvidenceSnapshot* snapshot) {
+  if (snapshot) *snapshot = {};
   if (entries_.empty()) return false;
 
   enum class CheckKind { kSentinel, kRelationship };
@@ -245,7 +247,24 @@ bool SessionCatalog::Revalidate(DiscoveryBackend& backend) {
     }
   }
 
-  if (quarantined.empty()) return true;
+  if (quarantined.empty()) {
+    if (snapshot) {
+      snapshot->lifecycle_generation = generation_;
+      snapshot->active_unique_ids.reserve(entries_.size());
+      for (const auto& entry : entries_) {
+        snapshot->active_unique_ids.push_back(entry.descriptor.unique_id);
+      }
+      std::sort(snapshot->active_unique_ids.begin(),
+                snapshot->active_unique_ids.end());
+      snapshot->guards.reserve(requests.size());
+      for (std::size_t index = 0; index < requests.size(); ++index) {
+        snapshot->guards.push_back(
+            {.address = requests[index].address,
+             .expected = std::move(bytes[index])});
+      }
+    }
+    return true;
+  }
   AdvanceGeneration();
   std::erase_if(entries_, [&](const Entry& entry) {
     return quarantined.contains(entry.descriptor.unique_id);
@@ -254,6 +273,22 @@ bool SessionCatalog::Revalidate(DiscoveryBackend& backend) {
     entry.descriptor.lifecycle_generation = generation_;
   }
   return false;
+}
+
+bool SessionCatalog::EvidenceIsActive(
+    const CatalogEvidenceSnapshot& snapshot) const {
+  if (snapshot.lifecycle_generation == 0 ||
+      snapshot.lifecycle_generation != generation_ || entries_.empty()) {
+    return false;
+  }
+  std::vector<std::uint32_t> active;
+  active.reserve(entries_.size());
+  for (const auto& entry : entries_) {
+    if (entry.descriptor.lifecycle_generation != generation_) return false;
+    active.push_back(entry.descriptor.unique_id);
+  }
+  std::sort(active.begin(), active.end());
+  return active == snapshot.active_unique_ids;
 }
 
 bool SessionCatalog::IsActiveReferenceTarget(

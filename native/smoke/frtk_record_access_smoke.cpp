@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <iostream>
 #include <map>
+#include <sstream>
 #include <stdexcept>
 
 namespace {
@@ -95,6 +96,76 @@ class Backend final : public DiscoveryBackend, public cfb27::memory::MemoryBacke
   }
   bool Write(std::uintptr_t, std::span<const std::uint8_t>) override { return false; }
 };
+
+class LinearBackend final : public DiscoveryBackend,
+                            public cfb27::memory::MemoryBackend {
+ public:
+  void Store(std::uintptr_t address, std::initializer_list<std::uint8_t> value) {
+    std::size_t index = 0;
+    for (const auto byte : value) bytes[address + index++] = byte;
+  }
+  void Store(std::uintptr_t address, const std::vector<std::uint8_t>& value) {
+    for (std::size_t index = 0; index < value.size(); ++index)
+      bytes[address + index] = value[index];
+  }
+  ScanObservationResult Scan(const RowFingerprint&, std::size_t) override {
+    return {};
+  }
+  bool ReadBatch(std::span<const ReadRequest> requests,
+                 std::vector<std::vector<std::uint8_t>>& out) override {
+    out.clear();
+    for (const auto& request : requests) {
+      std::vector<std::uint8_t> value(request.length);
+      if (!Read(request.address, value)) return false;
+      out.push_back(std::move(value));
+    }
+    return true;
+  }
+  bool AllocationExists(std::uintptr_t, std::size_t) override { return true; }
+  bool Validate(std::uintptr_t address, std::size_t size, bool) override {
+    for (std::size_t index = 0; index < size; ++index)
+      if (!bytes.contains(address + index)) return false;
+    return size != 0;
+  }
+  bool Read(std::uintptr_t address, std::span<std::uint8_t> output) override {
+    if (!Validate(address, output.size(), false)) return false;
+    for (std::size_t index = 0; index < output.size(); ++index)
+      output[index] = bytes[address + index];
+    return true;
+  }
+  bool Write(std::uintptr_t address,
+             std::span<const std::uint8_t> input) override {
+    ++write_calls;
+    if (!Validate(address, input.size(), true)) return false;
+    for (std::size_t index = 0; index < input.size(); ++index)
+      bytes[address + index] = input[index];
+    return true;
+  }
+  std::map<std::uintptr_t, std::uint8_t> bytes;
+  std::size_t write_calls{};
+};
+
+ProfileBundle EvidenceBundle() {
+  auto result = Bundle("direct_verified");
+  result.tables[0].rows = {
+      {.row_index = 0, .pattern = {0x11, 0x22}, .mask = {0xFF, 0xF0}}};
+  result.tables[1].rows = {
+      {.row_index = 0, .pattern = {0xA1}, .mask = {0xFF}}};
+  result.tables[1].relationships = {
+      {.source_row = 0, .field_name = "TargetRef", .target_table_id = 22,
+       .target_row = 2}};
+  return result;
+}
+
+LinearBackend EvidenceBackend() {
+  LinearBackend backend;
+  backend.Store(0x1000, {0x11, 0x2F, 0, 0, 0, 0, 0, 0});
+  backend.Store(0x1008, {0, 0, 0, 0, 0, 0, 0, 0});
+  backend.Store(0x1010, {0, 0, 0, 0, 0, 0, 0, 0});
+  backend.Store(0x2000, {0xA1, 0x34, 0x12, 0x78, 2, 0, 44, 0});
+  backend.Store(0x2008, {0xA1, 0x44, 0x33, 0x78, 2, 0, 44, 0});
+  return backend;
+}
 
 void TestReadsAndValidation() {
   auto profile = Bundle("direct_verified");
@@ -206,6 +277,114 @@ void TestPackedReferenceRequiresActiveTarget() {
   Require(!result.ok && result.code == "FIELD_INVALID",
           "packed reference accepted a target absent from active catalog");
 }
+
+void TestEvidenceBoundTransactionRejectsStaleReadableCopy() {
+  for (const auto [changed_address, changed_value] :
+       {std::pair{std::uintptr_t{0x1000}, std::uint8_t{0x99}},
+        std::pair{std::uintptr_t{0x2004}, std::uint8_t{0x03}}}) {
+    auto profile = EvidenceBundle();
+    SessionCatalog catalog;
+    catalog.Install(profile, Discovery());
+    auto backend = EvidenceBackend();
+    RecordAccessor accessor(catalog, profile.schema, backend, backend);
+    const auto handle = *catalog.GetHandle(330033);
+    const auto plan = accessor.PlanFieldWrites(
+        handle, 0, {{"Score", std::int64_t{0x5678}}});
+    const auto guarded =
+        FinalizeFieldTransaction(catalog, "evidence-race", {plan});
+    Require(guarded.ok, "guarded transaction did not plan");
+
+    // Deterministic old race: validation already passed; relocation leaves the
+    // old allocation readable and requested field bytes unchanged, but either
+    // a descriptor sentinel or relationship byte changes before preflight.
+    backend.bytes[changed_address] = changed_value;
+    const auto result =
+        cfb27::memory::RunTransaction(guarded.request, backend);
+    Require(result.status == cfb27::memory::TransactionStatus::kRejected &&
+                backend.write_calls == 0 && backend.bytes[0x2001] == 0x34,
+            "stale readable descriptor copy received a field write");
+  }
+}
+
+void TestEvidenceMergeMultiRecordAndGeneration() {
+  auto profile = EvidenceBundle();
+  SessionCatalog catalog;
+  catalog.Install(profile, Discovery());
+  auto backend = EvidenceBackend();
+  RecordAccessor accessor(catalog, profile.schema, backend, backend);
+  const auto handle = *catalog.GetHandle(330033);
+  const auto first = accessor.PlanFieldWrites(
+      handle, 0, {{"Flags", std::int64_t{5}}});
+  const auto second = accessor.PlanFieldWrites(
+      handle, 1, {{"Score", std::int64_t{0x5566}}});
+  const auto guarded =
+      FinalizeFieldTransaction(catalog, "multi-record", {first, second});
+  Require(guarded.ok && guarded.request.operations.size() == 4,
+          "multi-record evidence was not deduplicated and merged");
+  const auto overlap = std::find_if(
+      guarded.request.operations.begin(), guarded.request.operations.end(),
+      [](const auto& operation) { return operation.address == "0x2000"; });
+  Require(overlap != guarded.request.operations.end() &&
+              overlap->expected == std::vector<std::uint8_t>({0xA1}) &&
+              overlap->replacement == std::vector<std::uint8_t>({0xB5}),
+          "field/sentinel overlap dropped evidence or changed unrequested bits");
+  Require(cfb27::memory::RunTransaction(guarded.request, backend).status ==
+              cfb27::memory::TransactionStatus::kAppliedVerified,
+          "multi-record guarded transaction failed");
+
+  auto stale_backend = EvidenceBackend();
+  RecordAccessor stale_accessor(catalog, profile.schema, stale_backend,
+                                stale_backend);
+  const auto stale_plan = stale_accessor.PlanFieldWrites(
+      *catalog.GetHandle(330033), 0, {{"Score", std::int64_t{7}}});
+  catalog.Invalidate();
+  Require(!FinalizeFieldTransaction(catalog, "stale-generation", {stale_plan}).ok,
+          "generation invalidation did not invalidate evidence snapshot");
+}
+
+void TestEvidenceLimitsFailDuringFinalization() {
+  auto profile = EvidenceBundle();
+  SessionCatalog catalog;
+  catalog.Install(profile, Discovery());
+  auto backend = EvidenceBackend();
+  RecordAccessor accessor(catalog, profile.schema, backend, backend);
+  auto plan = accessor.PlanFieldWrites(
+      *catalog.GetHandle(330033), 0, {{"Score", std::int64_t{7}}});
+  Require(plan.ok, "limit fixture did not produce a base plan");
+
+  plan.evidence.guards.clear();
+  for (std::size_t index = 0; index < 33; ++index) {
+    plan.evidence.guards.push_back(
+        {.address = 0x3000 + index * 2, .expected = {0}});
+  }
+  const auto too_many =
+      FinalizeFieldTransaction(catalog, "too-many-guards", {plan});
+  Require(!too_many.ok && too_many.code == "TRANSACTION_LIMIT_EXCEEDED",
+          "evidence bypassed the operation limit");
+
+  plan.evidence.guards.clear();
+  for (std::size_t index = 0; index < 17; ++index) {
+    plan.evidence.guards.push_back(
+        {.address = 0x10000 + index * 0x2000,
+         .expected = std::vector<std::uint8_t>(4096, 0)});
+  }
+  const auto too_large =
+      FinalizeFieldTransaction(catalog, "too-many-bytes", {plan});
+  Require(!too_large.ok && too_large.code == "TRANSACTION_LIMIT_EXCEEDED",
+          "evidence bypassed the aggregate byte limit");
+
+  plan.evidence.guards = {
+      {.address = 0x4000,
+       .expected = std::vector<std::uint8_t>(4096, 0)}};
+  plan.operations = {{.address = "0x4FFF",
+                      .expected = {0, 0},
+                      .replacement = {1, 1}}};
+  const auto unsplittable =
+      FinalizeFieldTransaction(catalog, "overlap-too-wide", {plan});
+  Require(!unsplittable.ok &&
+              unsplittable.code == "TRANSACTION_LIMIT_EXCEEDED",
+          "overlapping guard/write span was split and lost atomic evidence");
+}
 }  // namespace
 
 int main() {
@@ -213,6 +392,9 @@ int main() {
     TestReadsAndValidation();
     TestPackedReferenceRequiresActiveTarget();
     TestPlansAndAuthority();
+    TestEvidenceBoundTransactionRejectsStaleReadableCopy();
+    TestEvidenceMergeMultiRecordAndGeneration();
+    TestEvidenceLimitsFailDuringFinalization();
     std::cout << "frtk record access smoke passed\n";
     return 0;
   } catch (const std::exception& error) {

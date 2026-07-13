@@ -564,8 +564,9 @@ LuaDatabaseApi::PreparedStatus LuaDatabaseApi::FinishTransaction() noexcept {
     }
     std::unique_lock<std::mutex> lock;
     if (catalog_mutex_) lock = std::unique_lock(*catalog_mutex_);
-    memory::TransactionRequest request{
-        .transaction_id = "lua-db-" + std::to_string(catalog_.generation())};
+    const std::string transaction_id =
+        "lua-db-" + std::to_string(catalog_.generation());
+    std::vector<FieldWritePlan> plans;
     std::sort(pending_changes_.begin(), pending_changes_.end(),
               [](const PendingChange& left, const PendingChange& right) {
       if (left.handle.unique_id != right.handle.unique_id)
@@ -598,11 +599,18 @@ LuaDatabaseApi::PreparedStatus LuaDatabaseApi::FinishTransaction() noexcept {
         SetError(error.c_str());
         return PreparedStatus::kError;
       }
-      request.operations.insert(request.operations.end(), plan.operations.begin(),
-                                plan.operations.end());
+      plans.push_back(plan);
     }
     pending_changes_.clear();
-    const auto result = submit_transaction_(request);
+    const auto guarded =
+        FinalizeFieldTransaction(catalog_, transaction_id, plans);
+    if (!guarded.ok) {
+      const std::string error =
+          "field transaction refused: " + guarded.code;
+      SetError(error.c_str());
+      return PreparedStatus::kError;
+    }
+    const auto result = submit_transaction_(guarded.request);
     if (result.status != memory::TransactionStatus::kAppliedVerified) {
       const std::string error = "field transaction failed: " + result.code;
       SetError(error.c_str());

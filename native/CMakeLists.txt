@@ -144,8 +144,10 @@ add_executable(cfb27_frtk_record_access_smoke
   host/frtk_catalog.cpp
   host/frtk_record_access.cpp
   host/frtk_field_schema.cpp
+  host/memory_transaction.cpp
 )
 target_compile_features(cfb27_frtk_record_access_smoke PRIVATE cxx_std_20)
+target_compile_definitions(cfb27_frtk_record_access_smoke PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(cfb27_frtk_record_access_smoke PRIVATE nlohmann_json::nlohmann_json)
 target_link_options(cfb27_frtk_record_access_smoke PRIVATE /STACK:1048576)
 

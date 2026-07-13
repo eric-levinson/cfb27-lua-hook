@@ -73,7 +73,8 @@ ProfileBundle Bundle() {
   result.profile_id = "lua-api-profile";
   result.tables = {
       {.logical_name = "Direct", .table_id = 33, .unique_id = 330033,
-       .capacity = 2, .record_size = 12},
+       .capacity = 2, .record_size = 12,
+       .rows = {{.row_index = 0, .pattern = {0}, .mask = {0}}}},
       {.logical_name = "Recruit", .table_id = 44, .unique_id = 440044,
        .capacity = 1, .record_size = 8},
       {.logical_name = "Inactive", .table_id = 55, .unique_id = 550055,
@@ -120,8 +121,26 @@ class Backend final : public DiscoveryBackend, public cfb27::memory::MemoryBacke
   std::map<std::uintptr_t, std::vector<std::uint8_t>> records;
   std::size_t reads{};
   ScanObservationResult Scan(const RowFingerprint&, std::size_t) override { return {}; }
-  bool ReadBatch(std::span<const ReadRequest>,
-                 std::vector<std::vector<std::uint8_t>>&) override { return true; }
+  bool ReadBatch(std::span<const ReadRequest> requests,
+                 std::vector<std::vector<std::uint8_t>>& output) override {
+    output.clear();
+    for (const auto& request : requests) {
+      std::vector<std::uint8_t> bytes(request.length);
+      bool found = false;
+      for (const auto& [base, record] : records) {
+        if (request.address >= base &&
+            request.address + request.length <= base + record.size()) {
+          std::copy_n(record.begin() + (request.address - base), request.length,
+                      bytes.begin());
+          found = true;
+          break;
+        }
+      }
+      if (!found) return false;
+      output.push_back(std::move(bytes));
+    }
+    return true;
+  }
   bool AllocationExists(std::uintptr_t, std::size_t) override { return true; }
   bool Validate(std::uintptr_t address, std::size_t size, bool) override {
     return std::any_of(records.begin(), records.end(), [&](const auto& item) {
@@ -231,8 +250,15 @@ void TestTransactions() {
   lua_State* state = luaL_newstate();
   luaL_openlibs(state);
   std::mutex catalog_mutex;
+  bool saw_verify_only_guard = false;
   LuaDatabaseApi api(catalog, profile.schema, backend, backend,
       [&](const cfb27::memory::TransactionRequest& request) {
+        saw_verify_only_guard = saw_verify_only_guard || std::any_of(
+            request.operations.begin(), request.operations.end(),
+            [](const auto& operation) {
+              return operation.kind ==
+                     cfb27::memory::TransactionOperationKind::kVerifyOnly;
+            });
         return cfb27::memory::RunTransaction(request, backend);
       }, &catalog_mutex);
   api.Register(state);
@@ -320,6 +346,8 @@ void TestTransactions() {
     assert(CFB27.db:Transaction(function(tx) tx:SetField(record, "Score", 8) end))
     assert(record:GetField("Score") == 8)
   )lua");
+  Require(saw_verify_only_guard,
+          "Lua typed transaction omitted native catalog evidence guards");
   lua_close(state);
 }
 

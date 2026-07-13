@@ -1447,7 +1447,7 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
     cfb27::memory::ProcessMemoryBackend memory_backend;
     cfb27::frtk::RecordAccessor accessor(g_frtk_catalog, g_frtk_profile->schema,
                                          validation_backend, memory_backend);
-    cfb27::memory::TransactionRequest request{.transaction_id = transaction_id};
+    std::vector<cfb27::frtk::FieldWritePlan> plans;
     for (const auto& group : groups) {
       const auto handle = g_frtk_catalog.GetHandle(group.unique_id);
       if (!handle)
@@ -1461,10 +1461,20 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
                            "FRTK_FIELD_INVALID";
         return ErrorResponse(id, code, "FrTk field transaction was refused");
       }
-      request.operations.insert(request.operations.end(), plan.operations.begin(),
-                                plan.operations.end());
+      plans.push_back(plan);
     }
-    auto transaction = cfb27::memory::RunTransaction(request, memory_backend);
+    const auto guarded = cfb27::frtk::FinalizeFieldTransaction(
+        g_frtk_catalog, transaction_id, plans);
+    if (!guarded.ok) {
+      const char* code = guarded.code == "CATALOG_EVIDENCE_STALE"
+                             ? "FRTK_CATALOG_STALE"
+                             : guarded.code == "TRANSACTION_LIMIT_EXCEEDED"
+                                   ? "TRANSACTION_LIMIT_EXCEEDED"
+                                   : "FRTK_FIELD_INVALID";
+      return ErrorResponse(id, code, "FrTk field transaction was refused");
+    }
+    auto transaction =
+        cfb27::memory::RunTransaction(guarded.request, memory_backend);
     if (transaction.status == cfb27::memory::TransactionStatus::kRejected)
       return TransactionRejected(id, transaction.code);
     const Json public_result{{"transactionId", transaction_id},

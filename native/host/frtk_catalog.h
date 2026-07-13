@@ -38,6 +38,19 @@ struct CatalogSummary {
   std::vector<DiscoveryEvidence> evidence;
 };
 
+struct CatalogEvidenceGuard {
+  std::uintptr_t address{};
+  std::vector<std::uint8_t> expected;
+};
+
+// Native-only authorization evidence. It is deliberately absent from public
+// catalog summaries and protocol/Lua result types.
+struct CatalogEvidenceSnapshot {
+  std::uint64_t lifecycle_generation{};
+  std::vector<std::uint32_t> active_unique_ids;
+  std::vector<CatalogEvidenceGuard> guards;
+};
+
 class SessionCatalog {
  public:
   std::uint64_t Install(const ProfileBundle& profile,
@@ -47,7 +60,10 @@ class SessionCatalog {
   [[nodiscard]] const CatalogDescriptor* Resolve(TableHandle handle) const;
   void Invalidate();
   void AdvanceLifecycle(bool game_ready);
-  bool Revalidate(DiscoveryBackend& backend);
+  bool Revalidate(DiscoveryBackend& backend,
+                  CatalogEvidenceSnapshot* snapshot = nullptr);
+  [[nodiscard]] bool EvidenceIsActive(
+      const CatalogEvidenceSnapshot& snapshot) const;
   [[nodiscard]] bool IsActiveReferenceTarget(
       std::uint16_t session_table_id, std::uint32_t row,
       std::uint64_t generation) const;
