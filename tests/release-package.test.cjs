@@ -32,11 +32,52 @@ test('release rejects archive and generated/private material', () => {
     'docs/research/runtime-verification.md',
     'docs/superpowers/specs/internal.md',
     'docs/development/restructure-pr-body.md',
+    'docs/.frtk/private.txt',
+    'docs/dynasty.sav',
+    'docs/memory.dmp',
+    'docs/memory.dump',
+    'docs/schema.json',
+    'docs/profile.json',
   ]) {
     assert.throws(() => assertAllowedEntry(value), /not allowed/i, value);
   }
   assert.doesNotThrow(() => assertAllowedEntry(path.join('examples', 'lua', 'autorun.lua')));
 });
+
+test('actual TGZ and ZIP validation reject every raw save, dump, schema, and profile path',
+  async (t) => {
+    const privatePaths = [
+      ['nested', '.frtk', 'private.txt'],
+      ['nested', 'dynasty.sav'],
+      ['nested', 'memory.dmp'],
+      ['nested', 'memory.dump'],
+      ['nested', 'schema.json'],
+      ['nested', 'profile.json'],
+    ];
+    const powershell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32',
+      'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    for (const [index, segments] of privatePaths.entries()) {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), `cfb27-private-path-${index}-`));
+      t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+      const packageRoot = path.join(root, 'package');
+      const releaseRoot = path.join(root, 'cfb27-lua-hook-test');
+      for (const container of [packageRoot, releaseRoot]) {
+        const file = path.join(container, ...segments);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, 'private', 'utf8');
+      }
+      const tgz = path.join(root, 'tampered.tgz');
+      childProcess.execFileSync('tar.exe', ['-czf', tgz, '-C', root, 'package']);
+      await assert.rejects(assertNpmArchivePayload(tgz), /archive entry.*not allowed/i,
+        segments.join('/'));
+      const zip = path.join(root, 'tampered.zip');
+      childProcess.execFileSync(powershell, ['-NoProfile', '-NonInteractive', '-Command',
+        'Compress-Archive -LiteralPath $env:SOURCE -DestinationPath $env:ARCHIVE'], {
+        env: { ...process.env, SOURCE: releaseRoot, ARCHIVE: zip }, windowsHide: true,
+      });
+      await assert.rejects(assertReleaseZipPayload(zip), /not allowed/i, segments.join('/'));
+    }
+  });
 
 test('release content gate requires an adjacent explicit marker for synthetic addresses', () => {
   assert.equal(typeof assertAllowedContent, 'function');

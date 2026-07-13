@@ -142,6 +142,25 @@ test('compiler rejects unpaired UTF-16 surrogates that are not valid UTF-8 names
   assert.throws(() => compileFrtkArtifacts(inputs), /valid UTF-8/i);
 });
 
+test('compiler measures schema and build identities as valid 1..128 UTF-8 bytes', () => {
+  const boundary = boundedInputs(1);
+  for (const key of ['schemaIdentity', 'buildIdentity']) {
+    boundary.snapshot[key] = 'é'.repeat(64);
+    boundary.layout[key] = 'é'.repeat(64);
+  }
+  assert.equal(compileFrtkArtifacts(boundary).profile.tables.length, 1);
+  for (const key of ['schemaIdentity', 'buildIdentity']) {
+    const oversized = clone(boundary);
+    oversized.snapshot[key] += 'a';
+    oversized.layout[key] += 'a';
+    assert.throws(() => compileFrtkArtifacts(oversized), /128 UTF-8 bytes/i, key);
+    const surrogate = clone(boundary);
+    surrogate.snapshot[key] = '\uD800';
+    surrogate.layout[key] = '\uD800';
+    assert.throws(() => compileFrtkArtifacts(surrogate), /valid UTF-8/i, key);
+  }
+});
+
 test('compiler rejects insufficient or duplicate row evidence', () => {
   const fewer = makeSyntheticInputs();
   fewer.snapshot.tables[0].rows.pop();

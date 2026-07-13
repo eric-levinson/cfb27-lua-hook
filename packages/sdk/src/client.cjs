@@ -13,6 +13,7 @@ const {
   hasOnlyKeys,
   isSafeIntegerBetween,
   isUpperHexBytes,
+  isValidUtf8BoundedString,
 } = require('./validation.cjs');
 
 const MEMORY_LIMITS = Object.freeze({
@@ -125,7 +126,7 @@ function cloneFieldNames(fields) {
   }
   const seen = new Set();
   return fields.map((field) => {
-    if (typeof field !== 'string' || field.length < 1 || field.length > 128 || seen.has(field)) {
+    if (!isValidUtf8BoundedString(field) || seen.has(field)) {
       throw invalidRequest('FrTk field names must be unique bounded strings');
     }
     seen.add(field);
@@ -174,7 +175,7 @@ function cloneTransactionOptions(options) {
     if (!hasExactKeys(change, ['uniqueId', 'row', 'field', 'value']) ||
         !isSafeIntegerBetween(change.uniqueId, 0, 0xFFFFFFFF) ||
         !isSafeIntegerBetween(change.row, 0, 0xFFFFFFFF) ||
-        typeof change.field !== 'string' || change.field.length < 1 || change.field.length > 128) {
+        !isValidUtf8BoundedString(change.field)) {
       throw invalidRequest('FrTk field change is invalid');
     }
     const identity = `${change.uniqueId}:${change.row}:${change.field}`;
@@ -194,7 +195,7 @@ function cloneInvalidateOptions(options) {
 }
 
 function validBoundedString(value, maximum = 128) {
-  return typeof value === 'string' && value.length >= 1 && value.length <= maximum;
+  return isValidUtf8BoundedString(value, maximum);
 }
 
 function validateEvidence(value) {

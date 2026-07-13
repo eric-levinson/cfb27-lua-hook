@@ -38,6 +38,52 @@ std::uint32_t ReadLittleEndian(const std::vector<std::uint8_t>& bytes) {
   return value;
 }
 
+constexpr std::size_t kMaximumBatchRanges = 64;
+constexpr std::size_t kMaximumBatchBytes = 256 * 1024;
+
+struct BoundedReadResult {
+  bool requests_valid{true};
+  std::vector<std::vector<std::uint8_t>> bytes;
+  std::vector<bool> failed;
+};
+
+BoundedReadResult ReadBoundedBatches(
+    DiscoveryBackend& backend, std::span<const ReadRequest> requests) {
+  BoundedReadResult result;
+  result.bytes.resize(requests.size());
+  result.failed.resize(requests.size());
+  for (const auto& request : requests) {
+    if (request.length == 0 || request.length > kMaximumBatchBytes ||
+        AddOverflows(request.address, request.length)) {
+      result.requests_valid = false;
+      return result;
+    }
+  }
+  for (std::size_t begin = 0; begin < requests.size();) {
+    std::size_t count{};
+    std::size_t total_bytes{};
+    while (begin + count < requests.size() && count < kMaximumBatchRanges) {
+      const auto length = requests[begin + count].length;
+      if (length > kMaximumBatchBytes - total_bytes) break;
+      total_bytes += length;
+      ++count;
+    }
+    std::vector<std::vector<std::uint8_t>> chunk;
+    const auto bounded = requests.subspan(begin, count);
+    bool valid = count != 0 && backend.ReadBatch(bounded, chunk) &&
+                 chunk.size() == count;
+    for (std::size_t index = 0; valid && index < count; ++index) {
+      valid = chunk[index].size() == requests[begin + index].length;
+    }
+    for (std::size_t index = 0; index < count; ++index) {
+      result.failed[begin + index] = !valid;
+      if (valid) result.bytes[begin + index] = std::move(chunk[index]);
+    }
+    begin += count;
+  }
+  return result;
+}
+
 }  // namespace
 
 void SessionCatalog::AdvanceGeneration() {
@@ -201,27 +247,35 @@ bool SessionCatalog::Revalidate(DiscoveryBackend& backend,
     }
   }
 
-  std::vector<std::vector<std::uint8_t>> bytes;
-  if (!requests.empty() &&
-      (!backend.ReadBatch(requests, bytes) || bytes.size() != requests.size())) {
+  const auto first = ReadBoundedBatches(backend, requests);
+  const auto second = first.requests_valid
+                          ? ReadBoundedBatches(backend, requests)
+                          : BoundedReadResult{.requests_valid = false};
+  if (!first.requests_valid || !second.requests_valid) {
     for (const auto& check : checks) quarantined.insert(check.source_unique_id);
-  } else {
-    for (std::size_t index = 0; index < checks.size(); ++index) {
-      const auto& check = checks[index];
-      if (check.kind == CheckKind::kSentinel) {
-        if (!MaskedMatches(*check.sentinel, bytes[index])) {
-          quarantined.insert(check.source_unique_id);
-        }
-      } else {
-        if (bytes[index].size() != 4) {
-          quarantined.insert(check.source_unique_id);
-          continue;
-        }
-        const auto decoded = DecodePackedReference(ReadLittleEndian(bytes[index]));
-        if (decoded.table_id != check.relationship->target_table_id ||
-            decoded.row_index != check.relationship->target_row) {
-          quarantined.insert(check.source_unique_id);
-        }
+  }
+  for (std::size_t index = 0; index < checks.size() &&
+                              first.requests_valid && second.requests_valid;
+       ++index) {
+    const auto& check = checks[index];
+    if (first.failed[index] || second.failed[index] ||
+        first.bytes[index] != second.bytes[index]) {
+      quarantined.insert(check.source_unique_id);
+      continue;
+    }
+    if (check.kind == CheckKind::kSentinel) {
+      if (!MaskedMatches(*check.sentinel, first.bytes[index])) {
+        quarantined.insert(check.source_unique_id);
+      }
+    } else {
+      if (first.bytes[index].size() != 4) {
+        quarantined.insert(check.source_unique_id);
+        continue;
+      }
+      const auto decoded = DecodePackedReference(ReadLittleEndian(first.bytes[index]));
+      if (decoded.table_id != check.relationship->target_table_id ||
+          decoded.row_index != check.relationship->target_row) {
+        quarantined.insert(check.source_unique_id);
       }
     }
   }
@@ -260,7 +314,7 @@ bool SessionCatalog::Revalidate(DiscoveryBackend& backend,
       for (std::size_t index = 0; index < requests.size(); ++index) {
         snapshot->guards.push_back(
             {.address = requests[index].address,
-             .expected = std::move(bytes[index])});
+             .expected = first.bytes[index]});
       }
     }
     return true;

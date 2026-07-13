@@ -240,6 +240,19 @@ test('discoverFrtkCatalog rejects public selectors before host I/O', async () =>
     (error) => error.code === 'INVALID_REQUEST');
 });
 
+test('typed FrTk field selectors reject invalid Unicode and UTF-8 overflow before I/O', async () => {
+  const client = createClient({ pipeName: testPipeName('unused'), timeoutMs: 25 });
+  for (const field of ['\uD800', '\uDC00', 'é'.repeat(64) + 'a']) {
+    await assert.rejects(client.readFrtkRecords({
+      generation: 1, records: [{ uniqueId: 1, row: 0, fields: [field] }],
+    }), (error) => error.code === 'INVALID_REQUEST', field);
+    await assert.rejects(client.transactFrtkFields({
+      transactionId: 'unicode-test', generation: 1,
+      changes: [{ uniqueId: 1, row: 0, field, value: 1 }],
+    }), (error) => error.code === 'INVALID_REQUEST', field);
+  }
+});
+
 test('unproven FrTk authority negotiates capability but sends no transaction', async (t) => {
   const commands = [];
   const client = await fakeClient(t, (request) => {

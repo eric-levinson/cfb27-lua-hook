@@ -11,8 +11,12 @@ const version = '0.2.0-dev.2';
 const SYNTHETIC_ADDRESS_MARKER = 'SYNTHETIC_ADDRESS:';
 const TEXT_LIKE = /\.(cjs|mjs|js|json|md|lua|ts|txt)$/i;
 const DENIED_SEGMENTS = new Set([
-  'archive', 'node_modules', 'schema', 'save', 'saves', 'backups',
+  'archive', 'node_modules', '.frtk', 'schema', 'save', 'saves', 'backups',
   'build', 'build-active', '__pycache__', '.requirements', 'research', 'superpowers',
+]);
+const DENIED_RAW_JSON_NAMES = new Set([
+  'profile.json', 'schema.json', 'snapshot.json', 'layout.json',
+  'frtk-profile.json', 'frtk-schema.json',
 ]);
 
 function releaseEntries() {
@@ -24,7 +28,8 @@ function assertPrivatePathPolicy(entry, { archive = false } = {}) {
   const lower = normalized.toLowerCase();
   const segments = lower.split('/');
   if (segments.some((segment) => DENIED_SEGMENTS.has(segment)) ||
-      /\.(obj|pdb|log|bin|gz|xml|pyc)$/i.test(lower) ||
+      segments.some((segment) => DENIED_RAW_JSON_NAMES.has(segment)) ||
+      /\.(obj|pdb|log|bin|gz|xml|pyc|sav|dmp|dump)$/i.test(lower) ||
       lower.endsWith('docs/development/restructure-pr-body.md')) {
     throw new Error(`${archive ? 'Archive' : 'Release'} entry is not allowed: ${entry}`);
   }

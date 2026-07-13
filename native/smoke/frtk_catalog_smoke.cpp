@@ -3,6 +3,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cstdint>
 #include <iostream>
 #include <map>
 #include <stdexcept>
@@ -73,17 +74,32 @@ class Backend final : public DiscoveryBackend {
   std::map<std::uintptr_t, std::vector<std::uint8_t>> reads;
   bool allocation_ok{true};
   std::size_t batch_calls{};
+  std::size_t fail_on_call{};
+  std::size_t mutate_on_call{};
+  std::size_t maximum_ranges{};
+  std::size_t maximum_bytes{};
   ScanObservationResult Scan(const RowFingerprint&, std::size_t) override {
     return {};
   }
   bool ReadBatch(std::span<const ReadRequest> requests,
                  std::vector<std::vector<std::uint8_t>>& out) override {
     ++batch_calls;
+    std::size_t total_bytes{};
+    for (const auto& request : requests) total_bytes += request.length;
+    maximum_ranges = std::max(maximum_ranges, requests.size());
+    maximum_bytes = std::max(maximum_bytes, total_bytes);
     out.clear();
+    if (requests.size() > 64 || total_bytes > 256 * 1024 ||
+        batch_calls == fail_on_call) {
+      return false;
+    }
     for (const auto& request : requests) {
       auto found = reads.find(request.address);
       if (found == reads.end() || found->second.size() != request.length) return false;
       out.push_back(found->second);
+    }
+    if (batch_calls == mutate_on_call && !out.empty() && !out[0].empty()) {
+      out[0][0] ^= 0xFF;
     }
     return true;
   }
@@ -91,6 +107,92 @@ class Backend final : public DiscoveryBackend {
     return allocation_ok;
   }
 };
+
+struct EvidenceFixture {
+  ProfileBundle profile;
+  DiscoveryResult discovery;
+  Backend backend;
+  std::vector<std::uintptr_t> expected_addresses;
+};
+
+EvidenceFixture BoundedEvidenceFixture(std::size_t sentinel_count,
+                                       std::size_t relationship_count = 0,
+                                       std::size_t record_size = 8) {
+  Require(sentinel_count >= 3, "test fixture requires at least three sentinels");
+  const auto table_count = (sentinel_count + 7) / 8;
+  Require(sentinel_count >= table_count * 3,
+          "test fixture cannot satisfy per-table fingerprint minimum");
+  EvidenceFixture fixture;
+  fixture.profile.profile_id = "bounded-evidence-profile";
+  nlohmann::json schema_tables = nlohmann::json::array();
+  std::size_t remaining = sentinel_count;
+  for (std::size_t index = 0; index < table_count; ++index) {
+    const auto tables_left = table_count - index - 1;
+    const auto rows = std::min<std::size_t>(8, remaining - tables_left * 3);
+    remaining -= rows;
+    const auto table_id = static_cast<std::uint16_t>(100 + index);
+    const auto unique_id = static_cast<std::uint32_t>(1000 + index);
+    const auto base = static_cast<std::uintptr_t>(0x100000 + index * 0x10000);
+    TableProfile table{.logical_name = "Table" + std::to_string(index),
+                       .table_id = table_id,
+                       .unique_id = unique_id,
+                       .capacity = static_cast<std::uint32_t>(rows),
+                       .record_size = static_cast<std::uint32_t>(record_size)};
+    for (std::size_t row = 0; row < rows; ++row) {
+      std::vector<std::uint8_t> bytes(
+          record_size, static_cast<std::uint8_t>((index + row + 1) & 0xFF));
+      table.rows.push_back({.row_index = static_cast<std::uint32_t>(row),
+                            .pattern = bytes,
+                            .mask = std::vector<std::uint8_t>(record_size, 0xFF)});
+      const auto address = base + row * record_size;
+      fixture.backend.reads.emplace(address, std::move(bytes));
+      fixture.expected_addresses.push_back(address);
+    }
+    nlohmann::json fields = nlohmann::json::array();
+    if (index < relationship_count) {
+      table.relationships.push_back(
+          {.source_row = 0, .field_name = "TargetRef",
+           .target_table_id = 100, .target_row = 0});
+      fields.push_back({{"name", "TargetRef"}, {"encoding", "packed-reference"},
+                        {"byteOffset", 4}, {"storageBytes", 4}, {"bitOffset", 0},
+                        {"bitWidth", 32}, {"minimum", 0}, {"maximum", 0xFFFFFFFFull},
+                        {"referenceTableId", 100}});
+    }
+    schema_tables.push_back(
+        {{"logicalName", table.logical_name}, {"tableId", table_id},
+         {"uniqueId", unique_id}, {"capacity", table.capacity},
+         {"recordSize", record_size}, {"authorityStatus", "discovery_only"},
+         {"fields", std::move(fields)}});
+    fixture.profile.tables.push_back(std::move(table));
+    fixture.discovery.tables.push_back(
+        {.unique_id = unique_id, .state = TableState::kResolved,
+         .descriptor = TableDescriptor{
+             .unique_id = unique_id, .base = base, .stride = record_size,
+             .capacity = static_cast<std::uint32_t>(rows),
+             .allocation_base = base, .allocation_size = rows * record_size}});
+  }
+  for (std::size_t index = 0; index < relationship_count; ++index) {
+    const auto base = static_cast<std::uintptr_t>(0x100000 + index * 0x10000);
+    const auto packed = static_cast<std::uint32_t>(100u << 17);
+    const auto address = base + 4;
+    fixture.backend.reads[address] = {
+        static_cast<std::uint8_t>(packed),
+        static_cast<std::uint8_t>(packed >> 8),
+        static_cast<std::uint8_t>(packed >> 16),
+        static_cast<std::uint8_t>(packed >> 24)};
+    const auto insertion = std::find(fixture.expected_addresses.begin(),
+                                     fixture.expected_addresses.end(), base);
+    fixture.expected_addresses.insert(insertion +
+        static_cast<std::ptrdiff_t>(fixture.profile.tables[index].rows.size()), address);
+  }
+  std::string error;
+  Require(fixture.profile.schema.Load(
+              {{"formatVersion", 1}, {"schemaIdentity", "bounded-schema"},
+               {"buildIdentity", "bounded-build"},
+               {"tables", std::move(schema_tables)}}, &error),
+          error.c_str());
+  return fixture;
+}
 
 Backend ValidBackend() {
   Backend backend;
@@ -202,8 +304,8 @@ void TestLifecycleAndRevalidation() {
 
   catalog.Install(profile, discovery);
   auto backend = ValidBackend();
-  Require(catalog.Revalidate(backend) && backend.batch_calls == 1,
-          "sentinels and relationships were not batch revalidated");
+  Require(catalog.Revalidate(backend) && backend.batch_calls == 2,
+          "sentinels and relationships were not verified twice");
 
   auto target = *catalog.GetHandle(220022);
   backend.allocation_ok = false;
@@ -222,6 +324,64 @@ void TestLifecycleAndRevalidation() {
   Require(!catalog.Revalidate(backend) && !catalog.GetHandle(330033) &&
               catalog.GetHandle(220022).has_value(),
           "relationship failure did not quarantine dependent descriptor");
+}
+
+void TestBoundedBatchRevalidation() {
+  auto over_64 = BoundedEvidenceFixture(65);
+  SessionCatalog catalog;
+  catalog.Install(over_64.profile, over_64.discovery);
+  CatalogEvidenceSnapshot snapshot;
+  Require(catalog.Revalidate(over_64.backend, &snapshot),
+          "more than 64 accepted evidence ranges were rejected");
+  Require(over_64.backend.batch_calls == 4 &&
+              over_64.backend.maximum_ranges == 64 &&
+              over_64.backend.maximum_bytes <= 256 * 1024,
+          "revalidation did not partition both passes at backend limits");
+  Require(snapshot.guards.size() == 65,
+          "bounded evidence snapshot silently truncated ranges");
+  for (std::size_t index = 0; index < snapshot.guards.size(); ++index) {
+    Require(snapshot.guards[index].address == over_64.expected_addresses[index],
+            "bounded evidence result ordering changed");
+  }
+
+  auto mixed = BoundedEvidenceFixture(129, 10);
+  catalog.Install(mixed.profile, mixed.discovery);
+  Require(catalog.Revalidate(mixed.backend) && mixed.backend.batch_calls == 6,
+          "more than 128 mixed fingerprint/relationship ranges were rejected");
+  Require(mixed.backend.maximum_ranges == 64 &&
+              mixed.backend.maximum_bytes <= 256 * 1024,
+          "mixed evidence exceeded a backend batch limit");
+
+  auto exact = BoundedEvidenceFixture(64, 0, 4096);
+  catalog.Install(exact.profile, exact.discovery);
+  Require(catalog.Revalidate(exact.backend) && exact.backend.batch_calls == 2 &&
+              exact.backend.maximum_ranges == 64 &&
+              exact.backend.maximum_bytes == 256 * 1024,
+          "exact range/byte limit boundary was not accepted in one chunk per pass");
+}
+
+void TestChunkFailuresAndInstability() {
+  auto unstable = BoundedEvidenceFixture(129);
+  SessionCatalog catalog;
+  catalog.Install(unstable.profile, unstable.discovery);
+  unstable.backend.mutate_on_call = 4;
+  Require(!catalog.Revalidate(unstable.backend),
+          "mutation between bounded verification passes was accepted");
+
+  auto partial = BoundedEvidenceFixture(65);
+  catalog.Install(partial.profile, partial.discovery);
+  partial.backend.fail_on_call = 2;
+  CatalogEvidenceSnapshot snapshot;
+  Require(!catalog.Revalidate(partial.backend, &snapshot) && snapshot.guards.empty(),
+          "partial bounded batch failure produced accepted evidence");
+
+  auto invalid_profile = Bundle();
+  invalid_profile.tables[0].rows[0].pattern.resize(256 * 1024 + 1, 1);
+  invalid_profile.tables[0].rows[0].mask.resize(256 * 1024 + 1, 0xFF);
+  auto invalid_backend = ValidBackend();
+  catalog.Install(invalid_profile, Discovery());
+  Require(!catalog.Revalidate(invalid_backend) && invalid_backend.batch_calls == 0,
+          "a single oversized evidence range reached the backend");
 }
 
 void TestTransitiveDependencyQuarantine() {
@@ -245,6 +405,8 @@ int main() {
   try {
     TestGenerationAndPublicSurface();
     TestLifecycleAndRevalidation();
+    TestBoundedBatchRevalidation();
+    TestChunkFailuresAndInstability();
     TestTransitiveDependencyQuarantine();
     std::cout << "frtk catalog smoke passed\n";
     return 0;

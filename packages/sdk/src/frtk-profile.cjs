@@ -5,6 +5,7 @@ const {
   hasExactKeys,
   isSafeIntegerBetween,
   isUpperHexBytes,
+  isValidUtf8BoundedString,
   canonicalStringify,
 } = require('./validation.cjs');
 const { decodeField } = require('./frtk-fields.cjs');
@@ -26,23 +27,20 @@ function compareUtf8Ordinal(left, right) {
 }
 
 function requireIdentity(value, name) {
-  if (typeof value !== 'string' || value.length < 1 || value.length > 128) {
-    throw new TypeError(`${name} must be a nonempty bounded string`);
+  if (!isValidUtf8BoundedString(value, LIMITS.nameBytes)) {
+    if (typeof value === 'string' && /[\uD800-\uDFFF]/u.test(value)) {
+      throw new TypeError(`${name} must be valid UTF-8`);
+    }
+    throw new TypeError(`${name} must use 1..128 UTF-8 bytes`);
   }
   return value;
 }
 
 function requireLogicalName(value, name) {
-  if (typeof value === 'string') {
-    for (const character of value) {
-      const codePoint = character.codePointAt(0);
-      if (codePoint >= 0xD800 && codePoint <= 0xDFFF) {
-        throw new TypeError(`${name} must be valid UTF-8`);
-      }
+  if (!isValidUtf8BoundedString(value, LIMITS.nameBytes)) {
+    if (typeof value === 'string' && /[\uD800-\uDFFF]/u.test(value)) {
+      throw new TypeError(`${name} must be valid UTF-8`);
     }
-  }
-  if (typeof value !== 'string' || Buffer.byteLength(value, 'utf8') < 1 ||
-      Buffer.byteLength(value, 'utf8') > LIMITS.nameBytes) {
     throw new TypeError(`${name} must use 1..128 UTF-8 bytes`);
   }
   return value;

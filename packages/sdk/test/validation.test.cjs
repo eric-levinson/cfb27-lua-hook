@@ -7,6 +7,7 @@ const {
   hasOnlyKeys,
   isSafeIntegerBetween,
   isUpperHexBytes,
+  isValidUtf8BoundedString,
   canonicalStringify,
 } = require('../src/validation.cjs');
 
@@ -16,6 +17,13 @@ test('generic validators enforce exact and allowed object keys', () => {
   assert.equal(hasExactKeys([], []), false);
   assert.equal(hasOnlyKeys({ a: 1 }, ['a', 'b']), true);
   assert.equal(hasOnlyKeys({ c: 1 }, ['a', 'b']), false);
+});
+
+test('UTF-8 string validation rejects lone surrogates and measures encoded bytes', () => {
+  assert.equal(isValidUtf8BoundedString('é'.repeat(64), 128), true);
+  assert.equal(isValidUtf8BoundedString('é'.repeat(64) + 'a', 128), false);
+  assert.equal(isValidUtf8BoundedString('\uD800', 128), false);
+  assert.equal(isValidUtf8BoundedString('\uDC00', 128), false);
 });
 
 test('bounded integer validator rejects unsafe, fractional, and out-of-range values', () => {
