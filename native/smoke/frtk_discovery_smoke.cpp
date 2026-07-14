@@ -67,6 +67,20 @@ TableProfile Table(std::string name, std::uint16_t id, std::uint32_t capacity) {
   return table;
 }
 
+TableProfile EvidenceTable(std::string name, std::uint16_t table_id,
+                           std::uint32_t unique_id,
+                           std::uint32_t record_size) {
+  auto table = Table(std::move(name), table_id, 10);
+  table.unique_id = unique_id;
+  table.record_size = record_size;
+  for (auto& row : table.rows) {
+    row.pattern.resize(record_size,
+                       static_cast<std::uint8_t>(row.row_index));
+    row.mask.assign(record_size, 0xFF);
+  }
+  return table;
+}
+
 json Field(std::string name, std::string encoding, std::uint32_t offset,
            std::uint32_t storage, std::uint32_t width,
            std::optional<std::uint16_t> reference_table_id = std::nullopt) {
@@ -495,6 +509,40 @@ void TestLiveDescriptorAndWordOrderDiscovery() {
           "live descriptor discovery performed global row scans");
 }
 
+void TestEvidenceBackedDirectWriteAuthority() {
+  const std::array verified{
+      std::tuple{"Recruit", 4269u, 1873209313u, 24u},
+      std::tuple{"ProspectTargetSchool", 5840u, 3789266353u, 4u},
+      std::tuple{"UserRecruitTarget", 4168u, 3987156317u, 36u},
+      std::tuple{"ActiveVisitInfo", 4176u, 3093586546u, 4u},
+      std::tuple{"ActiveRecruitingPitch", 4190u, 1559900276u, 4u},
+      std::tuple{"RecruitingBoard", 4251u, 220276943u, 12u},
+  };
+  for (const auto& [name, table_id, unique_id, record_size] : verified) {
+    ProfileBundle bundle;
+    bundle.tables = {EvidenceTable(name, static_cast<std::uint16_t>(table_id),
+                                   unique_id, record_size)};
+    LoadSchema(bundle);
+    FakeBackend backend;
+    InstallLiveDescriptorTable(bundle.tables[0], backend, 0x500000, 0x600000,
+                               48, 16);
+    const auto result = DiscoverTables(bundle, backend);
+    Require(State(result, unique_id).descriptor->direct_write_verified,
+            "verified table did not receive direct authority");
+  }
+
+  ProfileBundle mismatch;
+  mismatch.tables = {
+      EvidenceTable("UserRecruitTarget", 4168, 3987156317u, 35)};
+  LoadSchema(mismatch);
+  FakeBackend backend;
+  InstallLiveDescriptorTable(mismatch.tables[0], backend, 0x700000, 0x800000,
+                             48, 16);
+  const auto result = DiscoverTables(mismatch, backend);
+  Require(!State(result, 3987156317u).descriptor->direct_write_verified,
+          "wrong record size received direct authority");
+}
+
 void TestLiveDescriptorSkipsInvalidSignatureCopy() {
   auto bundle = Bundle();
   bundle.tables.resize(1);
@@ -892,6 +940,7 @@ void TestSchemaAuthoritativeRelationshipFields() {
 int main() {
   try {
     TestLiveDescriptorAndWordOrderDiscovery();
+    TestEvidenceBackedDirectWriteAuthority();
     TestLiveDescriptorSkipsInvalidSignatureCopy();
     TestLiveDescriptorAcceptsAlternateEndPointerOffset();
     TestLiveDescriptorRelationshipWordOrder();

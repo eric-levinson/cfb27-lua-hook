@@ -77,6 +77,50 @@ Addresses, byte buffers, masks, offsets, memory ranges, and guarded transaction
 operations remain host-internal. Raw memory diagnostic methods are separate and
 retain their existing contracts.
 
+## Live recruiting service
+
+`createLiveRecruitingService({ client, generation })` wraps the typed API for
+the Brooks-verified existing-row recruiting surface. The caller's save-backed
+model supplies the `UserRecruitTarget`, RecruitingBoard, existing pitch, and
+existing visit row numbers. The hook supplies live catalog discovery, decoded
+reads, authority checks, and guarded transactions:
+
+```js
+const { createClient, createLiveRecruitingService } = require('@cfb27/lua-hook');
+
+const client = createClient({ pid });
+await client.loadFrtkProfile({ profile, layout });
+const { generation } = await client.discoverFrtkCatalog();
+const recruiting = await createLiveRecruitingService({ client, generation });
+
+const state = await recruiting.readState({
+  targetRow: selected.userRecruitTargetRow,
+  boardRow: selected.recruitingBoardRow,
+  pitchRow: selected.activePitchRow,
+  visitRow: selected.activeVisitRow,
+});
+
+await recruiting.setContactAction({
+  transactionId: `recruiting.dm.${Date.now()}`,
+  targetRow: selected.userRecruitTargetRow,
+  boardRow: selected.recruitingBoardRow,
+  action: 'dm-player',
+  enabled: true,
+});
+```
+
+The service also exposes `setNilOffer`, `rewritePitch`, and `rewriteVisit`.
+Contact actions are exactly `dm-player`, `browse-social-media`, and
+`friends-family`; each contact bit and its RecruitingBoard assigned-hours delta
+share one field transaction. `rewritePitch` preserves the row's current
+intensity and cost. Every mutation accepts `dryRun: true` and returns a decoded
+summary without exposing the internal field changes.
+
+`LIVE_RECRUITING_TABLES` exports the sanitized identities and field definitions
+needed by a save-backed profile builder. The builder still supplies its own
+local fingerprints. This API never allocates or frees a row and does not add or
+remove pitches, visits, or board members.
+
 Stable FrTk errors are `FRTK_PROFILE_INVALID`, `FRTK_DISCOVERY_FAILED`,
 `FRTK_DISCOVERY_TIMEOUT`,
 `FRTK_CATALOG_STALE`, `FRTK_FIELD_INVALID`, and
@@ -86,3 +130,6 @@ progress object: phase, public Unique ID or `null`, zero-based fingerprint
 ordinal or `null`, completed fingerprint count, elapsed milliseconds, and
 bounded cumulative page, chunk, scanned-byte, candidate-window, and capped-match
 counters. It never exposes private memory or fingerprint material.
+
+The recruiting wrapper additionally reports `RECRUITING_ACTION_UNSUPPORTED`
+and `RECRUITING_HOURS_INSUFFICIENT` for its two domain-specific failures.

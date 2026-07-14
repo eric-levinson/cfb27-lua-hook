@@ -242,3 +242,24 @@ After the earlier live session, both applications were closed and the supported
 uninstall restored the game and MMC active proxies. Independent SHA-256 checks
 of both files returned
 `3E87682118E593F334BA665826E2A6AB85BA460F2E1FE95B173A7199863AD454`.
+
+## Imported live recruiting evidence on July 14, 2026
+
+The existing-row recruiting SDK surface imports sanitized behavioral evidence
+from Brooks's `cfb27-dynasty-modding` commit
+`b2b5a7ce4216c5838f1dbd2fb5a76dba6d67e7fe`, layout version `1.2.0`. Runtime
+write authority requires the exact current-build table ID, persistent Unique ID,
+and record size shown here; file profiles remain `discovery_only`.
+
+| Table | Table ID | Unique ID | Record size | Imported operation |
+|---|---:|---:|---:|---|
+| UserRecruitTarget | 4168 | 3987156317 | 36 | Contact booleans and `CurrentNILOffer` |
+| ActiveVisitInfo | 4176 | 3093586546 | 4 | Rewrite an existing visit's week, week type, and activity |
+| ActiveRecruitingPitch | 4190 | 1559900276 | 4 | Rewrite an existing pitch enum while preserving intensity |
+| RecruitingBoard | 4251 | 220276943 | 12 | Read total/processed/assigned hours and atomically adjust assigned hours with contacts |
+
+This delivery excludes allocation and freelist changes, `SendTheHouse`,
+scholarships, scouting, board membership, pitch-intensity changes, and pitch or
+visit creation/removal. Verification for this import is automated and offline;
+no additional installed-host, CFB27, MMC, weekly-advance, or autosave gate was
+performed.
