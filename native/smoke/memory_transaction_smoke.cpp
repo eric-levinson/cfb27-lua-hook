@@ -13,6 +13,7 @@
 namespace {
 
 using cfb27::memory::MemoryBackend;
+using cfb27::memory::TransactionOperationKind;
 using cfb27::memory::RunTransaction;
 using cfb27::memory::TransactionOperation;
 using cfb27::memory::TransactionRequest;
@@ -42,9 +43,11 @@ class FakeMemoryBackend final : public MemoryBackend {
     rollback_started = false;
     write_addresses.clear();
     apply_calls.clear();
+    validation_modes.clear();
   }
 
-  bool Validate(std::uintptr_t address, std::size_t size, bool) override {
+  bool Validate(std::uintptr_t address, std::size_t size, bool writable) override {
+    validation_modes.push_back(writable);
     return address <= bytes.size() && size <= bytes.size() - address;
   }
 
@@ -90,6 +93,7 @@ class FakeMemoryBackend final : public MemoryBackend {
   bool rollback_started{};
   std::vector<std::uintptr_t> write_addresses;
   std::vector<std::string> apply_calls;
+  std::vector<bool> validation_modes;
 };
 
 TransactionRequest ValidRequest(const FakeMemoryBackend& backend) {
@@ -137,6 +141,46 @@ void TestApplyAndPreflight() {
   const auto mismatch = RunTransaction(valid, backend);
   Require(mismatch.status == Status::kRejected && backend.write_calls == 0,
           "preflight mismatch writes nothing");
+}
+
+void TestVerifyOnlyPreflight() {
+  FakeMemoryBackend backend;
+  auto request = ValidRequest(backend);
+  request.operations.insert(
+      request.operations.begin(),
+      {.address = "0x8",
+       .expected = {backend.original[0x8], backend.original[0x9]},
+       .kind = TransactionOperationKind::kVerifyOnly});
+
+  const auto applied = RunTransaction(request, backend);
+  Require(applied.status == Status::kAppliedVerified &&
+              backend.write_addresses ==
+                  std::vector<std::uintptr_t>({0x10, 0x20}) &&
+              !applied.operations[0].applied && applied.operations[0].verified,
+          "verify-only operation participated without writing");
+  Require(!backend.validation_modes.front(),
+          "verify-only operation incorrectly required writable memory");
+
+  backend.Reset();
+  backend.fail_write_index = 1;
+  const auto rolled_back = RunTransaction(request, backend);
+  Require(rolled_back.status == Status::kRolledBackVerified &&
+              backend.bytes == backend.original &&
+              backend.write_addresses ==
+                  std::vector<std::uintptr_t>({0x10, 0x20, 0x20, 0x10}),
+          "verify-only operation was incompatible with rollback");
+
+  backend.Reset();
+  backend.bytes[0x8] ^= 1;
+  const auto mismatch = RunTransaction(request, backend);
+  Require(mismatch.status == Status::kRejected && backend.write_calls == 0,
+          "verify-only mismatch did not reject before every write");
+
+  backend.Reset();
+  request.operations[0].expected.assign(4097, 1);
+  Require(RunTransaction(request, backend).status == Status::kRejected &&
+              backend.write_calls == 0,
+          "verify-only operation bypassed byte limits");
 }
 
 void TestRollbackOutcomes() {
@@ -264,6 +308,7 @@ void TestNonOverlappingRequestOrderIsPreserved() {
 int main() {
   try {
     TestApplyAndPreflight();
+    TestVerifyOnlyPreflight();
     TestRollbackOutcomes();
     TestRequestValidation();
     TestNonOverlappingRequestOrderIsPreserved();

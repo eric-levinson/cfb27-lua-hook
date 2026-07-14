@@ -437,6 +437,233 @@ test('allow-unsupported-build is explicit and only valid for memory diagnostics'
   assert.match(invalid.output.stderr, /only valid for memory/);
 });
 
+test('frtk profile validate contains the file under .frtk and loads it through the SDK', async () => {
+  const calls = [];
+  const { io, output } = memoryIo();
+  const sdk = {
+    discoverGame: async () => ({ pid: 27 }),
+    createClient: () => ({
+      loadFrtkProfileFromFile: async (file, options) => {
+        calls.push([file, options]);
+        return { profileId: 'p1', schemaIdentity: 's1', buildIdentity: 'b1', tableCount: 2 };
+      },
+    }),
+  };
+  const fileSystem = memoryFileSystem(async () => '{"secret":"raw profile"}');
+  assert.equal(await main(['frtk', 'profile', 'validate', '.frtk/profile.json', '--json'], {
+    sdk, io, fileSystem, cwd: 'C:\\workspace',
+  }), 0);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], path.resolve('C:\\workspace', '.frtk/profile.json'));
+  assert.equal(JSON.stringify(output).includes('raw profile'), false);
+});
+
+test('frtk catalog discover loads a profile, discovers, and emits only typed catalog data', async () => {
+  const calls = [];
+  const { io, output } = memoryIo();
+  const client = {
+    loadFrtkProfileFromFile: async () => { calls.push('load'); return { tableCount: 1 }; },
+    discoverFrtkCatalog: async () => { calls.push('discover'); return { generation: 4, tableCount: 1 }; },
+    inspectFrtkCatalog: async (value) => {
+      calls.push(['inspect', value]);
+      return { generation: 4, tables: [{ uniqueId: 7, logicalName: 'Recruit',
+        authorityStatus: 'direct_verified', capacity: 35, profileId: 'p1', generation: 4,
+        evidence: [] }] };
+    },
+  };
+  const sdk = { discoverGame: async () => ({ pid: 27 }), createClient: () => client };
+  assert.equal(await main(['frtk', 'catalog', 'discover', '.frtk/profile.json', '--json'], {
+    sdk, io, fileSystem: memoryFileSystem(async () => '{}'), cwd: 'C:\\workspace',
+  }), 0);
+  assert.deepEqual(calls, ['load', 'discover', ['inspect', { generation: 4 }]]);
+  for (const forbidden of ['address', 'bytesHex', 'patternHex', 'maskHex', 'operations']) {
+    assert.equal(output.stdout.includes(forbidden), false);
+  }
+});
+
+test('frtk catalog discover JSON exposes only sanitized timeout progress', async () => {
+  const details = {
+    stage: 'scan', tableUniqueId: 900001, fingerprintOrdinal: 1,
+    completedFingerprintCount: 4, elapsedMilliseconds: 2000,
+    pagesScanned: 2, chunksScanned: 16, scannedBytes: 64 * 1024 * 1024,
+    candidateWindows: 16384, cappedMatches: 8,
+  };
+  const timeout = Object.assign(new Error('FrTk discovery exceeded its native operation budget'), {
+    code: 'FRTK_DISCOVERY_TIMEOUT', details,
+  });
+  const client = {
+    loadFrtkProfileFromFile: async () => ({ tableCount: 1 }),
+    discoverFrtkCatalog: async () => { throw timeout; },
+  };
+  const { io, output } = memoryIo();
+  const sdk = { discoverGame: async () => ({ pid: 27 }), createClient: () => client };
+  assert.equal(await main(['frtk', 'catalog', 'discover', '.frtk/profile.json', '--json'], {
+    sdk, io, fileSystem: memoryFileSystem(async () => '{}'), cwd: 'C:\\workspace',
+  }), 70);
+  assert.deepEqual(JSON.parse(output.stdout), {
+    ok: false,
+    error: {
+      code: 'FRTK_DISCOVERY_TIMEOUT',
+      message: 'FrTk discovery exceeded its native operation budget',
+      details,
+    },
+  });
+});
+
+test('frtk records read loads its profile and accepts only a numeric uniqueId selector', async () => {
+  const calls = [];
+  const { io, output } = memoryIo();
+  const client = {
+    loadFrtkProfileFromFile: async (file) => { calls.push(['load', file]); return { tableCount: 1 }; },
+    discoverFrtkCatalog: async () => ({ generation: 8, tableCount: 1 }),
+    inspectFrtkCatalog: async () => ({ generation: 8, tables: [{
+      uniqueId: 900001, logicalName: 'Recruit', authorityStatus: 'direct_verified', capacity: 35,
+      profileId: 'p1', generation: 8, evidence: [],
+    }] }),
+    readFrtkRecords: async (value) => {
+      calls.push(value);
+      return { generation: 8, records: [{ uniqueId: 900001, row: 7,
+        values: [{ field: 'CommitScore', value: 123 }, { field: 'RecruitStage', value: 2 }] }] };
+    },
+  };
+  const sdk = { discoverGame: async () => ({ pid: 27 }), createClient: () => client };
+  assert.equal(await main(['frtk', 'records', 'read', '.frtk/profile.json', '900001', '--row', '7',
+    '--field', 'CommitScore', '--field', 'RecruitStage', '--json'], {
+    sdk, io, fileSystem: memoryFileSystem(async () => '{}'), cwd: 'C:\\workspace',
+  }), 0);
+  assert.deepEqual(calls, [
+    ['load', path.resolve('C:\\workspace', '.frtk/profile.json')],
+    { generation: 8, records: [{ uniqueId: 900001, row: 7,
+      fields: ['CommitScore', 'RecruitStage'] }] },
+  ]);
+  assert.equal(output.stdout.includes('address'), false);
+});
+
+test('frtk records read human output includes the validated lifecycle generation', async () => {
+  const { io, output } = memoryIo();
+  const client = {
+    loadFrtkProfileFromFile: async () => ({ tableCount: 1 }),
+    discoverFrtkCatalog: async () => ({ generation: 12, tableCount: 1 }),
+    inspectFrtkCatalog: async () => ({ generation: 12, tables: [{
+      uniqueId: 900001, logicalName: 'Recruit', authorityStatus: 'direct_verified', capacity: 35,
+      profileId: 'p1', generation: 12, evidence: [],
+    }] }),
+    readFrtkRecords: async () => ({ generation: 12, records: [{
+      uniqueId: 900001, row: 7, values: [{ field: 'Score', value: 123 }],
+    }] }),
+  };
+  const sdk = { discoverGame: async () => ({ pid: 27 }), createClient: () => client };
+  assert.equal(await main(['frtk', 'records', 'read', '.frtk/profile.json', '900001',
+    '--row', '7', '--field', 'Score'], {
+    sdk, io, fileSystem: memoryFileSystem(async () => '{}'), cwd: 'C:\\workspace',
+  }), 0);
+  assert.match(output.stdout, /generation 12/i);
+});
+
+test('frtk catalog inspect is stateless and loads a contained profile before discovery', async () => {
+  const calls = [];
+  const client = {
+    loadFrtkProfileFromFile: async (file) => { calls.push(['load', file]); },
+    discoverFrtkCatalog: async () => { calls.push('discover'); return { generation: 9, tableCount: 1 }; },
+    inspectFrtkCatalog: async (value) => { calls.push(['inspect', value]); return {
+      generation: 9, tables: [{ uniqueId: 900001, logicalName: 'Recruit',
+        authorityStatus: 'direct_verified', capacity: 35, profileId: 'p1', generation: 9,
+        evidence: [] }],
+    }; },
+  };
+  const sdk = { discoverGame: async () => ({ pid: 27 }), createClient: () => client };
+  assert.equal(await main(['frtk', 'catalog', 'inspect', '.frtk/profile.json', '--json'], {
+    sdk, io: memoryIo().io, fileSystem: memoryFileSystem(async () => '{}'), cwd: 'C:\\workspace',
+  }), 0);
+  assert.deepEqual(calls, [
+    ['load', path.resolve('C:\\workspace', '.frtk/profile.json')],
+    'discover', ['inspect', { generation: 9 }],
+  ]);
+});
+
+test('frtk records read refuses logical names as selectors', async () => {
+  const { io, output } = memoryIo();
+  assert.equal(await main(['frtk', 'records', 'read', '.frtk/profile.json', 'Recruit',
+    '--row', '7', '--field', 'Score'], {
+    sdk: {}, io, fileSystem: memoryFileSystem(async () => '{}'), cwd: 'C:\\workspace',
+  }), 2);
+  assert.match(output.stderr, /Unique ID/i);
+});
+
+test('frtk profile paths outside .frtk require the explicit external-file override', async () => {
+  for (const argv of [
+    ['frtk', 'profile', 'validate', 'profile.json'],
+    ['frtk', 'catalog', 'discover', 'C:\\outside\\profile.json'],
+    ['frtk', 'catalog', 'inspect', 'C:\\outside\\profile.json'],
+    ['frtk', 'records', 'read', 'C:\\outside\\profile.json', '900001',
+      '--row', '0', '--field', 'Score'],
+  ]) {
+    let clients = 0;
+    const { io, output } = memoryIo();
+    assert.equal(await main(argv, {
+      sdk: { createClient: () => { clients += 1; return {}; } }, io,
+      fileSystem: memoryFileSystem(async () => '{}'), cwd: 'C:\\workspace',
+    }), 2);
+    assert.match(output.stderr, /\.frtk/);
+    assert.equal(clients, 0);
+  }
+});
+
+test('sequential stateless FrTk commands each load a profile before discovery', async () => {
+  const sequences = [];
+  const sdk = {
+    discoverGame: async () => ({ pid: 27 }),
+    createClient: () => {
+      const sequence = [];
+      sequences.push(sequence);
+      return {
+        loadFrtkProfileFromFile: async () => { sequence.push('load'); },
+        discoverFrtkCatalog: async () => { sequence.push('discover'); return { generation: 3, tableCount: 1 }; },
+        inspectFrtkCatalog: async () => { sequence.push('inspect'); return { generation: 3,
+          tables: [{ uniqueId: 900001, logicalName: 'Recruit', authorityStatus: 'direct_verified',
+            capacity: 35, profileId: 'p1', generation: 3, evidence: [] }] }; },
+        readFrtkRecords: async () => { sequence.push('read'); return { generation: 3,
+          records: [{ uniqueId: 900001, row: 0, values: [{ field: 'Score', value: 1 }] }] }; },
+      };
+    },
+  };
+  const common = { sdk, fileSystem: memoryFileSystem(async () => '{}'), cwd: 'C:\\workspace' };
+  assert.equal(await main(['frtk', 'catalog', 'inspect', '.frtk/profile.json'], {
+    ...common, io: memoryIo().io,
+  }), 0);
+  assert.equal(await main(['frtk', 'records', 'read', '.frtk/profile.json', '900001',
+    '--row', '0', '--field', 'Score'], { ...common, io: memoryIo().io }), 0);
+  assert.deepEqual(sequences, [
+    ['load', 'discover', 'inspect'],
+    ['load', 'discover', 'inspect', 'read'],
+  ]);
+});
+
+test('explicit external FrTk profile override does not require a local .frtk directory', async () => {
+  const target = 'C:\\outside\\profile.json';
+  const fileSystem = {
+    readFile: async () => '{}',
+    realpath: async (value) => {
+      if (value.endsWith('.frtk')) throw new Error('missing');
+      return value;
+    },
+  };
+  let loaded;
+  const sdk = {
+    discoverGame: async () => ({ pid: 27 }),
+    createClient: () => ({
+      loadFrtkProfileFromFile: async (file) => {
+        loaded = file;
+        return { profileId: 'p1', schemaIdentity: 's1', buildIdentity: 'b1', tableCount: 1 };
+      },
+    }),
+  };
+  assert.equal(await main(['frtk', 'profile', 'validate', target, '--allow-external-file'], {
+    sdk, io: memoryIo().io, fileSystem, cwd: 'C:\\workspace',
+  }), 0);
+  assert.equal(loaded, target);
+});
+
 test('memory transact reads one JSON request file and preserves the validated SDK result', async () => {
   const request = {
     transactionId: 'recruiting.influence-proof-1',

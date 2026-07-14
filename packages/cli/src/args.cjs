@@ -47,6 +47,8 @@ function parseArgs(argv) {
     allowUnsupportedBuild: false,
     includeAllocationMetadata: false,
     allowExternalFile: false,
+    row: undefined,
+    fields: [],
   };
   const seen = new Set();
   const values = new Map([
@@ -59,6 +61,7 @@ function parseArgs(argv) {
     ['--max-matches', 'maxMatches'],
     ['--max-pages', 'maxPages'],
     ['--context', 'context'],
+    ['--row', 'row'],
   ]);
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -99,6 +102,15 @@ function parseArgs(argv) {
       index += 1;
       continue;
     }
+    if (token === '--field') {
+      const value = argv[index + 1];
+      if (value === undefined || value.startsWith('--')) {
+        throw usageError('Missing value for --field');
+      }
+      options.fields.push(value);
+      index += 1;
+      continue;
+    }
     if (values.has(token)) {
       if (seen.has(token)) throw usageError(`Duplicate option: ${token}`);
       const value = argv[index + 1];
@@ -133,6 +145,9 @@ function parseArgs(argv) {
   }
   if (options.context !== undefined) {
     options.context = parseInteger(options.context, '--context', 0, 256);
+  }
+  if (options.row !== undefined) {
+    options.row = parseInteger(options.row, '--row', 0, 0xFFFFFFFF);
   }
   if (help) command = 'help';
   return { command, json, positionals, options };

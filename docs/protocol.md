@@ -47,6 +47,16 @@ Error response:
   readable private-memory ranges.
 - `writeTransaction { transactionId, operations }` — apply a bounded guarded
   batch with complete preflight comparison, readback, and rollback.
+- `loadFrtkProfile { profile, layout }` — atomically validate and load a
+  matching version-1 bundle.
+- `discoverFrtkCatalog {}` — resolve every required table into a new catalog.
+- `inspectFrtkCatalog { generation }` — return sanitized table summaries.
+- `readFrtkRecords { generation, records }` — read typed fields from
+  `{ uniqueId, row, fields }` selectors.
+- `transactFrtkFields { transactionId, generation, changes }` — submit logical
+  `{ uniqueId, row, field, value }` changes.
+- `invalidateFrtkCatalog { reason }` — stale all handles. Reasons are
+  `caller_transition`, `save_changed`, and `shutdown`.
 
 `hello.capabilities` advertises the memory commands as `memoryScan` and
 `memoryRead`, allocation-aware scans as `memoryScanAllocationMetadata`, guarded
@@ -54,6 +64,40 @@ writes as `memoryWriteTransaction`, and structured event registration as
 `telemetry`. `status.sessionWritesDisabled` reports whether an
 unverifiable rollback has permanently disabled writes for the current host
 session.
+
+The FrTk families are advertised as `frtkProfileV1`, `frtkCatalogV1`,
+`frtkRecordReadV1`, and `frtkFieldTransactionV1`. Public table selectors always
+use `uniqueId`; logical names are display text and current-build table IDs stay
+host-internal.
+
+### Typed FrTk catalog
+
+Profile and layout identity are validated together against the running build.
+Discovery advances generation on every attempt and installs no partial catalog
+when a required table is unresolved. Inspection returns sanitized identity,
+capacity, authority, generation, and bounded evidence only.
+
+Typed reads accept 1–64 record selectors. Each result has fixed keys
+`uniqueId`, `row`, and `values`; `values` is an ordered array of fixed-shape
+`{ field, value }` entries. A value is a number or a packed reference represented
+as `{ uniqueId, row }`. Field names are data values and are never JSON property
+names, including names such as `address`, `bytesHex`, `mask`, `offset`, `range`,
+`operation`, and `tableId`. For example:
+
+```json
+{"generation":4,"records":[{"uniqueId":900001,"row":0,"values":[{"field":"CommitScore","value":123},{"field":"RecruitLink","value":{"uniqueId":900002,"row":7}}]}]}
+```
+
+Typed transactions accept
+1–128 logical changes, revalidate the catalog, reread complete records, encode
+fields through the layout, and pass the host-internal plan to the existing
+guarded engine. Only `direct_verified` tables may proceed; other authority
+states return `FRTK_AUTHORITY_UNPROVEN`.
+
+Typed responses never expose addresses, byte buffers, masks, field offsets,
+memory ranges, or transaction operations. Explicit invalidation and a
+`game_ready:false` transition advance generation; stale requests return
+`FRTK_CATALOG_STALE` and must rediscover.
 
 ### Structured telemetry
 
@@ -107,7 +151,7 @@ Request:
 Result:
 
 ```json
-{"supportedBuild":false,"complete":false,"nextCursor":"0x7FF614340000","scannedBytes":33554432,"matches":[{"address":"0x7FF612340080","regionBase":"0x7FF612340000","regionSize":65536,"protection":4,"contextAddress":"0x7FF61234007C","contextHex":"00000000CFB27A1100A1B2C3D4E5F60718293A4B00000000"}]}
+{"supportedBuild":false,"complete":false,"nextCursor":"0x2234ABCD","scannedBytes":33554432,"matches":[{"address":"0x1234AB80","regionBase":"0x1234AB00","regionSize":65536,"protection":4,"contextAddress":"0x1234AB7C","contextHex":"00000000CFB27A1100A1B2C3D4E5F60718293A4B00000000"}]}
 ```
 
 When `includeAllocationMetadata` is absent or the JSON boolean `false`, each
@@ -115,7 +159,7 @@ match has exactly the six legacy properties shown above. When it is `true`, the
 host adds exactly four properties to every match:
 
 ```json
-{"address":"0x7FF612340080","regionBase":"0x7FF612340000","regionSize":4096,"protection":4,"contextAddress":"0x7FF61234007C","contextHex":"00000000CFB27A1100A1B2C3D4E5F60718293A4B00000000","allocationBase":"0x7FF612300000","allocationSize":4194304,"allocationProtect":4,"offsetInAllocation":262272}
+{"address":"0x1234AB80","regionBase":"0x1234AB00","regionSize":4096,"protection":4,"contextAddress":"0x1234AB7C","contextHex":"00000000CFB27A1100A1B2C3D4E5F60718293A4B00000000","allocationBase":"0x12340000","allocationSize":4194304,"allocationProtect":4,"offsetInAllocation":43904}
 ```
 
 `allocationBase` is the allocation identity reported by the operating system.
@@ -164,13 +208,13 @@ any bytes are copied, so a failure never returns partial results.
 Request:
 
 ```json
-{"protocol":1,"id":"read-1","command":"readMemory","params":{"allowUnsupportedBuild":true,"ranges":[{"address":"0x7FF612340080","length":16}]}}
+{"protocol":1,"id":"read-1","command":"readMemory","params":{"allowUnsupportedBuild":true,"ranges":[{"address":"0x1234AB80","length":16}]}}
 ```
 
 Result:
 
 ```json
-{"supportedBuild":false,"ranges":[{"address":"0x7FF612340080","length":16,"bytesHex":"CFB27A1100A1B2C3D4E5F60718293A4B"}]}
+{"supportedBuild":false,"ranges":[{"address":"0x1234AB80","length":16,"bytesHex":"CFB27A1100A1B2C3D4E5F60718293A4B"}]}
 ```
 
 Both commands reject unknown parameter keys; range objects also reject unknown
@@ -187,7 +231,7 @@ reads. Hex strings are nonempty uppercase byte sequences of equal length. One
 operation is limited to 4,096 bytes and the request is limited to 65,536 bytes.
 
 ```json
-{"protocol":1,"id":"write-1","command":"writeTransaction","params":{"transactionId":"recruiting.proof-1","operations":[{"address":"0x7FF612340080","expectedHex":"1020","replacementHex":"1121"}]}}
+{"protocol":1,"id":"write-1","command":"writeTransaction","params":{"transactionId":"recruiting.proof-1","operations":[{"address":"0x1234AB80","expectedHex":"1020","replacementHex":"1121"}]}}
 ```
 
 A successful result records the verified outcome for every operation:
@@ -221,6 +265,22 @@ timeout, invalid request/response, script failure, installation conflict, and
 backup-verification failure. Consumers should branch on `error.code`, not error
 message text.
 
+`FRTK_DISCOVERY_TIMEOUT` is the only typed FrTk error that carries public
+progress details. Its `details` object has exactly these keys:
+
+```json
+{"stage":"scan","tableUniqueId":900001,"fingerprintOrdinal":2,"completedFingerprintCount":7,"elapsedMilliseconds":1999,"pagesScanned":3,"chunksScanned":24,"scannedBytes":100663296,"candidateWindows":24576,"cappedMatches":8}
+```
+
+`stage` is one of `scan`, `allocation`, `relationship`, or `reread`.
+`tableUniqueId` is the public table Unique ID, or `null` outside a
+table-specific phase. `fingerprintOrdinal` is zero-based during `scan` and is
+`null` for the other phases. All counters are nonnegative safe integers,
+saturate instead of overflowing, and `cappedMatches` is at most 8. No address,
+allocation, pattern, mask, raw byte, table-name, row-index, protection, or
+memory-topology data is included. Unknown or malformed detail keys make the SDK
+reject the response as `INVALID_RESPONSE`.
+
 Memory commands additionally return `MEMORY_ACCESS_DENIED` when a requested
 range is not wholly readable private memory, `SCAN_LIMIT_EXCEEDED` when the
 aggregate scan bound would be crossed, and `TOO_MANY_MATCHES` rather than
@@ -230,6 +290,9 @@ Guarded writes additionally return `MEMORY_MISMATCH`,
 `ROLLBACK_VERIFICATION_FAILED`, and `SESSION_WRITES_DISABLED`. Malformed
 transaction shapes, addresses, hex, and overlapping operations return
 `INVALID_REQUEST`.
+Typed FrTk commands additionally return `FRTK_PROFILE_INVALID`,
+`FRTK_DISCOVERY_FAILED`, `FRTK_CATALOG_STALE`, `FRTK_FIELD_INVALID`, and
+`FRTK_AUTHORITY_UNPROVEN`.
 
 The unversioned legacy text pipe remains temporarily available for migration,
 but it is not the integration contract for new tools.

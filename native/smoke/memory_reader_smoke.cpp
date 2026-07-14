@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstring>
 #include <algorithm>
+#include <array>
 #include <iostream>
 #include <iterator>
 #include <set>
@@ -222,6 +223,106 @@ void TestScanExcludesMaskBuffer() {
     Require(address && (*address < mask_begin || *address >= mask_end),
             "scan returned request mask buffer");
   }
+}
+
+void TestSparsePlayerMatcher() {
+  std::array<std::uint8_t, 192> pattern{};
+  std::array<std::uint8_t, 192> mask{};
+  for (std::size_t selected = 0; selected < 22; ++selected) {
+    const auto offset = 32 + selected * 118 / 21;
+    pattern[offset] = static_cast<std::uint8_t>(0x81 + selected);
+    mask[offset] = 0xFF;
+  }
+  Require(mask[32] != 0 && mask[150] != 0,
+          "live Player selected-byte endpoints");
+
+  const auto matcher = cfb27::memory::detail::CompileMaskedPattern(pattern, mask);
+  Require(matcher.has_value(), "compile sparse Player matcher");
+  Require(matcher->selected_byte_count() == 22,
+          "matcher retains only 22 selected Player bytes");
+  Require(mask[matcher->anchor_offset()] != 0,
+          "matcher anchor is a selected byte");
+
+  std::array<std::uint8_t, 512> bytes{};
+  std::fill(bytes.begin(), bytes.end(), 0x22);
+  constexpr std::size_t kMatchOffset = 211;
+  for (std::size_t i = 0; i < pattern.size(); ++i) {
+    if (mask[i] != 0) bytes[kMatchOffset + i] = pattern[i];
+  }
+  cfb27::memory::detail::MatchStatistics statistics{};
+  const auto found = matcher->FindNext(bytes, 0,
+                                       bytes.size() - pattern.size() + 1,
+                                       &statistics);
+  Require(found == kMatchOffset, "sparse matcher preserves match correctness");
+  Require(statistics.candidates_checked == 1,
+          "selected-byte anchor skips noncandidate offsets");
+  Require(statistics.selected_byte_comparisons == 22,
+          "zero-mask Player bytes are never compared");
+}
+
+void TestInternalFrtkFourByteContract() {
+  constexpr std::size_t kAllocationSize = 64 * 1024;
+  Allocation allocation(kAllocationSize);
+  const std::array<std::uint8_t, 4> sentinel{0xD3, 0x71, 0xA9, 0x4C};
+  auto* target = static_cast<std::uint8_t*>(allocation.get()) + 257;
+  std::memcpy(target, sentinel.data(), sentinel.size());
+
+  const auto public_scan = ScanPrivateMemory({
+      .pattern = MappedCopy(sentinel),
+      .mask = MappedFill(sentinel.size(), 0xFF),
+      .max_matches = 1,
+  });
+  Require(public_scan.code == "INVALID_REQUEST",
+          "public raw scan retains eight-byte minimum");
+
+  const auto zero_mask_scan = ScanPrivateMemory({
+      .pattern = MappedFill(8, 0x77),
+      .mask = MappedFill(8, 0),
+      .max_matches = 1,
+      .cursor = FormatAddress(reinterpret_cast<std::uintptr_t>(allocation.get())),
+  });
+  Require(zero_mask_scan.code == "TOO_MANY_MATCHES",
+          "compiled matcher preserves public all-zero mask behavior");
+
+  const auto internal_scan = ScanPrivateMemory({
+      .pattern = MappedCopy(sentinel),
+      .mask = MappedFill(sentinel.size(), 0xFF),
+      .max_matches = 8,
+      .purpose = cfb27::memory::ScanPurpose::kFrtkInternal,
+  });
+  Require(internal_scan.complete,
+          "internal FrTk scan supports reviewed four-byte fingerprint");
+  Require(CountAddress(internal_scan.matches, target) == 1,
+          "internal four-byte scan returns exact fingerprint match");
+}
+
+void TestCandidateLoopCancellation() {
+  constexpr std::size_t kAllocationSize = 64 * 1024;
+  Allocation allocation(kAllocationSize);
+  std::memset(allocation.get(), 0x55, kAllocationSize);
+  std::size_t cancellation_checks = 0;
+  const auto scan = ScanPrivateMemory({
+      .pattern = MappedFill(8, 0x55),
+      .mask = MappedFill(8, 0xFF),
+      .max_matches = 64,
+      .cursor = FormatAddress(reinterpret_cast<std::uintptr_t>(allocation.get())),
+      .should_cancel = [&] { return ++cancellation_checks >= 4; },
+  });
+  Require(scan.code == "OPERATION_TIMEOUT",
+          "candidate loop returns deterministic cancellation code");
+  Require(scan.matches.empty(), "cancelled scan clears partial matches");
+  Require(cancellation_checks == 4,
+          "cancellation is checked inside candidate iteration");
+  Require(scan.scanned_bytes <= cfb27::memory::kMaxSafeDiagnosticCounter &&
+              scan.chunks_scanned <= cfb27::memory::kMaxSafeDiagnosticCounter &&
+              scan.candidate_windows <= cfb27::memory::kMaxSafeDiagnosticCounter,
+          "cancelled scan progress counters remain bounded safe integers");
+  Require(scan.chunks_scanned == 1,
+          "cancelled scan reports its completed read chunk");
+  Require(scan.progress_scanned_bytes == kAllocationSize,
+          "cancelled scan reports bytes consumed before cancellation");
+  Require(scan.candidate_windows == 1,
+          "cancelled scan reports its completed candidate window");
 }
 
 void TestScanHexDecodeRejectsBeforeMappedAllocation() {
@@ -550,6 +651,9 @@ int main() {
     TestScanHexDecodeRejectsBeforeMappedAllocation();
     TestRegionEligibility();
     TestScanAndRead();
+    TestSparsePlayerMatcher();
+    TestInternalFrtkFourByteContract();
+    TestCandidateLoopCancellation();
     TestAllocationTopology();
     TestScanExcludesMaskBuffer();
     TestRetainedContextCannotSelfMatch();

@@ -1,5 +1,12 @@
 # Safety boundary
 
+Release documentation must not contain realistic-width process addresses unless
+each synthetic token is immediately prefixed on the same line with the exact
+marker `SYNTHETIC_ADDRESS:` (for example,
+`SYNTHETIC_ADDRESS:0x7FF612340080`). Unmarked tokens are treated as private
+runtime evidence and rejected from staged files, npm archives, and the release
+ZIP.
+
 CFB27 Lua Hook is for a separately launched offline game session. It does not
 provide, distribute, or document an anticheat bypass.
 
@@ -35,6 +42,17 @@ sets `sessionWritesDisabled`, and both `writeTransaction` and `cfb.write_u8`
 reject all further writes until the process restarts. Integrations should call
 `hello`, inspect `writesAllowed`, check `status.sessionWritesDisabled`, and
 handle the transaction's verified status explicitly.
+
+The typed FrTk protocol is stricter than the raw memory surface. Profile and
+layout load as one validated bundle, public table selectors use Unique IDs,
+and discovery installs no partial catalog. Explicit transitions, save changes,
+shutdown, and `game_ready:false` stale the catalog generation.
+
+Typed responses omit process addresses, raw bytes, patterns, masks, offsets,
+ranges, and transaction plans. Typed writes accept only logical
+Unique-ID/row/field/value changes, reread live records, and use the existing
+guarded engine. Non-`direct_verified` authority fails closed before planning;
+rollback failure still disables raw, typed, and Lua writes for the session.
 
 `CFB27_SMOKE_ALLOW_WRITES=1` is a native test gate recognized only when the
 hosting executable is exactly `cfb27_protocol_smoke.exe`. It does not enable

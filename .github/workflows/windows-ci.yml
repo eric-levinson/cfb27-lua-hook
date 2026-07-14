@@ -22,6 +22,12 @@ jobs:
       - run: native/build-release/Release/cfb27_memory_reader_smoke.exe
       - run: native/build-release/Release/cfb27_telemetry_smoke.exe
       - run: native/build-release/Release/cfb27_memory_transaction_smoke.exe
+      - run: native/build-release/Release/cfb27_frtk_profile_smoke.exe
+      - run: native/build-release/Release/cfb27_frtk_field_schema_smoke.exe
+      - run: native/build-release/Release/cfb27_frtk_discovery_smoke.exe
+      - run: native/build-release/Release/cfb27_frtk_catalog_smoke.exe
+      - run: native/build-release/Release/cfb27_frtk_record_access_smoke.exe
+      - run: native/build-release/Release/cfb27_frtk_lua_api_smoke.exe native/build-release/Release/cfb27_lua_host.dll
       - run: native/build-release/Release/cfb27_protocol_smoke.exe native/build-release/Release/cfb27_lua_host.dll
         env:
           CFB27_SMOKE_ALLOW_WRITES: '1'

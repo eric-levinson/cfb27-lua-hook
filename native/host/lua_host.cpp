@@ -4,6 +4,10 @@
 
 #include "memory_reader.h"
 #include "memory_transaction.h"
+#include "frtk_catalog.h"
+#include "frtk_lua_api.h"
+#include "frtk_profile.h"
+#include "frtk_record_access.h"
 #include "protocol.h"
 #include "telemetry.h"
 
@@ -20,6 +24,7 @@
 #include <iomanip>
 #include <initializer_list>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -71,6 +76,7 @@ std::mutex g_lua_mutex;
 std::mutex g_host_write_mutex;
 std::mutex g_event_mutex;
 std::mutex g_file_log_mutex;
+std::mutex g_frtk_mutex;
 lua_State* g_lua{};
 std::vector<Callback> g_callbacks;
 std::filesystem::path g_host_directory;
@@ -80,6 +86,8 @@ std::deque<HostEvent> g_events;
 std::deque<LogEntry> g_logs;
 std::uint64_t g_next_event_cursor{1};
 std::atomic<std::int64_t> g_last_tick_event_ms{0};
+std::optional<cfb27::frtk::ProfileBundle> g_frtk_profile;
+cfb27::frtk::SessionCatalog g_frtk_catalog;
 
 std::int64_t NowMilliseconds() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -252,6 +260,173 @@ bool RealAnticheatIsRunning() {
 bool WriteEnvironmentAllowed() {
   return (SupportedBuild() || SmokeWritesAllowed()) && !RealAnticheatIsRunning();
 }
+
+class ProcessDiscoveryBackend final : public cfb27::frtk::DiscoveryBackend {
+ public:
+  explicit ProcessDiscoveryBackend(bool smoke_timeout_progress = false)
+      : smoke_timeout_progress_(smoke_timeout_progress) {}
+
+  cfb27::frtk::ScanObservationResult ScanTableDescriptor(
+      std::uint16_t table_id, std::uint32_t unique_id,
+      std::size_t max_matches,
+      const cfb27::frtk::DescriptorMatchFilter& accept_match,
+      const cfb27::frtk::DiscoveryDeadline& deadline) override {
+    if (!SupportedBuild()) {
+      return {.complete = true, .code = "DESCRIPTOR_SCAN_UNSUPPORTED"};
+    }
+    cfb27::frtk::RowFingerprint fingerprint;
+    fingerprint.pattern = {
+        static_cast<std::uint8_t>(table_id),
+        static_cast<std::uint8_t>(table_id >> 8), 0, 0,
+        static_cast<std::uint8_t>(unique_id),
+        static_cast<std::uint8_t>(unique_id >> 8),
+        static_cast<std::uint8_t>(unique_id >> 16),
+        static_cast<std::uint8_t>(unique_id >> 24)};
+    fingerprint.mask.assign(fingerprint.pattern.size(), 0xFF);
+    return ScanImpl(fingerprint, max_matches, deadline, true, accept_match);
+  }
+
+  cfb27::frtk::ScanObservationResult Scan(
+      const cfb27::frtk::RowFingerprint& fingerprint,
+      std::size_t max_matches,
+      const cfb27::frtk::DiscoveryDeadline& deadline) override {
+    return ScanImpl(fingerprint, max_matches, deadline, false, {});
+  }
+
+  cfb27::frtk::ScanObservationResult ScanImpl(
+      const cfb27::frtk::RowFingerprint& fingerprint,
+      std::size_t max_matches,
+      const cfb27::frtk::DiscoveryDeadline& deadline,
+      bool stop_after_first,
+      const cfb27::frtk::DescriptorMatchFilter& accept_match) {
+    if (smoke_timeout_progress_) {
+      ++smoke_timeout_scan_count_;
+      if (smoke_timeout_scan_count_ == 3) {
+        return {.complete = false,
+                .code = "OPERATION_TIMEOUT",
+                .counters = {.pages_scanned = 1,
+                             .chunks_scanned = 1,
+                             .scanned_bytes = 1024,
+                             .candidate_windows = 1,
+                             .capped_matches = 1}};
+      }
+      return {.complete = true,
+              .counters = {.pages_scanned = 1,
+                           .chunks_scanned = 2,
+                           .scanned_bytes = 2048,
+                           .candidate_windows = 3,
+                           .capped_matches = 4}};
+    }
+    cfb27::frtk::ScanObservationResult output{.complete = false};
+    const auto add = [](std::uint64_t& target, std::uint64_t value) {
+      target = value > cfb27::frtk::kMaxSafeDiagnosticCounter - target
+                   ? cfb27::frtk::kMaxSafeDiagnosticCounter
+                   : target + value;
+    };
+    std::optional<std::string> cursor;
+    for (std::size_t page = 0; page < 4096; ++page) {
+      if (deadline.Expired()) return output.code = "OPERATION_TIMEOUT", output;
+      auto pattern = cfb27::memory::MappedBytes::CopyFrom(fingerprint.pattern);
+      auto mask = cfb27::memory::MappedBytes::CopyFrom(fingerprint.mask);
+      if (!pattern || !mask) return {.code = "scan_setup_failed"};
+      cfb27::memory::ScanRequest request{
+          .pattern = std::move(*pattern), .mask = std::move(*mask),
+          .max_matches = max_matches, .context_before = 0,
+          .context_after = 0, .cursor = cursor,
+          .include_allocation_metadata = true,
+          .purpose = cfb27::memory::ScanPurpose::kFrtkInternal,
+          .should_cancel = [&deadline] { return deadline.Expired(); }};
+      auto result = cfb27::memory::ScanPrivateMemory(request);
+      add(output.counters.pages_scanned, 1);
+      add(output.counters.chunks_scanned, result.chunks_scanned);
+      add(output.counters.scanned_bytes, result.progress_scanned_bytes);
+      add(output.counters.candidate_windows, result.candidate_windows);
+      if (!result.code.empty()) return output.code = result.code, output;
+      for (const auto& match : result.matches) {
+        if (!match.allocation) return {.code = "allocation_invalid"};
+        const auto address = cfb27::memory::ParseAddress(match.address);
+        const auto base = cfb27::memory::ParseAddress(match.allocation->base);
+        if (!address || !base) return {.code = "allocation_invalid"};
+        const cfb27::frtk::ScanObservation observation{
+            *address, *base, match.allocation->size};
+        if (accept_match && !accept_match(observation)) continue;
+        output.matches.push_back(observation);
+        output.counters.capped_matches = (std::min)(
+            static_cast<std::uint64_t>(output.matches.size()),
+            static_cast<std::uint64_t>(max_matches));
+        if (stop_after_first) {
+          output.complete = true;
+          return output;
+        }
+        if (output.matches.size() > max_matches) {
+          output.code = "too_many_matches";
+          return output;
+        }
+      }
+      if (result.complete) {
+        output.complete = true;
+        return output;
+      }
+      if (!result.next_cursor || (cursor && *result.next_cursor == *cursor)) {
+        output.code = "scan_incomplete";
+        return output;
+      }
+      cursor = std::move(result.next_cursor);
+    }
+    output.code = "scan_limit";
+    return output;
+  }
+
+  bool ReadBatch(std::span<const cfb27::frtk::ReadRequest> requests,
+                 std::vector<std::vector<std::uint8_t>>& out) override {
+    std::vector<cfb27::memory::ReadRange> ranges;
+    ranges.reserve(requests.size());
+    for (const auto& request : requests) {
+      ranges.push_back({cfb27::memory::FormatAddress(request.address),
+                        request.length});
+    }
+    const auto result = cfb27::memory::ReadMemoryBatch(ranges);
+    if (!result.ok || result.ranges.size() != requests.size()) return false;
+    out.clear();
+    out.reserve(result.ranges.size());
+    for (const auto& range : result.ranges) out.push_back(range.bytes);
+    return true;
+  }
+
+  bool AllocationExists(
+      std::uintptr_t base, std::size_t size,
+      const cfb27::frtk::DiscoveryDeadline& deadline) override {
+    if (!base || !size || size > std::numeric_limits<std::uintptr_t>::max() - base)
+      return false;
+    std::uintptr_t cursor = base;
+    const auto end = base + size;
+    std::uintptr_t allocation_base = 0;
+    while (cursor < end) {
+      if (deadline.Expired()) return false;
+      MEMORY_BASIC_INFORMATION info{};
+      if (VirtualQuery(reinterpret_cast<const void*>(cursor), &info, sizeof(info)) !=
+              sizeof(info) || info.State != MEM_COMMIT || info.RegionSize == 0)
+        return false;
+      const auto observed_allocation =
+          reinterpret_cast<std::uintptr_t>(info.AllocationBase);
+      if (!allocation_base) allocation_base = observed_allocation;
+      if (observed_allocation != allocation_base) return false;
+      const auto region_end = reinterpret_cast<std::uintptr_t>(info.BaseAddress) +
+                              info.RegionSize;
+      if (region_end <= cursor) return false;
+      cursor = std::min(end, region_end);
+    }
+    return cursor == end;
+  }
+
+ private:
+  bool smoke_timeout_progress_{};
+  std::size_t smoke_timeout_scan_count_{};
+};
+
+std::unique_ptr<ProcessDiscoveryBackend> g_lua_db_validation_backend;
+std::unique_ptr<cfb27::memory::ProcessMemoryBackend> g_lua_db_memory_backend;
+std::unique_ptr<cfb27::frtk::LuaDatabaseApi> g_lua_db_api;
 
 class SmokeRollbackUnverifiedBackend final : public cfb27::memory::MemoryBackend {
  public:
@@ -686,6 +861,38 @@ void RegisterApi(lua_State* state) {
   lua_pushcfunction(state, LuaEmit); lua_setfield(state, -2, "emit");
   lua_pushcfunction(state, LuaOn); lua_setfield(state, -2, "on");
   lua_setglobal(state, "cfb");
+
+  g_lua_db_validation_backend = std::make_unique<ProcessDiscoveryBackend>();
+  g_lua_db_memory_backend =
+      std::make_unique<cfb27::memory::ProcessMemoryBackend>();
+  g_lua_db_api = std::make_unique<cfb27::frtk::LuaDatabaseApi>(
+      g_frtk_catalog,
+      []() -> const cfb27::frtk::SchemaRegistry* {
+        return g_frtk_profile ? &g_frtk_profile->schema : nullptr;
+      },
+      *g_lua_db_validation_backend, *g_lua_db_memory_backend,
+      [](const cfb27::memory::TransactionRequest& request) {
+        std::lock_guard write_lock(g_host_write_mutex);
+        if (g_session_writes_disabled.load(std::memory_order_acquire)) {
+          return cfb27::memory::TransactionResult{
+              .status = cfb27::memory::TransactionStatus::kRejected,
+              .code = "writes_disabled"};
+        }
+        if (!WriteEnvironmentAllowed()) {
+          return cfb27::memory::TransactionResult{
+              .status = cfb27::memory::TransactionStatus::kRejected,
+              .code = "write_environment_denied"};
+        }
+        auto result = cfb27::memory::RunTransaction(
+            request, *g_lua_db_memory_backend);
+        if (result.status ==
+            cfb27::memory::TransactionStatus::kRollbackUnverified) {
+          g_session_writes_disabled.store(true, std::memory_order_release);
+        }
+        return result;
+      },
+      &g_frtk_mutex);
+  g_lua_db_api->Register(state);
 }
 
 bool RunLuaText(std::string_view text, const char* chunk_name, std::string& result) {
@@ -930,6 +1137,102 @@ cfb27::protocol::Json EventsResult(std::uint64_t after, std::size_t limit) {
   return {{"events", std::move(events)}, {"nextCursor", next_cursor}};
 }
 
+const cfb27::frtk::TableSchema* SchemaByUniqueId(
+    const cfb27::frtk::SchemaRegistry& schema, std::uint32_t unique_id) {
+  const auto& tables = schema.tables();
+  const auto found = std::find_if(tables.begin(), tables.end(),
+      [unique_id](const auto& table) { return table.unique_id == unique_id; });
+  return found == tables.end() ? nullptr : &*found;
+}
+
+std::optional<std::uint64_t> JsonUnsigned(const cfb27::protocol::Json& value,
+                                          std::uint64_t maximum) {
+  if (value.is_number_unsigned()) {
+    const auto number = value.get<std::uint64_t>();
+    if (number <= maximum) return number;
+  } else if (value.is_number_integer()) {
+    const auto number = value.get<std::int64_t>();
+    if (number >= 0 && static_cast<std::uint64_t>(number) <= maximum)
+      return static_cast<std::uint64_t>(number);
+  }
+  return std::nullopt;
+}
+
+const char* DiscoveryStateName(cfb27::frtk::TableState state) {
+  using cfb27::frtk::TableState;
+  switch (state) {
+    case TableState::kResolved: return "resolved";
+    case TableState::kMissing: return "missing";
+    case TableState::kAmbiguous: return "ambiguous";
+    case TableState::kUnstable: return "unstable";
+    case TableState::kRelationshipFailed: return "relationship_failed";
+    case TableState::kAllocationInvalid: return "allocation_invalid";
+  }
+  return "unstable";
+}
+
+const char* AuthorityStatusName(cfb27::frtk::AuthorityStatus status) {
+  using cfb27::frtk::AuthorityStatus;
+  switch (status) {
+    case AuthorityStatus::kDiscoveryOnly: return "discovery_only";
+    case AuthorityStatus::kCommitAdapterRequired: return "commit_adapter_required";
+    case AuthorityStatus::kDirectVerified: return "direct_verified";
+  }
+  return "discovery_only";
+}
+
+cfb27::protocol::Json EvidenceJson(
+    const std::vector<cfb27::frtk::DiscoveryEvidence>& evidence) {
+  auto result = cfb27::protocol::Json::array();
+  for (const auto& item : evidence) {
+    result.push_back({{"code", item.code},
+                      {"fingerprintCount", item.fingerprint_count}});
+  }
+  return result;
+}
+
+cfb27::protocol::Json DecodedFieldJson(
+    const cfb27::frtk::DecodedField& value,
+    const cfb27::frtk::SchemaRegistry& schema) {
+  if (const auto* number = std::get_if<std::int64_t>(&value)) return *number;
+  const auto& reference = std::get<cfb27::frtk::PackedReference>(value);
+  const auto* target = schema.FindTable(reference.table_id);
+  if (!target) throw std::invalid_argument("unknown reference target");
+  return {{"uniqueId", target->unique_id}, {"row", reference.row_index}};
+}
+
+std::optional<cfb27::frtk::DecodedField> ParseTypedFieldValue(
+    const cfb27::protocol::Json& value,
+    const cfb27::frtk::FieldDefinition& field,
+    const cfb27::frtk::SchemaRegistry& schema) {
+  if (field.encoding == "packed-reference") {
+    if (!value.is_object() || !HasOnlyKeys(value, {"uniqueId", "row"}) ||
+        !value.contains("uniqueId") || !value.contains("row")) return std::nullopt;
+    const auto unique_id = JsonUnsigned(value["uniqueId"], 0xFFFFFFFFull);
+    const auto row = JsonUnsigned(value["row"], 0x1FFFF);
+    if (!unique_id || !row) return std::nullopt;
+    const auto* target = SchemaByUniqueId(schema,
+                                          static_cast<std::uint32_t>(*unique_id));
+    if (!target || !field.reference_table_id ||
+        target->table_id != *field.reference_table_id || *row >= target->capacity)
+      return std::nullopt;
+    return cfb27::frtk::PackedReference{target->table_id,
+                                       static_cast<std::uint32_t>(*row)};
+  }
+  if (!value.is_number_integer() && !value.is_number_unsigned()) return std::nullopt;
+  try {
+    if (value.is_number_unsigned()) {
+      const auto number = value.get<std::uint64_t>();
+      if (number > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+        return std::nullopt;
+      return static_cast<std::int64_t>(number);
+    }
+    return value.get<std::int64_t>();
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
 cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
   using cfb27::protocol::ErrorResponse;
   using Json = cfb27::protocol::Json;
@@ -966,7 +1269,8 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
         {"capabilities", {"status", "runScript", "evaluate", "logs", "events",
                           "memoryScan", "memoryScanAllocationMetadata", "memoryRead",
                           "memoryWriteTransaction",
-                          "telemetry"}},
+                          "telemetry", "frtkProfileV1", "frtkCatalogV1",
+                          "frtkRecordReadV1", "frtkFieldTransactionV1"}},
     });
   }
 
@@ -985,6 +1289,325 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
         {"ticks", g_ticks.load(std::memory_order_acquire)},
         {"lastError", std::move(last_error)},
     });
+  }
+
+  if (command == "loadFrtkProfile") {
+    if (!HasOnlyKeys(params, {"profile", "layout"}) ||
+        !params.contains("profile") || !params.contains("layout")) {
+      return ErrorResponse(id, "INVALID_REQUEST", "Invalid loadFrtkProfile params");
+    }
+    auto parsed = cfb27::frtk::ParseProfile(params);
+    if (!parsed.ok()) {
+      return ErrorResponse(id, "FRTK_PROFILE_INVALID", "FrTk profile is invalid");
+    }
+    if ((!supported && !(SmokeWritesAllowed() &&
+          parsed.bundle->build_identity == "synthetic-protocol-smoke")) ||
+        (supported && parsed.bundle->build_identity != kSupportedExecutableSha256)) {
+      return ErrorResponse(id, "UNSUPPORTED_BUILD",
+                           "FrTk profile does not match this executable build");
+    }
+    std::lock_guard lock(g_frtk_mutex);
+    g_frtk_catalog.Invalidate();
+    g_frtk_profile = std::move(parsed.bundle);
+    return SuccessResponse(id, {{"profileId", g_frtk_profile->profile_id},
+                                {"schemaIdentity", g_frtk_profile->schema_identity},
+                                {"buildIdentity", g_frtk_profile->build_identity},
+                                {"tableCount", g_frtk_profile->tables.size()}});
+  }
+
+  if (command == "discoverFrtkCatalog") {
+    if (!params.empty())
+      return ErrorResponse(id, "INVALID_REQUEST", "Invalid discoverFrtkCatalog params");
+    std::lock_guard lock(g_frtk_mutex);
+    if (!g_frtk_profile)
+      return ErrorResponse(id, "FRTK_PROFILE_INVALID", "No FrTk profile is loaded");
+    constexpr auto kDiscoveryBudget = std::chrono::milliseconds(15000);
+    const bool smoke_timeout_progress =
+        SmokeWritesAllowed() &&
+        EnvironmentIsOne(L"CFB27_SMOKE_FRTK_TIMEOUT");
+    const cfb27::frtk::DiscoveryDeadline deadline(
+        std::chrono::steady_clock::now() + kDiscoveryBudget);
+    ProcessDiscoveryBackend backend(smoke_timeout_progress);
+    const auto discovery = cfb27::frtk::DiscoverTables(
+        *g_frtk_profile, backend, deadline);
+    if (!discovery.valid && discovery.code == "OPERATION_TIMEOUT") {
+      cfb27::frtk::DiscoveryResult rejected{.valid = false,
+                                            .code = "discovery_failed"};
+      (void)g_frtk_catalog.Install(*g_frtk_profile, rejected);
+      const auto& timeout = *discovery.timeout;
+      const auto stage = timeout.stage == cfb27::frtk::DiscoveryStage::kScan
+                             ? "scan"
+                         : timeout.stage == cfb27::frtk::DiscoveryStage::kAllocation
+                             ? "allocation"
+                         : timeout.stage == cfb27::frtk::DiscoveryStage::kRelationship
+                             ? "relationship"
+                             : "reread";
+      return ErrorResponse(
+          id, "FRTK_DISCOVERY_TIMEOUT",
+          "FrTk discovery exceeded its native operation budget",
+          {{"stage", stage},
+           {"tableUniqueId", timeout.table_unique_id
+                                 ? Json(*timeout.table_unique_id) : Json(nullptr)},
+           {"fingerprintOrdinal", timeout.fingerprint_ordinal
+                                      ? Json(*timeout.fingerprint_ordinal) : Json(nullptr)},
+           {"completedFingerprintCount", timeout.completed_fingerprint_count},
+           {"elapsedMilliseconds", timeout.elapsed_milliseconds},
+           {"pagesScanned", timeout.counters.pages_scanned},
+           {"chunksScanned", timeout.counters.chunks_scanned},
+           {"scannedBytes", timeout.counters.scanned_bytes},
+           {"candidateWindows", timeout.counters.candidate_windows},
+           {"cappedMatches", timeout.counters.capped_matches}});
+    }
+    const bool complete = discovery.valid &&
+        discovery.tables.size() == g_frtk_profile->tables.size() &&
+        std::all_of(discovery.tables.begin(), discovery.tables.end(),
+                    [](const auto& table) {
+                      return table.state == cfb27::frtk::TableState::kResolved &&
+                             table.descriptor.has_value();
+                    });
+    if (!complete) {
+      cfb27::frtk::DiscoveryResult rejected{.valid = false,
+                                            .code = "discovery_failed"};
+      const auto generation = g_frtk_catalog.Install(*g_frtk_profile, rejected);
+      Json tables = Json::array();
+      for (const auto& table : discovery.tables) {
+        tables.push_back({{"uniqueId", table.unique_id},
+                          {"state", DiscoveryStateName(table.state)},
+                          {"evidence", EvidenceJson(table.evidence)}});
+      }
+      return ErrorResponse(id, "FRTK_DISCOVERY_FAILED",
+                           "Required FrTk tables were not resolved",
+                           {{"generation", generation}, {"tables", std::move(tables)}});
+    }
+    const auto generation = g_frtk_catalog.Install(*g_frtk_profile, discovery);
+    return SuccessResponse(id, {{"generation", generation},
+                                {"tableCount", discovery.tables.size()}});
+  }
+
+  if (command == "inspectFrtkCatalog") {
+    if (!HasOnlyKeys(params, {"generation"}) || !params.contains("generation"))
+      return ErrorResponse(id, "INVALID_REQUEST", "Invalid inspectFrtkCatalog params");
+    const auto generation = JsonUnsigned(params["generation"],
+                                         std::numeric_limits<std::uint64_t>::max());
+    if (!generation)
+      return ErrorResponse(id, "INVALID_REQUEST", "Invalid catalog generation");
+    std::lock_guard lock(g_frtk_mutex);
+    if (*generation != g_frtk_catalog.generation())
+      return ErrorResponse(id, "FRTK_CATALOG_STALE", "FrTk catalog generation is stale");
+    Json tables = Json::array();
+    for (const auto& table : g_frtk_catalog.Summaries()) {
+      const auto* schema = g_frtk_profile ?
+          SchemaByUniqueId(g_frtk_profile->schema, table.unique_id) : nullptr;
+      if (!schema)
+        return ErrorResponse(id, "FRTK_CATALOG_STALE", "FrTk catalog schema is stale");
+      tables.push_back({{"uniqueId", table.unique_id},
+                        {"logicalName", schema->logical_name},
+                        {"authorityStatus",
+                         AuthorityStatusName(table.authority_status)},
+                        {"capacity", table.capacity},
+                        {"profileId", table.profile_id},
+                        {"generation", table.lifecycle_generation},
+                        {"evidence", EvidenceJson(table.evidence)}});
+    }
+    return SuccessResponse(id, {{"generation", *generation},
+                                {"tables", std::move(tables)}});
+  }
+
+  if (command == "readFrtkRecords") {
+    if (!HasOnlyKeys(params, {"generation", "records"}) ||
+        !params.contains("generation") || !params.contains("records") ||
+        !params["records"].is_array() || params["records"].empty() ||
+        params["records"].size() > 64)
+      return ErrorResponse(id, "INVALID_REQUEST", "Invalid readFrtkRecords params");
+    const auto generation = JsonUnsigned(params["generation"],
+                                         std::numeric_limits<std::uint64_t>::max());
+    if (!generation)
+      return ErrorResponse(id, "INVALID_REQUEST", "Invalid catalog generation");
+    std::lock_guard lock(g_frtk_mutex);
+    if (!g_frtk_profile || *generation != g_frtk_catalog.generation())
+      return ErrorResponse(id, "FRTK_CATALOG_STALE", "FrTk catalog generation is stale");
+    ProcessDiscoveryBackend validation_backend;
+    cfb27::memory::ProcessMemoryBackend memory_backend;
+    cfb27::frtk::RecordAccessor accessor(g_frtk_catalog, g_frtk_profile->schema,
+                                         validation_backend, memory_backend);
+    Json records = Json::array();
+    for (const auto& record : params["records"]) {
+      if (!record.is_object() || !HasOnlyKeys(record, {"uniqueId", "row", "fields"}) ||
+          !record.contains("uniqueId") || !record.contains("row") ||
+          !record.contains("fields") || !record["fields"].is_array() ||
+          record["fields"].empty() || record["fields"].size() > 64)
+        return ErrorResponse(id, "INVALID_REQUEST", "Invalid typed record request");
+      const auto unique_id = JsonUnsigned(record["uniqueId"], 0xFFFFFFFFull);
+      const auto row = JsonUnsigned(record["row"], 0xFFFFFFFFull);
+      if (!unique_id || !row)
+        return ErrorResponse(id, "INVALID_REQUEST", "Invalid typed record selector");
+      const auto handle = g_frtk_catalog.GetHandle(static_cast<std::uint32_t>(*unique_id));
+      if (!handle)
+        return ErrorResponse(id, "FRTK_FIELD_INVALID", "Unknown FrTk table Unique ID");
+      std::vector<std::string> owned_fields;
+      std::vector<std::string_view> fields;
+      std::unordered_set<std::string> names;
+      for (const auto& field : record["fields"]) {
+        if (!field.is_string() || field.get_ref<const std::string&>().empty() ||
+            field.get_ref<const std::string&>().size() > 128 ||
+            !names.insert(field.get<std::string>()).second)
+          return ErrorResponse(id, "INVALID_REQUEST", "Invalid typed field list");
+        owned_fields.push_back(field.get<std::string>());
+      }
+      for (const auto& field : owned_fields) fields.push_back(field);
+      const auto read = accessor.ReadFields(*handle, static_cast<std::uint32_t>(*row), fields);
+      if (!read.ok) {
+        const char* code = read.code == "CATALOG_STALE" ? "FRTK_CATALOG_STALE" :
+                           read.code == "READ_FAILED" ? "MEMORY_ACCESS_DENIED" :
+                           "FRTK_FIELD_INVALID";
+        return ErrorResponse(id, code, "FrTk record read failed");
+      }
+      Json values = Json::array();
+      try {
+        for (const auto& field : read.fields)
+          values.push_back({{"field", field.name},
+                            {"value", DecodedFieldJson(
+                                          field.value, g_frtk_profile->schema)}});
+      } catch (...) {
+        return ErrorResponse(id, "FRTK_FIELD_INVALID", "FrTk field value is invalid");
+      }
+      records.push_back({{"uniqueId", *unique_id}, {"row", *row},
+                         {"values", std::move(values)}});
+    }
+    return SuccessResponse(id, {{"generation", *generation},
+                                {"records", std::move(records)}});
+  }
+
+  if (command == "invalidateFrtkCatalog") {
+    if (!HasOnlyKeys(params, {"reason"}) || !params.contains("reason") ||
+        !params["reason"].is_string())
+      return ErrorResponse(id, "INVALID_REQUEST", "Invalid catalog invalidation params");
+    const auto reason = params["reason"].get<std::string>();
+    if (reason != "caller_transition" && reason != "save_changed" &&
+        reason != "shutdown")
+      return ErrorResponse(id, "INVALID_REQUEST", "Invalid catalog invalidation reason");
+    std::lock_guard lock(g_frtk_mutex);
+    g_frtk_catalog.Invalidate();
+    return SuccessResponse(id, {{"generation", g_frtk_catalog.generation()},
+                                {"reason", reason}});
+  }
+
+  if (command == "transactFrtkFields") {
+    if (!HasOnlyKeys(params, {"transactionId", "generation", "changes"}) ||
+        !params.contains("transactionId") || !params["transactionId"].is_string() ||
+        !params.contains("generation") || !params.contains("changes") ||
+        !params["changes"].is_array() || params["changes"].empty() ||
+        params["changes"].size() > 128)
+      return ErrorResponse(id, "INVALID_REQUEST", "Invalid transactFrtkFields params");
+    const auto transaction_id = params["transactionId"].get<std::string>();
+    const auto generation = JsonUnsigned(params["generation"],
+                                         std::numeric_limits<std::uint64_t>::max());
+    if (!generation)
+      return ErrorResponse(id, "INVALID_REQUEST", "Invalid catalog generation");
+    std::lock_guard frtk_lock(g_frtk_mutex);
+    std::lock_guard write_lock(g_host_write_mutex);
+    if (!g_frtk_profile || *generation != g_frtk_catalog.generation())
+      return ErrorResponse(id, "FRTK_CATALOG_STALE", "FrTk catalog generation is stale");
+    if (g_session_writes_disabled.load(std::memory_order_acquire))
+      return ErrorResponse(id, "SESSION_WRITES_DISABLED",
+                           "Writes are disabled for the remainder of this host session");
+    if (!SupportedBuild() && !SmokeWritesAllowed())
+      return ErrorResponse(id, "UNSUPPORTED_BUILD",
+                           "Memory writes require the exact supported build");
+    if (RealAnticheatIsRunning())
+      return ErrorResponse(id, "MEMORY_ACCESS_DENIED",
+                           "Writes are disabled while EA anticheat is running");
+
+    struct ChangeGroup {
+      std::uint32_t unique_id{};
+      std::uint32_t row{};
+      std::vector<cfb27::frtk::FieldChange> changes;
+    };
+    std::vector<ChangeGroup> groups;
+    std::unordered_set<std::string> identities;
+    for (const auto& change : params["changes"]) {
+      if (!change.is_object() ||
+          !HasOnlyKeys(change, {"uniqueId", "row", "field", "value"}) ||
+          !change.contains("uniqueId") || !change.contains("row") ||
+          !change.contains("field") || !change["field"].is_string() ||
+          !change.contains("value"))
+        return ErrorResponse(id, "INVALID_REQUEST", "Invalid typed field change");
+      const auto unique_id = JsonUnsigned(change["uniqueId"], 0xFFFFFFFFull);
+      const auto row = JsonUnsigned(change["row"], 0xFFFFFFFFull);
+      const auto field_name = change["field"].get<std::string>();
+      if (!unique_id || !row || field_name.empty() || field_name.size() > 128)
+        return ErrorResponse(id, "INVALID_REQUEST", "Invalid typed field change");
+      const auto* table = SchemaByUniqueId(g_frtk_profile->schema,
+                                           static_cast<std::uint32_t>(*unique_id));
+      const auto* field = table ? g_frtk_profile->schema.FindField(table->table_id,
+                                                                   field_name) : nullptr;
+      if (!field)
+        return ErrorResponse(id, "FRTK_FIELD_INVALID", "Unknown FrTk field");
+      auto value = ParseTypedFieldValue(change["value"], *field,
+                                        g_frtk_profile->schema);
+      if (!value)
+        return ErrorResponse(id, "FRTK_FIELD_INVALID", "Invalid FrTk field value");
+      const auto identity = std::to_string(*unique_id) + ":" +
+                            std::to_string(*row) + ":" + field_name;
+      if (!identities.insert(identity).second)
+        return ErrorResponse(id, "INVALID_REQUEST", "Duplicate typed field change");
+      auto group = std::find_if(groups.begin(), groups.end(), [&](const auto& item) {
+        return item.unique_id == *unique_id && item.row == *row;
+      });
+      if (group == groups.end()) {
+        groups.push_back({static_cast<std::uint32_t>(*unique_id),
+                          static_cast<std::uint32_t>(*row), {}});
+        group = std::prev(groups.end());
+      }
+      group->changes.push_back({field_name, std::move(*value)});
+    }
+
+    ProcessDiscoveryBackend validation_backend;
+    cfb27::memory::ProcessMemoryBackend memory_backend;
+    cfb27::frtk::RecordAccessor accessor(g_frtk_catalog, g_frtk_profile->schema,
+                                         validation_backend, memory_backend);
+    std::vector<cfb27::frtk::FieldWritePlan> plans;
+    for (const auto& group : groups) {
+      const auto handle = g_frtk_catalog.GetHandle(group.unique_id);
+      if (!handle)
+        return ErrorResponse(id, "FRTK_FIELD_INVALID", "Unknown FrTk table Unique ID");
+      const auto plan = accessor.PlanFieldWrites(*handle, group.row, group.changes);
+      if (!plan.ok) {
+        const char* code = plan.code == "AUTHORITY_UNPROVEN" ?
+                               "FRTK_AUTHORITY_UNPROVEN" :
+                           plan.code == "CATALOG_STALE" ? "FRTK_CATALOG_STALE" :
+                           plan.code == "READ_FAILED" ? "MEMORY_ACCESS_DENIED" :
+                           "FRTK_FIELD_INVALID";
+        return ErrorResponse(id, code, "FrTk field transaction was refused");
+      }
+      plans.push_back(plan);
+    }
+    const auto guarded = cfb27::frtk::FinalizeFieldTransaction(
+        g_frtk_catalog, transaction_id, plans);
+    if (!guarded.ok) {
+      const char* code = guarded.code == "CATALOG_EVIDENCE_STALE"
+                             ? "FRTK_CATALOG_STALE"
+                             : guarded.code == "TRANSACTION_LIMIT_EXCEEDED"
+                                   ? "TRANSACTION_LIMIT_EXCEEDED"
+                                   : "FRTK_FIELD_INVALID";
+      return ErrorResponse(id, code, "FrTk field transaction was refused");
+    }
+    auto transaction =
+        cfb27::memory::RunTransaction(guarded.request, memory_backend);
+    if (transaction.status == cfb27::memory::TransactionStatus::kRejected)
+      return TransactionRejected(id, transaction.code);
+    const Json public_result{{"transactionId", transaction_id},
+                             {"status", transaction.code},
+                             {"changedFields", params["changes"].size()}};
+    if (transaction.status == cfb27::memory::TransactionStatus::kRollbackUnverified) {
+      g_session_writes_disabled.store(true, std::memory_order_release);
+      return ErrorResponse(id, "ROLLBACK_VERIFICATION_FAILED",
+                           "Transaction rollback could not be verified", public_result);
+    }
+    if (transaction.status == cfb27::memory::TransactionStatus::kRolledBackVerified)
+      return ErrorResponse(id, "TRANSACTION_APPLY_FAILED",
+                           "Transaction failed and was rolled back", public_result);
+    return SuccessResponse(id, public_result);
   }
 
   if (command == "writeTransaction") {
@@ -1364,6 +1987,16 @@ void TickLoop() {
   }
 }
 
+void UpdateGameReady(bool ready) {
+  g_ready.store(ready, std::memory_order_release);
+  {
+    std::lock_guard lock(g_frtk_mutex);
+    g_frtk_catalog.AdvanceLifecycle(ready);
+  }
+  FireEvent("game_ready");
+  AppendEvent("game_ready", {{"ready", ready}});
+}
+
 DWORD WINAPI Start(void* module_value) {
   const auto module = static_cast<HMODULE>(module_value);
   wchar_t path[MAX_PATH]{};
@@ -1376,9 +2009,7 @@ DWORD WINAPI Start(void* module_value) {
   luaL_openlibs(g_lua);
   RegisterApi(g_lua);
   RunAutorun();
-  g_ready.store(true);
-  FireEvent("game_ready");
-  AppendEvent("game_ready", {{"ready", true}});
+  UpdateGameReady(true);
   std::thread(PipeServer).detach();
   const std::wstring v1_pipe_name =
       std::wstring(kV1PipePrefix) + std::to_wstring(GetCurrentProcessId());
@@ -1391,6 +2022,10 @@ DWORD WINAPI Start(void* module_value) {
 }
 
 }  // namespace
+
+extern "C" __declspec(dllexport) void WINAPI Cfb27SetGameReady(BOOL ready) {
+  UpdateGameReady(ready != FALSE);
+}
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
   if (reason == DLL_PROCESS_ATTACH) {

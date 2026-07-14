@@ -181,3 +181,64 @@ but was not installed or manually live-tested. The reversible live evidence
 applies to the reviewed recovery candidate host recorded at the start of this
 section. The final ZIP checksum remains external because this document is
 included in the ZIP.
+
+## Live FrTk descriptor and recruiting-write findings on July 13, 2026
+
+The `0.2.0-dev.2` FrTk branch was installed and exercised against the selected
+Dynasty save at the Dynasty hub. The original bounded public catalog call timed
+out safely while globally scanning the first Player row fingerprint. It
+installed no partial catalog, issued no retry, left the host responsive, and
+recovered immediately for a subsequent status request. Subsequent work replaced
+that path on the supported build with Unique-ID descriptor discovery.
+
+Direct read-only diagnostics then established the live representation in bulk:
+
+- Exact little-endian `(table ID, Unique ID)` descriptor signatures uniquely
+  identified Player (`4244`, `1612938518`), RecruitingBoard (`4251`,
+  `220276943`), Recruit (`4269`, `1873209313`), ProspectTargetSchool (`5840`,
+  `3789266353`), ProspectTargetSchool array (`5842`, `2332540366`),
+  UserRecruitTarget (`4168`, `3987156317`), RecruitTarget (`4288`, `59043175`),
+  overflow ProspectTargetSchool (`5841`, `3843719174`), and RecruitTarget array
+  (`5847`, `2412159097`). Unique IDs are the persistent identity; table IDs are
+  current-build routing values only.
+- Scalar live records equal their canonical save records after reversing each
+  four-byte word. Three independent rows exactly validated the base, stride,
+  capacity, and typed field layout for every occupied core scalar table.
+- Both array descriptors use eight-byte live wrapper slots. Wrapper row indices
+  were stable. ProspectTargetSchool array field `i` maps to scalar
+  ProspectTargetSchool row `arrayRow * 10 + i`; three independent rows
+  validated the mapping.
+- Typed reads decoded 271 Player fields, all sampled Recruit fields and packed
+  references, RecruitingBoard hours, and ProspectTargetSchool team/influence
+  values from live memory.
+
+Two expected-byte guarded transactions initially proved the direct live write
+path. A Recruit `CommitScore` value was changed by one, reread, restored, and
+reread; then a ProspectTargetSchool `TeamInfluence` value received the same
+apply/read/restore/read proof. Final read-only verification returned the exact
+original values (`229` and `73`), so no test mutation remained.
+
+A later installed-host gate repeated the Recruit proof after the catalog adapter
+work. All three masked Recruit rows first matched the derived 92-byte-prefixed
+record base. Recruit row 1 `CommitScore` changed from `229` to `230`; the apply
+returned `applied_verified`, the typed decode reread `230`, the restore returned
+`applied_verified`, and the final byte-for-byte reread decoded `229`. Host
+status remained ready and responsive. No test mutation remained.
+
+The branch now integrates the descriptor locator, four-byte word-order adapter,
+indexed recruiting-array adapter, catalog revalidation guards, typed record
+access, and runtime authority promotion for the two tables proven by reversible
+live writes. Live descriptor diagnostics also identified two scalar variants:
+Player uses its end pointer at signature offset `+28`; the other core scalar
+tables use `+36`. A regression test covers the Player variant and stale
+signature copies are skipped before discovery stops.
+
+The final Player `+28` correction was made after the installed-host write gate,
+so a complete installed-host `discoverFrtkCatalog()` retest remains required
+before declaring the public catalog live-ready. Until then, discovery continues
+to fail closed rather than expose a misidentified or partial catalog.
+
+After the earlier live session, both applications were closed and the supported
+uninstall restored the game and MMC active proxies. Independent SHA-256 checks
+of both files returned
+`3E87682118E593F334BA665826E2A6AB85BA460F2E1FE95B173A7199863AD454`.

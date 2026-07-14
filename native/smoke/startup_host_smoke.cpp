@@ -326,6 +326,10 @@ int wmain(int argc, wchar_t** argv) {
     std::wcerr << L"LoadLibrary failed: " << GetLastError() << L'\n';
     return 1;
   }
+  using SetGameReady = void(WINAPI*)(BOOL);
+  const auto set_game_ready = reinterpret_cast<SetGameReady>(
+      GetProcAddress(host, "Cfb27SetGameReady"));
+  if (!set_game_ready) return 10;
   std::uint8_t bytes[]{0x10, 0x20};
   char address[32]{};
   sprintf_s(address, "0x%llX",
@@ -333,6 +337,16 @@ int wmain(int argc, wchar_t** argv) {
   const std::wstring pipe = L"\\\\.\\pipe\\CFB27LuaHost.v1." +
       std::to_wstring(GetCurrentProcessId());
   Json response;
+  if (!Request(pipe, {{"protocol", 1}, {"id", "startup-ready"},
+                      {"command", "status"}, {"params", Json::object()}},
+               response) || !response.value("ok", false) ||
+      !response["result"].value("ready", false)) return 11;
+  set_game_ready(FALSE);
+  if (!Request(pipe, {{"protocol", 1}, {"id", "startup-not-ready"},
+                      {"command", "status"}, {"params", Json::object()}},
+               response) || !response.value("ok", false) ||
+      response["result"].value("ready", true)) return 12;
+  set_game_ready(TRUE);
   if (!Request(pipe, {{"protocol", 1}, {"id", "startup-write-gate"},
                       {"command", "writeTransaction"},
                       {"params", {{"transactionId", "startup.gate-1"},

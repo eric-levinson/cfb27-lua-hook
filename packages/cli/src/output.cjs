@@ -8,12 +8,12 @@ function printSuccess(io, command, result, json) {
   io.out(`${command}: ${JSON.stringify(result, null, 2)}`);
 }
 
-function printError(io, error, json) {
+function printError(io, error, json, { includeDetails = true } = {}) {
   const normalized = {
     code: typeof error?.code === 'string' ? error.code : 'INTERNAL_ERROR',
     message: typeof error?.message === 'string' ? error.message : 'Unknown error',
   };
-  if (error?.details !== undefined) normalized.details = error.details;
+  if (includeDetails && error?.details !== undefined) normalized.details = error.details;
   if (json) {
     io.out(JSON.stringify({ ok: false, error: normalized }));
     return;

@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
@@ -37,6 +38,7 @@ class MappedBytes {
 };
 
 constexpr std::size_t kMinPatternBytes = 8;
+constexpr std::size_t kMinFrtkPatternBytes = 4;
 constexpr std::size_t kMaxPatternBytes = 4096;
 constexpr std::size_t kMaxMatches = 64;
 constexpr std::size_t kMaxContextBytes = 512;
@@ -45,10 +47,41 @@ constexpr std::size_t kMaxScanPageBytes = 32ull * 1024 * 1024;
 constexpr std::size_t kMaxReadRanges = 64;
 constexpr std::size_t kMaxReadRangeBytes = 64ull * 1024;
 constexpr std::size_t kMaxReadBytes = 256ull * 1024;
+constexpr std::uint64_t kMaxSafeDiagnosticCounter = 9007199254740991ull;
 
 std::optional<MappedBytes> DecodeScanHex(std::string_view text);
 
 namespace detail {
+
+struct MatchStatistics {
+  std::size_t candidates_checked{};
+  std::size_t selected_byte_comparisons{};
+};
+
+class MaskedPatternMatcher {
+ public:
+  struct Check {
+    std::size_t offset{};
+    std::uint8_t mask{};
+    std::uint8_t value{};
+  };
+
+  [[nodiscard]] std::size_t selected_byte_count() const;
+  [[nodiscard]] std::size_t anchor_offset() const;
+  [[nodiscard]] std::optional<std::size_t> FindNext(
+      std::span<const std::uint8_t> bytes, std::size_t first_candidate,
+      std::size_t candidate_end, MatchStatistics* statistics = nullptr) const;
+
+ private:
+  friend std::optional<MaskedPatternMatcher> CompileMaskedPattern(
+      std::span<const std::uint8_t>, std::span<const std::uint8_t>);
+  std::size_t pattern_size_{};
+  std::vector<Check> checks_;
+};
+
+std::optional<MaskedPatternMatcher> CompileMaskedPattern(
+    std::span<const std::uint8_t> pattern,
+    std::span<const std::uint8_t> mask);
 
 enum class ScanPageBoundary {
   kContinue,
@@ -64,6 +97,11 @@ constexpr ScanPageBoundary ClassifyScanPageBoundary(
 }
 
 }  // namespace detail
+
+enum class ScanPurpose {
+  kPublicRaw,
+  kFrtkInternal,
+};
 
 struct ReadRange {
   std::string address;
@@ -89,6 +127,8 @@ struct ScanRequest {
   std::size_t context_after{};
   std::optional<std::string> cursor;
   bool include_allocation_metadata{};
+  ScanPurpose purpose{ScanPurpose::kPublicRaw};
+  std::function<bool()> should_cancel;
 };
 
 using ScanReadFunction = bool (*)(const void* source, void* destination,
@@ -118,6 +158,9 @@ struct ScanResult {
   bool complete{};
   std::string code;
   std::size_t scanned_bytes{};
+  std::uint64_t progress_scanned_bytes{};
+  std::uint64_t chunks_scanned{};
+  std::uint64_t candidate_windows{};
   std::optional<std::string> next_cursor;
   std::vector<ScanMatch> matches;
 };

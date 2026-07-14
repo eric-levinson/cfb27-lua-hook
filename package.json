@@ -12,8 +12,9 @@
     "packages/cli"
   ],
   "scripts": {
-    "check": "node --check packages/sdk/index.cjs && node --check packages/cli/bin/cfb27lua.cjs && node --check packages/cli/src/main.cjs && node --check scripts/package-release.cjs && node --check scripts/run-tests.cjs",
+    "check": "node --check packages/sdk/index.cjs && node --check packages/sdk/src/validation.cjs && node --check packages/sdk/src/frtk-fields.cjs && node --check packages/sdk/src/frtk-profile.cjs && node --check packages/cli/bin/cfb27lua.cjs && node --check packages/cli/src/main.cjs && node --check scripts/build-frtk-profile.cjs && node --check scripts/package-release.cjs && node --check scripts/run-tests.cjs",
     "test": "node scripts/run-tests.cjs",
+    "build:frtk-profile": "node scripts/build-frtk-profile.cjs",
     "pack:preview": "node scripts/package-release.cjs"
   }
 }

@@ -12,10 +12,16 @@ constexpr std::size_t kMaxTransactionOperations = 32;
 constexpr std::size_t kMaxOperationBytes = 4096;
 constexpr std::size_t kMaxTransactionBytes = 64ull * 1024;
 
+enum class TransactionOperationKind {
+  kWrite,
+  kVerifyOnly,
+};
+
 struct TransactionOperation {
   std::string address;
   std::vector<std::uint8_t> expected;
   std::vector<std::uint8_t> replacement;
+  TransactionOperationKind kind{TransactionOperationKind::kWrite};
 };
 
 struct TransactionRequest {

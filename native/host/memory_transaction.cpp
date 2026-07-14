@@ -161,24 +161,28 @@ TransactionResult RunTransaction(const TransactionRequest& request,
   ranges.reserve(request.operations.size());
   for (std::size_t index = 0; index < request.operations.size(); ++index) {
     const auto& operation = request.operations[index];
+    const bool verify_only =
+        operation.kind == TransactionOperationKind::kVerifyOnly;
     if (operation.expected.empty() ||
-        operation.expected.size() != operation.replacement.size() ||
-        operation.replacement.size() > kMaxOperationBytes) {
+        (verify_only ? !operation.replacement.empty()
+                     : operation.expected.size() !=
+                           operation.replacement.size()) ||
+        operation.expected.size() > kMaxOperationBytes) {
       return Rejected("invalid_operation_size");
     }
     if (aggregate_bytes >
-        kMaxTransactionBytes - operation.replacement.size()) {
+        kMaxTransactionBytes - operation.expected.size()) {
       return Rejected("transaction_too_large");
     }
-    aggregate_bytes += operation.replacement.size();
+    aggregate_bytes += operation.expected.size();
 
     const auto address = ParseAddress(operation.address);
     if (!address || *address > std::numeric_limits<std::uintptr_t>::max() -
-                                    operation.replacement.size()) {
+                                    operation.expected.size()) {
       return Rejected("invalid_address");
     }
     prepared[index].address = *address;
-    ranges.push_back({*address, *address + operation.replacement.size()});
+    ranges.push_back({*address, *address + operation.expected.size()});
   }
 
   std::sort(ranges.begin(), ranges.end(), [](const Range& left,
@@ -193,7 +197,9 @@ TransactionResult RunTransaction(const TransactionRequest& request,
 
   for (std::size_t index = 0; index < prepared.size(); ++index) {
     if (!backend.Validate(prepared[index].address,
-                          request.operations[index].replacement.size(), true)) {
+                          request.operations[index].expected.size(),
+                          request.operations[index].kind ==
+                              TransactionOperationKind::kWrite)) {
       return Rejected("invalid_memory_range");
     }
   }
@@ -218,6 +224,11 @@ TransactionResult RunTransaction(const TransactionRequest& request,
   std::vector<std::size_t> attempted;
   attempted.reserve(request.operations.size());
   for (std::size_t index = 0; index < request.operations.size(); ++index) {
+    if (request.operations[index].kind ==
+        TransactionOperationKind::kVerifyOnly) {
+      results[index].verified = true;
+      continue;
+    }
     attempted.push_back(index);
     if (!backend.Write(prepared[index].address,
                        request.operations[index].replacement)) {

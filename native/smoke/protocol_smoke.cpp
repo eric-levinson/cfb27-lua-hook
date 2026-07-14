@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <bcrypt.h>
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -9,7 +10,9 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <set>
 #include <sstream>
+#include <span>
 #include <string>
 #include <thread>
 #include <vector>
@@ -188,6 +191,133 @@ bool RequestOversizedFrame(const std::wstring& pipe_name, Json& response) {
   return ok;
 }
 
+bool ContainsSensitiveKey(const Json& value) {
+  static const std::array<std::string_view, 8> forbidden{
+      "address", "hex", "bytes", "mask", "offset", "range", "operation",
+      "tableid"};
+  if (value.is_object()) {
+    for (const auto& [key, child] : value.items()) {
+      std::string lower = key;
+      std::transform(lower.begin(), lower.end(), lower.begin(),
+                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      for (const auto token : forbidden) {
+        if (lower.find(token) != std::string::npos) return true;
+      }
+      if (ContainsSensitiveKey(child)) return true;
+    }
+  } else if (value.is_array()) {
+    for (const auto& child : value) if (ContainsSensitiveKey(child)) return true;
+  }
+  return false;
+}
+
+std::string UpperHex(std::span<const std::uint8_t> bytes) {
+  static constexpr char digits[] = "0123456789ABCDEF";
+  std::string result;
+  result.reserve(bytes.size() * 2);
+  for (const auto byte : bytes) {
+    result.push_back(digits[byte >> 4]);
+    result.push_back(digits[byte & 15]);
+  }
+  return result;
+}
+
+std::string Sha256(const std::string& content) {
+  BCRYPT_ALG_HANDLE algorithm{};
+  BCRYPT_HASH_HANDLE hash{};
+  DWORD object_size{}, received{};
+  std::array<std::uint8_t, 32> digest{};
+  if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0 ||
+      BCryptGetProperty(algorithm, BCRYPT_OBJECT_LENGTH,
+                        reinterpret_cast<PUCHAR>(&object_size), sizeof(object_size),
+                        &received, 0) < 0) return {};
+  std::vector<std::uint8_t> object(object_size);
+  const bool ok = BCryptCreateHash(algorithm, &hash, object.data(), object_size,
+                                   nullptr, 0, 0) >= 0 &&
+      BCryptHashData(hash, reinterpret_cast<PUCHAR>(const_cast<char*>(content.data())),
+                     static_cast<ULONG>(content.size()), 0) >= 0 &&
+      BCryptFinishHash(hash, digest.data(), static_cast<ULONG>(digest.size()), 0) >= 0;
+  if (hash) BCryptDestroyHash(hash);
+  BCryptCloseAlgorithmProvider(algorithm, 0);
+  return ok ? UpperHex(digest) : std::string{};
+}
+
+Json SyntheticBundle(std::span<const std::uint8_t> records,
+                     std::string build_identity = "synthetic-protocol-smoke",
+                     std::string authority = "discovery_only") {
+  Json rows = Json::array();
+  for (std::uint32_t row = 0; row < 3; ++row) {
+    const auto record = records.subspan(row * 16, 16);
+    rows.push_back({{"rowIndex", row}, {"patternHex", UpperHex(record)},
+                    {"maskHex", std::string(32, 'F')}});
+  }
+  Json table{{"logicalName", "SyntheticRecords"}, {"tableId", 1200},
+             {"uniqueId", 900001}, {"capacity", 3}, {"recordSize", 16},
+             {"rows", rows}, {"relationships", Json::array()}};
+  Json profile{{"formatVersion", 1}, {"profileId", ""},
+               {"schemaIdentity", "synthetic-protocol-v1"},
+               {"buildIdentity", std::move(build_identity)},
+               {"tables", Json::array({table})}};
+  Json layout_table{{"logicalName", "SyntheticRecords"}, {"tableId", 1200},
+                    {"uniqueId", 900001}, {"capacity", 3}, {"recordSize", 16},
+                    {"authorityStatus", std::move(authority)},
+                    {"fields", Json::array({
+                        {{"name", "Score"}, {"encoding", "unsigned"},
+                         {"byteOffset", 0}, {"storageBytes", 2}, {"bitOffset", 0},
+                         {"bitWidth", 16}, {"minimum", 0}, {"maximum", 65535},
+                         {"referenceTableId", nullptr}},
+                        {{"name", "ZBias"}, {"encoding", "offset-binary"},
+                         {"byteOffset", 0}, {"storageBytes", 2}, {"bitOffset", 0},
+                         {"bitWidth", 11}, {"minimum", -200}, {"maximum", 1847},
+                         {"referenceTableId", nullptr}},
+                        {{"name", "Stage"}, {"encoding", "unsigned"},
+                         {"byteOffset", 2}, {"storageBytes", 1}, {"bitOffset", 0},
+                         {"bitWidth", 8}, {"minimum", 0}, {"maximum", 255},
+                         {"referenceTableId", nullptr}},
+                        {{"name", "address"}, {"encoding", "unsigned"},
+                         {"byteOffset", 3}, {"storageBytes", 1}, {"bitOffset", 0},
+                         {"bitWidth", 8}, {"minimum", 0}, {"maximum", 255},
+                         {"referenceTableId", nullptr}},
+                        {{"name", "bytesHex"}, {"encoding", "unsigned"},
+                         {"byteOffset", 4}, {"storageBytes", 1}, {"bitOffset", 0},
+                         {"bitWidth", 8}, {"minimum", 0}, {"maximum", 255},
+                         {"referenceTableId", nullptr}},
+                        {{"name", "mask"}, {"encoding", "unsigned"},
+                         {"byteOffset", 5}, {"storageBytes", 1}, {"bitOffset", 0},
+                         {"bitWidth", 8}, {"minimum", 0}, {"maximum", 255},
+                         {"referenceTableId", nullptr}},
+                        {{"name", "offset"}, {"encoding", "unsigned"},
+                         {"byteOffset", 6}, {"storageBytes", 1}, {"bitOffset", 0},
+                         {"bitWidth", 8}, {"minimum", 0}, {"maximum", 255},
+                         {"referenceTableId", nullptr}},
+                        {{"name", "range"}, {"encoding", "unsigned"},
+                         {"byteOffset", 7}, {"storageBytes", 1}, {"bitOffset", 0},
+                         {"bitWidth", 8}, {"minimum", 0}, {"maximum", 255},
+                         {"referenceTableId", nullptr}},
+                        {{"name", "operation"}, {"encoding", "unsigned"},
+                         {"byteOffset", 8}, {"storageBytes", 1}, {"bitOffset", 0},
+                         {"bitWidth", 8}, {"minimum", 0}, {"maximum", 255},
+                         {"referenceTableId", nullptr}},
+                        {{"name", "tableId"}, {"encoding", "unsigned"},
+                         {"byteOffset", 9}, {"storageBytes", 1}, {"bitOffset", 0},
+                         {"bitWidth", 8}, {"minimum", 0}, {"maximum", 255},
+                         {"referenceTableId", nullptr}},
+                        {{"name", "Link"}, {"encoding", "packed-reference"},
+                         {"byteOffset", 10}, {"storageBytes", 4}, {"bitOffset", 0},
+                         {"bitWidth", 32}, {"minimum", 0}, {"maximum", 4294967295ull},
+                         {"referenceTableId", 1200}}
+                    })}};
+  Json layout{{"formatVersion", 1},
+              {"schemaIdentity", "synthetic-protocol-v1"},
+              {"buildIdentity", profile["buildIdentity"]},
+              {"tables", Json::array({layout_table})}};
+  auto profile_without_id = profile;
+  profile_without_id.erase("profileId");
+  profile["profileId"] = Sha256(
+      Json{{"profile", std::move(profile_without_id)}, {"layout", layout}}.dump());
+  return {{"profile", std::move(profile)}, {"layout", std::move(layout)}};
+}
+
 bool LegacyEvaluate(const std::wstring& pipe_name, std::string_view source,
                     Json& response) {
   HANDLE pipe = OpenPipe(pipe_name);
@@ -244,8 +374,34 @@ int wmain(int argc, wchar_t** argv) {
   transaction_one_bytes[1] = 0x20;
   transaction_two_bytes[0] = 0x30;
   transaction_two_bytes[1] = 0x40;
+  Allocation frtk_records(4096);
+  if (!frtk_records.get()) return 107;
+  auto* frtk_bytes = static_cast<std::uint8_t*>(frtk_records.get());
+  const auto seed = static_cast<std::uint64_t>(GetTickCount64()) ^
+      reinterpret_cast<std::uintptr_t>(frtk_bytes);
+  for (std::size_t index = 0; index < 48; ++index) {
+    frtk_bytes[index] = static_cast<std::uint8_t>(
+        ((seed >> ((index % 8) * 8)) + index * 73 + (index / 16) * 41) & 0xFF);
+  }
+  frtk_bytes[0] = 0x12; frtk_bytes[1] = 0x34; frtk_bytes[2] = 7;
+  frtk_bytes[16] = 0x56; frtk_bytes[17] = 0x78; frtk_bytes[18] = 8;
+  for (std::uint32_t row = 0; row < 3; ++row) {
+    for (std::size_t field = 3; field <= 9; ++field)
+      frtk_bytes[row * 16 + field] = static_cast<std::uint8_t>(field + row * 10);
+    const std::uint32_t packed = (1200u << 17) | row;
+    frtk_bytes[row * 16 + 10] = static_cast<std::uint8_t>(packed >> 24);
+    frtk_bytes[row * 16 + 11] = static_cast<std::uint8_t>(packed >> 16);
+    frtk_bytes[row * 16 + 12] = static_cast<std::uint8_t>(packed >> 8);
+    frtk_bytes[row * 16 + 13] = static_cast<std::uint8_t>(packed);
+  }
 
-  if (argc != 2 || !LoadLibraryW(argv[1])) return 2;
+  if (argc != 2) return 2;
+  HMODULE host = LoadLibraryW(argv[1]);
+  if (!host) return 2;
+  using SetGameReady = void(WINAPI*)(BOOL);
+  const auto set_game_ready = reinterpret_cast<SetGameReady>(
+      GetProcAddress(host, "Cfb27SetGameReady"));
+  if (!set_game_ready) return 123;
   TopologyAllocation allocation;
   if (!allocation.valid()) return 23;
   auto* sentinel_address = allocation.get() + allocation.page_size() + 128;
@@ -276,6 +432,309 @@ int wmain(int argc, wchar_t** argv) {
   if (std::find(capabilities.begin(), capabilities.end(), "telemetry") == capabilities.end()) return 51;
   if (std::find(capabilities.begin(), capabilities.end(),
                 "memoryScanAllocationMetadata") == capabilities.end()) return 106;
+  const auto bundle = SyntheticBundle(std::span<const std::uint8_t>(frtk_bytes, 48));
+  if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-missing-profile"},
+                      {"command", "discoverFrtkCatalog"}, {"params", Json::object()}},
+               response, false) || !IsError(response, "FRTK_PROFILE_INVALID")) return 112;
+  if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-load-red"},
+                      {"command", "loadFrtkProfile"}, {"params", bundle}},
+               response, false) || !response.value("ok", false)) {
+    std::cerr << "loadFrtkProfile RED response: " << response.dump() << '\n';
+    return 122;
+  }
+  for (const auto capability : {"frtkProfileV1", "frtkCatalogV1",
+                                "frtkRecordReadV1", "frtkFieldTransactionV1"}) {
+    if (std::find(capabilities.begin(), capabilities.end(), capability) ==
+        capabilities.end()) return 108;
+  }
+  if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-load-extra"},
+                      {"command", "loadFrtkProfile"},
+                      {"params", {{"profile", bundle["profile"]},
+                                  {"layout", bundle["layout"]},
+                                  {"unexpected", true}}}}, response, false) ||
+      !IsError(response, "INVALID_REQUEST")) return 109;
+  auto nested_profile_extra = bundle;
+  nested_profile_extra["profile"]["unexpected"] = true;
+  if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-load-nested-extra"},
+                      {"command", "loadFrtkProfile"},
+                      {"params", nested_profile_extra}}, response, false) ||
+      !IsError(response, "FRTK_PROFILE_INVALID")) return 128;
+  if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-load-wrong-type"},
+                      {"command", "loadFrtkProfile"},
+                      {"params", {{"profile", "not-an-object"},
+                                  {"layout", bundle["layout"]}}}}, response, false) ||
+      !IsError(response, "FRTK_PROFILE_INVALID")) return 129;
+  auto wrong_identity = bundle;
+  wrong_identity["layout"]["schemaIdentity"] = "wrong";
+  if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-wrong-identity"},
+                      {"command", "loadFrtkProfile"}, {"params", wrong_identity}},
+               response, false) || !IsError(response, "FRTK_PROFILE_INVALID")) return 110;
+  auto wrong_build = SyntheticBundle(std::span<const std::uint8_t>(frtk_bytes, 48),
+                                     "unsupported-build");
+  if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-wrong-build"},
+                      {"command", "loadFrtkProfile"}, {"params", wrong_build}},
+               response, false) || !IsError(response, "UNSUPPORTED_BUILD")) return 111;
+  if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-load"},
+                      {"command", "loadFrtkProfile"}, {"params", bundle}},
+               response, false) || !response.value("ok", false) ||
+      ContainsSensitiveKey(response["result"])) {
+    std::cerr << "loadFrtkProfile RED response: " << response.dump() << '\n';
+    return 113;
+  }
+  for (const auto& invalid_discover : std::vector<Json>{
+           {{"logicalName", "SyntheticRecords"}}, {{"tableId", 1200}},
+           {{"uniqueId", 900001}}}) {
+    if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-discover-selector"},
+                        {"command", "discoverFrtkCatalog"},
+                        {"params", invalid_discover}}, response, false) ||
+        !IsError(response, "INVALID_REQUEST")) return 130;
+  }
+  if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-discover-wrong-type"},
+                      {"command", "discoverFrtkCatalog"},
+                      {"params", Json::array()}}, response, false) ||
+      !IsError(response, "INVALID_REQUEST")) return 135;
+  if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-discover"},
+                      {"command", "discoverFrtkCatalog"}, {"params", Json::object()}},
+               response, false) || !response.value("ok", false) ||
+      ContainsSensitiveKey(response["result"])) {
+    std::cerr << "discoverFrtkCatalog RED response: " << response.dump() << '\n';
+    return 114;
+  }
+  auto generation = response["result"].value("generation", 0ull);
+  if (!generation) return 115;
+  for (const auto& invalid_inspect : std::vector<Json>{
+           {{"generation", "1"}},
+           {{"generation", generation}, {"logicalName", "SyntheticRecords"}},
+           {{"generation", generation}, {"tableId", 1200}}}) {
+    if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-inspect-invalid"},
+                        {"command", "inspectFrtkCatalog"},
+                        {"params", invalid_inspect}}, response, false) ||
+        !IsError(response, "INVALID_REQUEST")) return 131;
+  }
+  if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-inspect"},
+                      {"command", "inspectFrtkCatalog"},
+                      {"params", {{"generation", generation}}}}, response, false) ||
+      !response.value("ok", false) || ContainsSensitiveKey(response["result"]) ||
+      response["result"]["tables"][0].value("uniqueId", 0) != 900001) return 116;
+  if (!SetEnvironmentVariableW(L"CFB27_SMOKE_FRTK_TIMEOUT", L"1")) return 139;
+  const auto timeout_started = std::chrono::steady_clock::now();
+  if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-timeout"},
+      {"command", "discoverFrtkCatalog"},
+                      {"params", Json::object()}}, response, false) ||
+      !IsError(response, "FRTK_DISCOVERY_TIMEOUT")) {
+    std::cerr << "frtk timeout response: " << response.dump() << '\n';
+    return 140;
+  }
+  const auto& timeout_details = response["error"]["details"];
+  const std::set<std::string> expected_timeout_keys{
+      "stage", "tableUniqueId", "fingerprintOrdinal",
+      "completedFingerprintCount", "elapsedMilliseconds", "pagesScanned",
+      "chunksScanned", "scannedBytes", "candidateWindows", "cappedMatches"};
+  std::set<std::string> timeout_keys;
+  for (const auto& [key, value] : timeout_details.items()) timeout_keys.insert(key);
+  if (timeout_keys != expected_timeout_keys ||
+      timeout_details.value("stage", "") != "scan" ||
+      timeout_details.value("tableUniqueId", 0u) != 900001u ||
+      timeout_details["fingerprintOrdinal"] != 2 ||
+      timeout_details.value("completedFingerprintCount", 0ull) != 2 ||
+      timeout_details.value("pagesScanned", 0ull) != 3 ||
+      timeout_details.value("chunksScanned", 0ull) != 5 ||
+      timeout_details.value("scannedBytes", 0ull) != 5120 ||
+      timeout_details.value("candidateWindows", 0ull) != 7 ||
+      timeout_details.value("cappedMatches", 0ull) != 8) {
+    std::cerr << "frtk timeout details: " << timeout_details.dump() << '\n';
+    return 146;
+  }
+  const auto timeout_elapsed =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - timeout_started);
+  if (timeout_elapsed >= std::chrono::milliseconds(500)) {
+    std::cerr << "frtk timeout elapsedMs=" << timeout_elapsed.count() << '\n';
+    return 141;
+  }
+  if (!Request(pipe, {{"protocol", 1}, {"id", "status-after-frtk-timeout"},
+                      {"command", "status"}, {"params", Json::object()}},
+               response, false) || !response.value("ok", false)) {
+    std::cerr << "status after frtk timeout: " << response.dump() << '\n';
+    return 142;
+  }
+  if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-timeout-stale"},
+                      {"command", "inspectFrtkCatalog"},
+                      {"params", {{"generation", generation}}}}, response, false) ||
+      !IsError(response, "FRTK_CATALOG_STALE")) {
+    std::cerr << "frtk timeout stale response: " << response.dump() << '\n';
+    return 143;
+  }
+  SetEnvironmentVariableW(L"CFB27_SMOKE_FRTK_TIMEOUT", nullptr);
+  if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-after-timeout"},
+                      {"command", "discoverFrtkCatalog"},
+                      {"params", Json::object()}}, response, false) ||
+      !response.value("ok", false)) {
+    std::cerr << "frtk after timeout response: " << response.dump() << '\n';
+    return 144;
+  }
+  generation = response["result"].value("generation", 0ull);
+  if (!generation) return 145;
+  Json frtk_read_params{{"generation", generation},
+      {"records", Json::array({
+          {{"uniqueId", 900001}, {"row", 0},
+           {"fields", Json::array({"Score", "ZBias", "Stage", "address", "bytesHex",
+                                    "mask", "offset", "range", "operation",
+                                    "tableId", "Link"})}},
+          {{"uniqueId", 900001}, {"row", 1},
+           {"fields", Json::array({"Stage", "Score"})}}
+      })}};
+  if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-read"},
+                      {"command", "readFrtkRecords"}, {"params", frtk_read_params}},
+               response, false) || !response.value("ok", false) ||
+      ContainsSensitiveKey(response["result"]) ||
+      response["result"]["records"][0]["values"] !=
+          Json::array({
+              {{"field", "Score"}, {"value", 0x1234}},
+              {{"field", "ZBias"}, {"value", -55}},
+              {{"field", "Stage"}, {"value", 7}},
+              {{"field", "address"}, {"value", 3}},
+              {{"field", "bytesHex"}, {"value", 4}},
+              {{"field", "mask"}, {"value", 5}},
+              {{"field", "offset"}, {"value", 6}},
+              {{"field", "range"}, {"value", 7}},
+              {{"field", "operation"}, {"value", 8}},
+              {{"field", "tableId"}, {"value", 9}},
+              {{"field", "Link"},
+               {"value", {{"uniqueId", 900001}, {"row", 0}}}}
+          }) ||
+      response["result"]["records"][1]["values"] !=
+          Json::array({{{"field", "Stage"}, {"value", 8}},
+                       {{"field", "Score"}, {"value", 0x5678}}})) return 117;
+  const std::string lua_database_source =
+      "assert(type(CFB27)=='table' and type(CFB27.db)=='table'); "
+      "local t=CFB27.db:GetTableByUniqueId(900001); local r=t:GetRecord(0); "
+      "assert(r:GetField('Score')==0x1234 and r:GetField('ZBias')==-55 and "
+      "r:GetField('Stage')==7); "
+      "local link=r:GetField('Link'); assert(link.uniqueId==900001 and "
+      "link.row==0 and link.tableId==nil); "
+      "for _,v in ipairs({tostring(t),tostring(r)}) do "
+      "assert(not v:find('0x') and not v:find('userdata:') and "
+      "not v:match('%x%x%x%x%x%x%x%x')) end; "
+      "local before=r:GetField('Score'); "
+      "assert(not pcall(function() CFB27.db:Transaction(function(tx) "
+      "assert(not pcall(function() tx:SetField(r,'Link',{tableId=1200,row=0}) end)) "
+      "end) end)); "
+      "assert(r:GetField('Link').uniqueId==900001); "
+      "assert(not pcall(function() CFB27.db:Transaction(function(tx) "
+      "assert(tostring(tx)=='CFB27.db transaction'); "
+      "tx:SetField(r,'Score',99) end) end)); "
+      "assert(r:GetField('Score')==before)";
+  if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-lua-database"},
+                      {"command", "evaluate"},
+                      {"params", {{"source", lua_database_source}}}},
+               response, false) || !response.value("ok", false) ||
+      frtk_bytes[0] != 0x12 || frtk_bytes[1] != 0x34) return 138;
+  const std::vector<Json> invalid_reads{
+      {{"generation", generation}, {"records", "not-an-array"}},
+      {{"generation", generation}, {"records", Json::array()}, {"unexpected", true}},
+      {{"generation", generation}, {"records", Json::array({
+          {{"uniqueId", 900001}, {"row", 0}, {"fields", Json::array({"Score"})},
+           {"unexpected", true}}})}},
+      {{"generation", generation}, {"records", Json::array({
+          {{"logicalName", "SyntheticRecords"}, {"row", 0},
+           {"fields", Json::array({"Score"})}}})}},
+      {{"generation", generation}, {"records", Json::array({
+          {{"tableId", 1200}, {"row", 0}, {"fields", Json::array({"Score"})}}})}},
+      {{"generation", generation}, {"records", Json::array({
+          {{"uniqueId", "900001"}, {"row", 0},
+           {"fields", Json::array({"Score"})}}})}},
+      {{"generation", generation}, {"records", Json::array({
+          {{"uniqueId", 900001}, {"row", "0"},
+           {"fields", Json::array({"Score"})}}})}},
+      {{"generation", generation}, {"records", Json::array({
+          {{"uniqueId", 900001}, {"row", 0}, {"fields", Json::array({7})}}})}},
+  };
+  for (const auto& invalid_read : invalid_reads) {
+    if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-read-invalid"},
+                        {"command", "readFrtkRecords"}, {"params", invalid_read}},
+                 response, false) || !IsError(response, "INVALID_REQUEST")) return 132;
+  }
+  const Json transaction_params{{"transactionId", "frtk.denied-1"},
+      {"generation", generation},
+      {"changes", Json::array({{{"uniqueId", 900001}, {"row", 0},
+                                 {"field", "Score"}, {"value", 99}}})}};
+  if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-authority"},
+                      {"command", "transactFrtkFields"},
+                      {"params", transaction_params}}, response, false) ||
+      !IsError(response, "FRTK_AUTHORITY_UNPROVEN") ||
+      ContainsSensitiveKey(response["error"])) return 118;
+  const std::vector<std::pair<Json, const char*>> invalid_transactions{
+      {{{"transactionId", "frtk.bad"}, {"generation", generation},
+        {"changes", "not-an-array"}}, "INVALID_REQUEST"},
+      {{{"transactionId", "frtk.bad"}, {"generation", generation},
+        {"changes", Json::array()}, {"unexpected", true}}, "INVALID_REQUEST"},
+      {{{"transactionId", "frtk.bad"}, {"generation", generation},
+       {"changes", Json::array({{{"uniqueId", 900001}, {"row", 0},
+                                  {"field", "Score"}, {"value", 1},
+                                  {"unexpected", true}}})}}, "INVALID_REQUEST"},
+      {{{"transactionId", "frtk.bad"}, {"generation", generation},
+       {"changes", Json::array({{{"logicalName", "SyntheticRecords"}, {"row", 0},
+                                  {"field", "Score"}, {"value", 1}}})}}, "INVALID_REQUEST"},
+      {{{"transactionId", "frtk.bad"}, {"generation", generation},
+       {"changes", Json::array({{{"tableId", 1200}, {"row", 0},
+                                  {"field", "Score"}, {"value", 1}}})}}, "INVALID_REQUEST"},
+      {{{"transactionId", "frtk.bad"}, {"generation", generation},
+       {"changes", Json::array({{{"uniqueId", 900001}, {"row", 0},
+                                  {"field", "Link"},
+                                  {"value", {{"uniqueId", 900001}, {"row", 0},
+                                             {"unexpected", true}}}}})}},
+       "FRTK_FIELD_INVALID"},
+      {{{"transactionId", "frtk.bad"}, {"generation", generation},
+       {"changes", Json::array({{{"uniqueId", 900001}, {"row", 0},
+                                  {"field", "Link"},
+                                  {"value", {{"uniqueId", "900001"}, {"row", 0}}}}})}},
+       "FRTK_FIELD_INVALID"},
+  };
+  for (const auto& [invalid_transaction, expected_code] : invalid_transactions) {
+    if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-transaction-invalid"},
+                        {"command", "transactFrtkFields"},
+                        {"params", invalid_transaction}}, response, false) ||
+        !IsError(response, expected_code)) return 133;
+  }
+  set_game_ready(FALSE);
+  if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-game-not-ready"},
+                      {"command", "readFrtkRecords"}, {"params", frtk_read_params}},
+               response, false) || !IsError(response, "FRTK_CATALOG_STALE")) return 124;
+  set_game_ready(TRUE);
+  if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-rediscover"},
+                      {"command", "discoverFrtkCatalog"}, {"params", Json::object()}},
+               response, false) || !response.value("ok", false)) return 125;
+  generation = response["result"].value("generation", 0ull);
+  frtk_read_params["generation"] = generation;
+  if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-invalidate-bad"},
+                      {"command", "invalidateFrtkCatalog"},
+                      {"params", {{"reason", "arbitrary"}}}}, response, false) ||
+      !IsError(response, "INVALID_REQUEST")) return 119;
+  for (const auto& invalid_invalidate : std::vector<Json>{
+           {{"reason", 7}},
+           {{"reason", "caller_transition"}, {"unexpected", true}}}) {
+    if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-invalidate-invalid"},
+                        {"command", "invalidateFrtkCatalog"},
+                        {"params", invalid_invalidate}}, response, false) ||
+        !IsError(response, "INVALID_REQUEST")) return 134;
+  }
+  if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-invalidate"},
+                      {"command", "invalidateFrtkCatalog"},
+                      {"params", {{"reason", "caller_transition"}}}}, response, false) ||
+      !response.value("ok", false) || ContainsSensitiveKey(response["result"])) return 120;
+  if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-stale"},
+                      {"command", "readFrtkRecords"}, {"params", frtk_read_params}},
+               response, false) || !IsError(response, "FRTK_CATALOG_STALE")) return 121;
+  Allocation duplicate_frtk_records(4096);
+  if (!duplicate_frtk_records.get()) return 126;
+  std::memcpy(duplicate_frtk_records.get(), frtk_bytes, 48);
+  if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-ambiguous"},
+                      {"command", "discoverFrtkCatalog"}, {"params", Json::object()}},
+               response, false) || !IsError(response, "FRTK_DISCOVERY_FAILED") ||
+      ContainsSensitiveKey(response["error"]) ||
+      response["error"]["details"]["tables"][0].value("state", "") != "ambiguous")
+    return 127;
 
   if (!Request(pipe, {{"protocol", 1}, {"id", "status-1"},
                       {"command", "status"}, {"params", Json::object()}}, response, false)) return 14;
