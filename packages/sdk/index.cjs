@@ -13,6 +13,14 @@ const {
   encodeField,
 } = require('./src/frtk-fields.cjs');
 const { compileFrtkArtifacts } = require('./src/frtk-profile.cjs');
+const {
+  LIVE_RECRUITING_EVIDENCE,
+  LIVE_RECRUITING_TABLES,
+} = require('./src/live-recruiting-layout.cjs');
+const {
+  CONTACT_ACTIONS,
+  createLiveRecruitingService,
+} = require('./src/live-recruiting.cjs');
 
 module.exports = {
   ERROR_CODES,
@@ -31,4 +39,8 @@ module.exports = {
   decodeField,
   encodeField,
   compileFrtkArtifacts,
+  LIVE_RECRUITING_EVIDENCE,
+  LIVE_RECRUITING_TABLES,
+  CONTACT_ACTIONS,
+  createLiveRecruitingService,
 };
