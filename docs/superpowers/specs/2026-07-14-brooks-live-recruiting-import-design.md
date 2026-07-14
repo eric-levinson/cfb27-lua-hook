@@ -16,50 +16,51 @@ Committed hook artifacts must not contain Brooks's PID, absolute addresses, save
 
 ## Architecture
 
-Keep the native host and protocol unchanged. Add a focused CommonJS SDK module that composes the hook's existing `scanMemory`, `readMemory`, and `writeTransaction` calls behind typed recruiting operations. This is faster and lower risk than expanding the native FrTk protocol or pretending a generic record-allocation API already exists.
+Keep the protocol unchanged and reuse the hook's existing typed FrTk catalog: `readFrtkRecords` for reads and `transactFrtkFields` for guarded writes. Add a focused CommonJS SDK service that accepts the discovered catalog generation plus caller-resolved row numbers. Brooks's app already resolves the selected target, board, pitch, and visit rows from the loaded save, so rebuilding his raw-address calibration layer inside the hook would duplicate work and expose more failure modes.
 
-The module owns session calibration, codecs, validation, and expected-byte transactions. Consumers receive decoded recruiting values and stable sanitized errors, never addresses, masks, or byte buffers.
+The only host-side authority change is to promote the four Brooks-verified table mirrors after normal profile discovery identifies their persistent Unique IDs and expected layouts: UserRecruitTarget `3987156317`, ActiveVisitInfo `3093586546`, ActiveRecruitingPitch `1559900276`, and RecruitingBoard `220276943`. File profiles remain `discovery_only`; runtime discovery performs the evidence-backed promotion exactly as it already does for Recruit and ProspectTargetSchool.
+
+The SDK service owns action-cost accounting, enum/range validation, and transaction composition. Consumers receive decoded recruiting values and stable sanitized errors, never addresses, masks, or byte buffers.
 
 ## Supported surface
 
 The first delivery supports only operations backed by Brooks's completed evidence:
 
-- locate and read a `UserRecruitTarget` record for a selected recruit;
+- read the caller-resolved `UserRecruitTarget` row for a selected recruit;
 - read RecruitingBoard total, processed, and assigned hours from table 4251;
 - enable or disable DM the Player, Browse Social Media, and Contact Friends & Family while adjusting assigned hours in the same guarded transaction;
 - change `CurrentNILOffer` in place;
-- rewrite the content of an existing ActiveRecruitingPitch row without allocating or freeing a row;
+- change the pitch enum in an existing ActiveRecruitingPitch row while preserving its current intensity and cost;
 - rewrite the content of an existing ActiveVisitInfo row without allocating or freeing a row.
 
-`SendTheHouse` remains excluded until Brooks resolves the observed-bit versus schema-mask conflict. Scholarship offers, scouting, board membership changes, new pitch/visit creation, pitch/visit removal, and any operation that changes a FrTk freelist remain excluded.
+`SendTheHouse` remains excluded until Brooks resolves the observed-bit versus schema-mask conflict. Scholarship offers, scouting, board membership changes, pitch-intensity changes, new pitch/visit creation, pitch/visit removal, and any operation that changes a FrTk freelist remain excluded.
 
 ## Session and transaction flow
 
-1. Discover the current game and negotiate the existing memory and guarded-transaction capabilities.
-2. Calibrate the authoritative live mirrors using the masked reference signatures from the upstream layout.
-3. Reject zero or multiple authoritative candidates.
-4. Bind calibration to the current PID and discard it when the game, host session, or selected save changes.
-5. Read the current record and board-hour bytes immediately before composing a mutation.
-6. Validate field ranges, action cost, available board hours, and existing pitch/visit references.
-7. Submit one expected-byte `writeTransaction` containing every affected field and hours cell.
-8. Return only decoded state or a stable sanitized error.
+1. Load a caller-built FrTk profile, discover the catalog, and retain its generation.
+2. Require all four recruiting tables to be present with `direct_verified` runtime authority.
+3. Accept the target and board row numbers already resolved by the save-backed consumer; accept an existing pitch or visit row only for the corresponding content rewrite.
+4. Read the current typed fields immediately before composing a mutation.
+5. Validate field ranges, action cost, available board hours, and existing pitch/visit row selection.
+6. Submit one `transactFrtkFields` call containing every affected field, including RecruitingBoard assigned hours for contact-action changes.
+7. Return only decoded state or a stable sanitized error.
 
 The service must use the table 4251 RecruitingBoard mirror for hours. The earlier board-array hours candidate was a stale copy and is prohibited.
 
 ## Failure behavior
 
-Every uncertainty fails closed. Calibration ambiguity, PID drift, missing references, unsupported actions, insufficient hours, unexpected bytes, transaction rollback, or malformed host responses produce a stable error and no partial success result. Dry-run composition remains available for tests and diagnostics, but no raw operations are returned to consumer applications.
+Every uncertainty fails closed. Missing or stale catalog generations, unverified table authority, missing rows, unsupported actions, insufficient hours, transaction rollback, or malformed host responses produce a stable error and no partial success result. Dry-run composition remains available for tests and diagnostics, but no raw field-operation list is returned to consumer applications.
 
 ## Testing
 
 Testing is fully automated and offline:
 
-- pure codec tests for references, UserRecruitTarget fields, pitch values, visit values, and packed hours;
-- calibration tests using a fake client and synthetic unique/ambiguous/no-match memory pages;
+- service tests using a fake typed client and synthetic decoded records;
+- discovery smoke tests proving only the four pinned Unique IDs receive runtime write authority;
 - composer tests derived from Brooks's verified before/after values;
 - transaction tests proving contact bits and board hours are changed together;
-- failure tests for stale PID, missing pitch/visit rows, insufficient hours, expected-byte mismatch, and rollback errors;
-- boundary tests proving the public API returns no addresses, patterns, masks, or bytes.
+- failure tests for stale generation, unverified authority, missing pitch/visit rows, insufficient hours, field-transaction failure, and rollback errors;
+- boundary tests proving the public API returns no addresses, patterns, masks, bytes, or raw changes.
 
 Run the existing repository checks and test suite. No CFB27, MMC, installed-host, weekly-advance, or autosave gate is required for this delivery.
 
