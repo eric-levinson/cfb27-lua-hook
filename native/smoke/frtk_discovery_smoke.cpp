@@ -30,6 +30,29 @@ std::vector<std::uint8_t> Record(std::uint16_t table_id,
   return bytes;
 }
 
+std::vector<std::uint8_t> LiveWords(
+    const std::vector<std::uint8_t>& canonical) {
+  auto live = canonical;
+  for (std::size_t start = 0; start < live.size(); start += 4) {
+    const auto end = (std::min)(start + 4, live.size());
+    std::reverse(live.begin() + start, live.begin() + end);
+  }
+  return live;
+}
+
+std::vector<std::uint8_t> LittleEndian32(std::uint32_t value) {
+  return {static_cast<std::uint8_t>(value),
+          static_cast<std::uint8_t>(value >> 8),
+          static_cast<std::uint8_t>(value >> 16),
+          static_cast<std::uint8_t>(value >> 24)};
+}
+
+std::vector<std::uint8_t> LittleEndianPointer(std::uintptr_t value) {
+  std::vector<std::uint8_t> bytes(sizeof(value));
+  std::memcpy(bytes.data(), &value, sizeof(value));
+  return bytes;
+}
+
 TableProfile Table(std::string name, std::uint16_t id, std::uint32_t capacity) {
   TableProfile table{.logical_name = std::move(name),
                      .table_id = id,
@@ -156,6 +179,36 @@ class FakeBackend final : public DiscoveryBackend {
     Put(table_base + source_row * 8 + 4, bytes);
   }
 
+  ScanObservationResult ScanTableDescriptor(
+      std::uint16_t table_id, std::uint32_t unique_id,
+      std::size_t max_matches, const DescriptorMatchFilter& accept_match,
+      const DiscoveryDeadline&) override {
+    if (!supports_descriptors) {
+      return {.complete = true, .code = "DESCRIPTOR_SCAN_UNSUPPORTED"};
+    }
+    ++descriptor_scan_count;
+    auto pattern = LittleEndian32(table_id);
+    const auto unique = LittleEndian32(unique_id);
+    pattern.insert(pattern.end(), unique.begin(), unique.end());
+    ScanObservationResult result{.complete = true};
+    for (const auto& allocation : allocations) {
+      for (std::size_t offset = 0;
+           offset + pattern.size() <= allocation.bytes.size(); ++offset) {
+        if (std::equal(pattern.begin(), pattern.end(),
+                       allocation.bytes.begin() + offset)) {
+          const ScanObservation observation{allocation.base + offset,
+                                            allocation.base,
+                                            allocation.bytes.size()};
+          if (accept_match && !accept_match(observation)) continue;
+          result.matches.push_back(observation);
+          if (stop_after_first_descriptor_signature) return result;
+          if (result.matches.size() == max_matches) return result;
+        }
+      }
+    }
+    return result;
+  }
+
   ScanObservationResult Scan(const RowFingerprint& fingerprint,
                              std::size_t max_matches,
                              const DiscoveryDeadline& deadline) override {
@@ -236,6 +289,7 @@ class FakeBackend final : public DiscoveryBackend {
 
   std::vector<Allocation> allocations;
   std::size_t scan_count{};
+  std::size_t descriptor_scan_count{};
   std::size_t max_requested_matches{};
   std::size_t read_batch_count{};
   std::size_t last_batch_size{};
@@ -244,7 +298,118 @@ class FakeBackend final : public DiscoveryBackend {
   bool mutate_reread{};
   std::size_t slow_after_scan{};
   bool slow_allocation{};
+  bool supports_descriptors{};
+  bool stop_after_first_descriptor_signature{};
 };
+
+void InstallLiveDescriptorTable(const TableProfile& table,
+                                 FakeBackend& backend,
+                                 std::uintptr_t descriptor_base,
+                                 std::uintptr_t blob_base,
+                                 std::size_t prefix_bytes,
+                                 std::size_t suffix_bytes,
+                                 std::size_t end_pointer_offset = 36) {
+  backend.AddAllocation(descriptor_base, 256);
+  backend.supports_descriptors = true;
+  backend.AddAllocation(blob_base, prefix_bytes +
+                                       table.capacity * table.record_size +
+                                       suffix_bytes);
+  auto signature = LittleEndian32(table.table_id);
+  const auto unique_id = LittleEndian32(table.unique_id);
+  signature.insert(signature.end(), unique_id.begin(), unique_id.end());
+  backend.Put(descriptor_base + 32, signature);
+  backend.Put(descriptor_base + 44, LittleEndianPointer(blob_base));
+  backend.Put(descriptor_base + 32 + end_pointer_offset,
+              LittleEndianPointer(blob_base + prefix_bytes +
+                                  table.capacity * table.record_size +
+                                  suffix_bytes));
+  for (const auto& row : table.rows) {
+    backend.Put(blob_base + prefix_bytes +
+                    row.row_index * table.record_size,
+                LiveWords(row.pattern));
+  }
+}
+
+ProfileBundle IndexedArrayBundle() {
+  ProfileBundle bundle;
+  bundle.tables = {Table("ProspectTargetSchool", 5840, 30)};
+  TableProfile array{.logical_name = "ProspectTargetSchool[]",
+                     .table_id = 5842,
+                     .unique_id = 2332540366,
+                     .capacity = 3,
+                     .record_size = 8};
+  for (std::uint32_t row = 0; row < array.capacity; ++row) {
+    std::vector<std::uint8_t> pattern;
+    for (std::uint32_t ordinal = 0; ordinal < 2; ++ordinal) {
+      const auto encoded = EncodePackedReference({5840, row * 2 + ordinal});
+      pattern.push_back(static_cast<std::uint8_t>(encoded >> 24));
+      pattern.push_back(static_cast<std::uint8_t>(encoded >> 16));
+      pattern.push_back(static_cast<std::uint8_t>(encoded >> 8));
+      pattern.push_back(static_cast<std::uint8_t>(encoded));
+      array.relationships.push_back(
+          {.source_row = row,
+           .field_name = ordinal == 0 ? "Target0" : "Target1",
+           .target_table_id = 5840,
+           .target_row = row * 2 + ordinal});
+    }
+    array.rows.push_back({.row_index = row,
+                          .pattern = std::move(pattern),
+                          .mask = std::vector<std::uint8_t>(8, 0xFF)});
+  }
+  bundle.tables.push_back(std::move(array));
+  std::string error;
+  const bool loaded = bundle.schema.Load(
+      {{"formatVersion", 1},
+       {"schemaIdentity", "synthetic-schema-v1"},
+       {"buildIdentity", "synthetic-build-v1"},
+       {"tables",
+        json::array(
+            {{{"logicalName", bundle.tables[0].logical_name},
+              {"tableId", bundle.tables[0].table_id},
+              {"uniqueId", bundle.tables[0].unique_id},
+              {"capacity", bundle.tables[0].capacity},
+              {"recordSize", bundle.tables[0].record_size},
+              {"authorityStatus", "discovery_only"},
+              {"fields", json::array({Field("SyntheticValue", "unsigned", 0,
+                                                   2, 16)})}},
+             {{"logicalName", bundle.tables[1].logical_name},
+              {"tableId", bundle.tables[1].table_id},
+              {"uniqueId", bundle.tables[1].unique_id},
+              {"capacity", bundle.tables[1].capacity},
+              {"recordSize", bundle.tables[1].record_size},
+              {"authorityStatus", "discovery_only"},
+              {"fields",
+               json::array({Field("Target0", "packed-reference", 0, 4, 32,
+                                        5840),
+                            Field("Target1", "packed-reference", 4, 4, 32,
+                                  5840)})}}})}},
+      &error);
+  if (!loaded) throw std::runtime_error(error);
+  return bundle;
+}
+
+void InstallLiveIndexedArray(const TableProfile& table, FakeBackend& backend,
+                             std::uintptr_t descriptor_base,
+                             std::uintptr_t slots_base,
+                             std::uintptr_t wrappers_base) {
+  backend.AddAllocation(descriptor_base, 256);
+  backend.AddAllocation(slots_base, table.capacity * 8);
+  backend.AddAllocation(wrappers_base, table.capacity * 32);
+  backend.supports_descriptors = true;
+  auto signature = LittleEndian32(table.table_id);
+  const auto unique_id = LittleEndian32(table.unique_id);
+  signature.insert(signature.end(), unique_id.begin(), unique_id.end());
+  backend.Put(descriptor_base + 32, signature);
+  backend.Put(descriptor_base + 52, LittleEndianPointer(slots_base));
+  backend.Put(descriptor_base + 60,
+              LittleEndianPointer(slots_base + table.capacity * 8));
+  for (std::uint32_t row = 0; row < table.capacity; ++row) {
+    const auto wrapper = wrappers_base + row * 32;
+    backend.Put(slots_base + row * 8, LittleEndianPointer(wrapper));
+    backend.Put(wrapper, LittleEndianPointer(0xABCDEF00));
+    backend.Put(wrapper + 24, LittleEndian32(row));
+  }
+}
 
 const TableDiscovery& State(const DiscoveryResult& result,
                             std::uint32_t unique_id) {
@@ -306,6 +471,115 @@ void TestGraphAndRelocation() {
   result = DiscoverTables(bundle, relocated);
   Require(State(result, 424407).descriptor->base == 0x900000,
           "relocated table retained stale base");
+}
+
+void TestLiveDescriptorAndWordOrderDiscovery() {
+  auto bundle = Bundle();
+  bundle.tables.resize(1);
+  LoadSchema(bundle);
+  FakeBackend backend;
+  InstallLiveDescriptorTable(bundle.tables[0], backend, 0x500000, 0x600000,
+                             48, 16);
+
+  const auto result = DiscoverTables(bundle, backend);
+  const auto& table = State(result, bundle.tables[0].unique_id);
+  Require(table.state == TableState::kResolved,
+          "live descriptor table did not resolve");
+  Require(table.descriptor && table.descriptor->base == 0x600030,
+          "live descriptor table derived the wrong record base");
+  Require(table.descriptor->stride == bundle.tables[0].record_size,
+          "live descriptor table derived the wrong stride");
+  Require(table.descriptor->storage == TableStorage::kWordSwappedRecords,
+          "live descriptor table did not retain word-order metadata");
+  Require(backend.descriptor_scan_count == 1 && backend.scan_count == 0,
+          "live descriptor discovery performed global row scans");
+}
+
+void TestLiveDescriptorSkipsInvalidSignatureCopy() {
+  auto bundle = Bundle();
+  bundle.tables.resize(1);
+  LoadSchema(bundle);
+  FakeBackend backend;
+  backend.AddAllocation(0x400000, 256);
+  backend.supports_descriptors = true;
+  backend.stop_after_first_descriptor_signature = true;
+  auto signature = LittleEndian32(bundle.tables[0].table_id);
+  const auto unique_id = LittleEndian32(bundle.tables[0].unique_id);
+  signature.insert(signature.end(), unique_id.begin(), unique_id.end());
+  backend.Put(0x400020, signature);
+  InstallLiveDescriptorTable(bundle.tables[0], backend, 0x500000, 0x600000,
+                             48, 16);
+
+  const auto result = DiscoverTables(bundle, backend);
+  const auto& table = State(result, bundle.tables[0].unique_id);
+  Require(table.state == TableState::kResolved && table.descriptor &&
+              table.descriptor->base == 0x600030,
+          "live descriptor scan stopped on an invalid signature copy");
+}
+
+void TestLiveDescriptorAcceptsAlternateEndPointerOffset() {
+  auto bundle = Bundle();
+  bundle.tables.resize(1);
+  bundle.tables[0].unique_id = 1612938518;
+  LoadSchema(bundle);
+  FakeBackend backend;
+  InstallLiveDescriptorTable(bundle.tables[0], backend, 0x500000, 0x600000,
+                             48, 16, 28);
+
+  const auto result = DiscoverTables(bundle, backend);
+  const auto& table = State(result, bundle.tables[0].unique_id);
+  Require(table.state == TableState::kResolved && table.descriptor &&
+              table.descriptor->base == 0x600030,
+          "live descriptor rejected the alternate end-pointer layout");
+}
+
+void TestLiveDescriptorRelationshipWordOrder() {
+  ProfileBundle bundle;
+  bundle.tables = {Table("Recruit", 4269, 10),
+                   Table("RecruitTarget", 4288, 10)};
+  bundle.tables[1].relationships.push_back(
+      {.source_row = 3, .field_name = "RecruitRef", .target_table_id = 4269,
+       .target_row = 5});
+  const auto encoded = EncodePackedReference({4269, 5});
+  auto& relationship_row = bundle.tables[1].rows[1].pattern;
+  relationship_row[4] = static_cast<std::uint8_t>(encoded >> 24);
+  relationship_row[5] = static_cast<std::uint8_t>(encoded >> 16);
+  relationship_row[6] = static_cast<std::uint8_t>(encoded >> 8);
+  relationship_row[7] = static_cast<std::uint8_t>(encoded);
+  LoadSchema(bundle);
+  FakeBackend backend;
+  InstallLiveDescriptorTable(bundle.tables[0], backend, 0x500000, 0x600000,
+                             32, 16);
+  InstallLiveDescriptorTable(bundle.tables[1], backend, 0x510000, 0x610000,
+                             40, 8);
+
+  const auto result = DiscoverTables(bundle, backend);
+  Require(State(result, bundle.tables[0].unique_id).state ==
+              TableState::kResolved,
+          "live relationship target did not resolve");
+  Require(State(result, bundle.tables[1].unique_id).state ==
+              TableState::kResolved,
+          "live relationship source did not decode word-swapped reference");
+}
+
+void TestLiveIndexedReferenceArrayDiscovery() {
+  auto bundle = IndexedArrayBundle();
+  FakeBackend backend;
+  InstallLiveDescriptorTable(bundle.tables[0], backend, 0x500000, 0x600000,
+                             32, 16);
+  InstallLiveIndexedArray(bundle.tables[1], backend, 0x510000, 0x620000,
+                          0x630000);
+
+  const auto result = DiscoverTables(bundle, backend);
+  const auto& array = State(result, bundle.tables[1].unique_id);
+  Require(array.state == TableState::kResolved && array.descriptor,
+          "live indexed reference array did not resolve");
+  Require(array.descriptor->storage == TableStorage::kIndexedReferenceArray &&
+              array.descriptor->base == 0x620000 &&
+              array.descriptor->stride == 8 &&
+              array.descriptor->virtual_target_table_id == 5840 &&
+              array.descriptor->virtual_width == 2,
+          "live indexed reference array metadata was incorrect");
 }
 
 void TestAmbiguityAndStaleCopies() {
@@ -617,6 +891,11 @@ void TestSchemaAuthoritativeRelationshipFields() {
 
 int main() {
   try {
+    TestLiveDescriptorAndWordOrderDiscovery();
+    TestLiveDescriptorSkipsInvalidSignatureCopy();
+    TestLiveDescriptorAcceptsAlternateEndPointerOffset();
+    TestLiveDescriptorRelationshipWordOrder();
+    TestLiveIndexedReferenceArrayDiscovery();
     TestGraphAndRelocation();
     TestAmbiguityAndStaleCopies();
     TestStructuralRejections();

@@ -15,6 +15,14 @@ void Require(bool value, const char* message) {
   if (!value) throw std::runtime_error(message);
 }
 
+std::vector<std::uint8_t> LiveWords(std::vector<std::uint8_t> bytes) {
+  for (std::size_t start = 0; start < bytes.size(); start += 4) {
+    std::reverse(bytes.begin() + start,
+                 bytes.begin() + (std::min)(start + 4, bytes.size()));
+  }
+  return bytes;
+}
+
 nlohmann::json Field(const char* name, const char* encoding, unsigned offset,
                      unsigned bytes, unsigned bit_offset, unsigned width,
                      std::int64_t maximum,
@@ -55,6 +63,52 @@ ProfileBundle Bundle(const char* authority) {
       })}};
   Require(result.schema.LoadTrustedForTesting(schema, &error), error.c_str());
   return result;
+}
+
+ProfileBundle IndexedAccessBundle() {
+  ProfileBundle result;
+  result.profile_id = "indexed-access-profile";
+  result.tables = {
+      {.logical_name = "Target", .table_id = 22, .unique_id = 220022,
+       .capacity = 10, .record_size = 4},
+      {.logical_name = "Target[]", .table_id = 33, .unique_id = 330033,
+       .capacity = 2, .record_size = 8}};
+  std::string error;
+  const auto schema = nlohmann::json{
+      {"formatVersion", 1}, {"schemaIdentity", "indexed-access-schema"},
+      {"buildIdentity", "indexed-access-build"},
+      {"tables", nlohmann::json::array({
+        {{"logicalName", "Target"}, {"tableId", 22}, {"uniqueId", 220022},
+         {"capacity", 10}, {"recordSize", 4},
+         {"authorityStatus", "discovery_only"},
+         {"fields", nlohmann::json::array()}},
+        {{"logicalName", "Target[]"}, {"tableId", 33}, {"uniqueId", 330033},
+         {"capacity", 2}, {"recordSize", 8},
+         {"authorityStatus", "discovery_only"},
+         {"fields", nlohmann::json::array({
+           Field("Target0", "packed-reference", 0, 4, 0, 32,
+                 0xFFFFFFFFll, 22),
+           Field("Target1", "packed-reference", 4, 4, 0, 32,
+                 0xFFFFFFFFll, 22)
+         })}}
+      })}};
+  Require(result.schema.LoadTrustedForTesting(schema, &error), error.c_str());
+  return result;
+}
+
+DiscoveryResult IndexedAccessDiscovery() {
+  return {.tables = {
+      {.unique_id = 220022, .state = TableState::kResolved,
+       .descriptor = TableDescriptor{.unique_id = 220022, .base = 0x1000,
+          .stride = 4, .capacity = 10, .allocation_base = 0x1000,
+          .allocation_size = 40}},
+      {.unique_id = 330033, .state = TableState::kResolved,
+       .descriptor = TableDescriptor{
+          .unique_id = 330033, .base = 0x2000, .stride = 8, .capacity = 2,
+          .allocation_base = 0x2000, .allocation_size = 16,
+          .storage = TableStorage::kIndexedReferenceArray,
+          .virtual_target_table_id = 22, .virtual_width = 2}}
+  }};
 }
 
 DiscoveryResult Discovery() {
@@ -212,6 +266,53 @@ void TestReadsAndValidation() {
   backend.records[0x2000] = {0, 0, 0, 0, 0, 44, 0, 3};
   Require(!accessor.ReadFields(handle, 0, {"TargetRef"}).ok,
           "packed-reference target row bounds ignored");
+}
+
+void TestWordSwappedTypedReadAndWritePlan() {
+  auto profile = Bundle("direct_verified");
+  auto discovery = Discovery();
+  discovery.tables[1].descriptor->storage =
+      TableStorage::kWordSwappedRecords;
+  SessionCatalog catalog;
+  catalog.Install(profile, discovery);
+  Backend backend;
+  backend.records[0x2000] =
+      LiveWords({0x9D, 0x12, 0x34, 0, 0, 44, 0, 2});
+  RecordAccessor accessor(catalog, profile.schema, backend, backend);
+  const auto handle = *catalog.GetHandle(330033);
+  const auto read = accessor.ReadFields(handle, 0, {"Flags", "Score",
+                                                    "TargetRef"});
+  Require(read.ok && std::get<std::int64_t>(read.fields[0].value) == 3 &&
+              std::get<std::int64_t>(read.fields[1].value) == 0x1234 &&
+              std::get<PackedReference>(read.fields[2].value) ==
+                  PackedReference{22, 2},
+          "word-swapped live record did not decode canonical typed fields");
+  const auto plan = accessor.PlanFieldWrites(
+      handle, 0, {{"Score", std::int64_t{0x5678}}});
+  Require(plan.ok && plan.operations.size() == 1 &&
+              plan.operations[0].address == "0x2001" &&
+              plan.operations[0].expected ==
+                  std::vector<std::uint8_t>({0x34, 0x12}) &&
+              plan.operations[0].replacement ==
+                  std::vector<std::uint8_t>({0x78, 0x56}),
+          "word-swapped typed write did not preserve raw expected-byte order");
+}
+
+void TestIndexedArrayTypedReads() {
+  auto profile = IndexedAccessBundle();
+  SessionCatalog catalog;
+  catalog.Install(profile, IndexedAccessDiscovery());
+  Backend backend;
+  RecordAccessor accessor(catalog, profile.schema, backend, backend);
+  const auto handle = *catalog.GetHandle(330033);
+  const auto read = accessor.ReadFields(handle, 1, {"Target0", "Target1"});
+  Require(read.ok && read.fields.size() == 2 &&
+              std::get<PackedReference>(read.fields[0].value) ==
+                  PackedReference{22, 2} &&
+              std::get<PackedReference>(read.fields[1].value) ==
+                  PackedReference{22, 3} &&
+              backend.record_reads == 0,
+          "indexed live array did not synthesize typed scalar references");
 }
 
 void TestPlansAndAuthority() {
@@ -421,6 +522,8 @@ void TestEvidenceLimitsFailDuringFinalization() {
 int main() {
   try {
     TestReadsAndValidation();
+    TestWordSwappedTypedReadAndWritePlan();
+    TestIndexedArrayTypedReads();
     TestPackedReferenceRequiresActiveTarget();
     TestPlansAndAuthority();
     TestOffsetBinaryTypedAccess();

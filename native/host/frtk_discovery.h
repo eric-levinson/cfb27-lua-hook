@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <chrono>
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
@@ -48,6 +49,9 @@ struct ScanObservationResult {
   } counters;
 };
 
+using DescriptorMatchFilter =
+    std::function<bool(const ScanObservation& observation)>;
+
 using DiscoveryCounters = ScanObservationResult::Counters;
 constexpr std::uint64_t kMaxSafeDiagnosticCounter = 9007199254740991ull;
 
@@ -70,6 +74,12 @@ struct ReadRequest {
 class DiscoveryBackend {
  public:
   virtual ~DiscoveryBackend() = default;
+  virtual ScanObservationResult ScanTableDescriptor(
+      std::uint16_t, std::uint32_t, std::size_t,
+      const DescriptorMatchFilter&,
+      const DiscoveryDeadline&) {
+    return {.complete = true, .code = "DESCRIPTOR_SCAN_UNSUPPORTED"};
+  }
   virtual ScanObservationResult Scan(const RowFingerprint& fingerprint,
                                      std::size_t max_matches,
                                      const DiscoveryDeadline& deadline) = 0;
@@ -94,6 +104,12 @@ struct DiscoveryEvidence {
   std::size_t fingerprint_count{};
 };
 
+enum class TableStorage {
+  kCanonicalRecords,
+  kWordSwappedRecords,
+  kIndexedReferenceArray,
+};
+
 struct TableDescriptor {
   std::uint32_t unique_id{};
   std::uintptr_t base{};
@@ -101,6 +117,10 @@ struct TableDescriptor {
   std::uint32_t capacity{};
   std::uintptr_t allocation_base{};
   std::size_t allocation_size{};
+  TableStorage storage{TableStorage::kCanonicalRecords};
+  std::optional<std::uint16_t> virtual_target_table_id;
+  std::uint32_t virtual_width{};
+  bool direct_write_verified{};
 };
 
 struct TableDiscovery {

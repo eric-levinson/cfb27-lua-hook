@@ -24,6 +24,9 @@ struct CatalogDescriptor {
   std::uint32_t capacity{};
   std::uintptr_t allocation_base{};
   std::size_t allocation_size{};
+  TableStorage storage{TableStorage::kCanonicalRecords};
+  std::optional<std::uint16_t> virtual_target_table_id;
+  std::uint32_t virtual_width{};
   std::string profile_id;
   std::uint64_t lifecycle_generation{};
   AuthorityStatus authority_status{AuthorityStatus::kDiscoveryOnly};
@@ -33,6 +36,7 @@ struct CatalogDescriptor {
 struct CatalogSummary {
   std::uint32_t unique_id{};
   std::uint32_t capacity{};
+  AuthorityStatus authority_status{AuthorityStatus::kDiscoveryOnly};
   std::string profile_id;
   std::uint64_t lifecycle_generation{};
   std::vector<DiscoveryEvidence> evidence;

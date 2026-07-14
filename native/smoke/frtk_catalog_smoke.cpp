@@ -16,6 +16,32 @@ void Require(bool value, const char* message) {
   if (!value) throw std::runtime_error(message);
 }
 
+std::vector<std::uint8_t> LiveWords(std::vector<std::uint8_t> bytes) {
+  for (std::size_t start = 0; start < bytes.size(); start += 4) {
+    std::reverse(bytes.begin() + start,
+                 bytes.begin() + (std::min)(start + 4, bytes.size()));
+  }
+  return bytes;
+}
+
+std::vector<std::uint8_t> LittleEndian(std::uint64_t value,
+                                       std::size_t size = 8) {
+  std::vector<std::uint8_t> bytes(size);
+  for (std::size_t index = 0; index < size; ++index) {
+    bytes[index] = static_cast<std::uint8_t>(value >> (index * 8));
+  }
+  return bytes;
+}
+
+std::vector<std::uint8_t> Wrapper(std::uint32_t row) {
+  std::vector<std::uint8_t> bytes(28);
+  const auto type = LittleEndian(0xABCDEF00);
+  std::copy(type.begin(), type.end(), bytes.begin());
+  const auto encoded_row = LittleEndian(row, 4);
+  std::copy(encoded_row.begin(), encoded_row.end(), bytes.begin() + 24);
+  return bytes;
+}
+
 ProfileBundle Bundle() {
   ProfileBundle result;
   result.profile_id = "synthetic-profile";
@@ -291,6 +317,91 @@ void TestGenerationAndPublicSurface() {
   Require(catalog.Resolve(fresh) == nullptr, "explicit invalidation retained handles");
 }
 
+void TestLiveStorageMetadataSurvivesInstallation() {
+  auto profile = Bundle();
+  auto discovery = Discovery();
+  discovery.tables[0].descriptor->storage = TableStorage::kWordSwappedRecords;
+  discovery.tables[0].descriptor->direct_write_verified = true;
+  discovery.tables[1].descriptor->storage =
+      TableStorage::kIndexedReferenceArray;
+  discovery.tables[1].descriptor->virtual_target_table_id = 22;
+  discovery.tables[1].descriptor->virtual_width = 2;
+  SessionCatalog catalog;
+  catalog.Install(profile, discovery);
+  const auto target = catalog.GetHandle(220022);
+  const auto source = catalog.GetHandle(330033);
+  Require(target && source, "live storage descriptors were not installed");
+  Require(catalog.Resolve(*target)->storage ==
+              TableStorage::kWordSwappedRecords &&
+              catalog.Resolve(*source)->storage ==
+                  TableStorage::kIndexedReferenceArray &&
+              catalog.Resolve(*source)->virtual_target_table_id == 22 &&
+              catalog.Resolve(*source)->virtual_width == 2 &&
+              catalog.Resolve(*target)->authority_status ==
+                  AuthorityStatus::kDirectVerified &&
+              catalog.Resolve(*source)->authority_status ==
+                  AuthorityStatus::kDiscoveryOnly,
+          "live storage metadata was discarded during catalog installation");
+  const auto summaries = catalog.Summaries();
+  const auto promoted = std::find_if(
+      summaries.begin(), summaries.end(),
+      [](const auto& summary) { return summary.unique_id == 220022; });
+  Require(promoted != summaries.end() &&
+              promoted->authority_status == AuthorityStatus::kDirectVerified,
+          "verified live authority was not exposed in the catalog summary");
+}
+
+void TestWordSwappedCatalogRevalidation() {
+  auto profile = Bundle();
+  auto discovery = Discovery();
+  for (auto& table : discovery.tables) {
+    table.descriptor->storage = TableStorage::kWordSwappedRecords;
+  }
+  SessionCatalog catalog;
+  catalog.Install(profile, discovery);
+  Backend backend;
+  backend.reads = {{0x1000, LiveWords({1, 2})},
+                   {0x1008, LiveWords({3, 4})},
+                   {0x1010, LiveWords({5, 6})},
+                   {0x2000, LiveWords({7, 8})},
+                   {0x2008, LiveWords({9, 10})},
+                   {0x2010, LiveWords({11, 12})},
+                   {0x200C, {2, 0, 44, 0}}};
+  CatalogEvidenceSnapshot snapshot;
+  Require(catalog.Revalidate(backend, &snapshot),
+          "word-swapped live catalog did not revalidate");
+  Require(!snapshot.guards.empty() &&
+              snapshot.guards.front().expected == LiveWords({1, 2}),
+          "word-swapped revalidation did not retain raw guarded evidence");
+}
+
+void TestIndexedArrayCatalogRevalidation() {
+  auto profile = Bundle();
+  profile.tables[1].relationships[0].target_row = 3;
+  auto discovery = Discovery();
+  auto& descriptor = *discovery.tables[1].descriptor;
+  descriptor.storage = TableStorage::kIndexedReferenceArray;
+  descriptor.virtual_target_table_id = 22;
+  descriptor.virtual_width = 2;
+  SessionCatalog catalog;
+  catalog.Install(profile, discovery);
+  Backend backend;
+  backend.reads = {{0x1000, {1, 2}},
+                   {0x1008, {3, 4}},
+                   {0x1010, {5, 6}},
+                   {0x2000, LittleEndian(0x3000)},
+                   {0x2008, LittleEndian(0x3020)},
+                   {0x2010, LittleEndian(0x3040)},
+                   {0x3000, Wrapper(0)},
+                   {0x3020, Wrapper(1)},
+                   {0x3040, Wrapper(2)}};
+  CatalogEvidenceSnapshot snapshot;
+  Require(catalog.Revalidate(backend, &snapshot),
+          "indexed live array did not revalidate through wrappers");
+  Require(snapshot.guards.size() == 9,
+          "indexed live array did not guard scalar rows, slots, and wrappers");
+}
+
 void TestLifecycleAndRevalidation() {
   const auto profile = Bundle();
   const auto discovery = Discovery();
@@ -406,6 +517,9 @@ void TestTransitiveDependencyQuarantine() {
 int main() {
   try {
     TestGenerationAndPublicSurface();
+    TestLiveStorageMetadataSurvivesInstallation();
+    TestWordSwappedCatalogRevalidation();
+    TestIndexedArrayCatalogRevalidation();
     TestLifecycleAndRevalidation();
     TestBoundedBatchRevalidation();
     TestChunkFailuresAndInstability();

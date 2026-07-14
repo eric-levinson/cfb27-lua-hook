@@ -266,10 +266,39 @@ class ProcessDiscoveryBackend final : public cfb27::frtk::DiscoveryBackend {
   explicit ProcessDiscoveryBackend(bool smoke_timeout_progress = false)
       : smoke_timeout_progress_(smoke_timeout_progress) {}
 
+  cfb27::frtk::ScanObservationResult ScanTableDescriptor(
+      std::uint16_t table_id, std::uint32_t unique_id,
+      std::size_t max_matches,
+      const cfb27::frtk::DescriptorMatchFilter& accept_match,
+      const cfb27::frtk::DiscoveryDeadline& deadline) override {
+    if (!SupportedBuild()) {
+      return {.complete = true, .code = "DESCRIPTOR_SCAN_UNSUPPORTED"};
+    }
+    cfb27::frtk::RowFingerprint fingerprint;
+    fingerprint.pattern = {
+        static_cast<std::uint8_t>(table_id),
+        static_cast<std::uint8_t>(table_id >> 8), 0, 0,
+        static_cast<std::uint8_t>(unique_id),
+        static_cast<std::uint8_t>(unique_id >> 8),
+        static_cast<std::uint8_t>(unique_id >> 16),
+        static_cast<std::uint8_t>(unique_id >> 24)};
+    fingerprint.mask.assign(fingerprint.pattern.size(), 0xFF);
+    return ScanImpl(fingerprint, max_matches, deadline, true, accept_match);
+  }
+
   cfb27::frtk::ScanObservationResult Scan(
       const cfb27::frtk::RowFingerprint& fingerprint,
       std::size_t max_matches,
       const cfb27::frtk::DiscoveryDeadline& deadline) override {
+    return ScanImpl(fingerprint, max_matches, deadline, false, {});
+  }
+
+  cfb27::frtk::ScanObservationResult ScanImpl(
+      const cfb27::frtk::RowFingerprint& fingerprint,
+      std::size_t max_matches,
+      const cfb27::frtk::DiscoveryDeadline& deadline,
+      bool stop_after_first,
+      const cfb27::frtk::DescriptorMatchFilter& accept_match) {
     if (smoke_timeout_progress_) {
       ++smoke_timeout_scan_count_;
       if (smoke_timeout_scan_count_ == 3) {
@@ -318,10 +347,17 @@ class ProcessDiscoveryBackend final : public cfb27::frtk::DiscoveryBackend {
         const auto address = cfb27::memory::ParseAddress(match.address);
         const auto base = cfb27::memory::ParseAddress(match.allocation->base);
         if (!address || !base) return {.code = "allocation_invalid"};
-        output.matches.push_back({*address, *base, match.allocation->size});
+        const cfb27::frtk::ScanObservation observation{
+            *address, *base, match.allocation->size};
+        if (accept_match && !accept_match(observation)) continue;
+        output.matches.push_back(observation);
         output.counters.capped_matches = (std::min)(
             static_cast<std::uint64_t>(output.matches.size()),
             static_cast<std::uint64_t>(max_matches));
+        if (stop_after_first) {
+          output.complete = true;
+          return output;
+        }
         if (output.matches.size() > max_matches) {
           output.code = "too_many_matches";
           return output;
@@ -1285,7 +1321,7 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
     std::lock_guard lock(g_frtk_mutex);
     if (!g_frtk_profile)
       return ErrorResponse(id, "FRTK_PROFILE_INVALID", "No FrTk profile is loaded");
-    constexpr auto kDiscoveryBudget = std::chrono::milliseconds(2000);
+    constexpr auto kDiscoveryBudget = std::chrono::milliseconds(15000);
     const bool smoke_timeout_progress =
         SmokeWritesAllowed() &&
         EnvironmentIsOne(L"CFB27_SMOKE_FRTK_TIMEOUT");
@@ -1366,7 +1402,8 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
         return ErrorResponse(id, "FRTK_CATALOG_STALE", "FrTk catalog schema is stale");
       tables.push_back({{"uniqueId", table.unique_id},
                         {"logicalName", schema->logical_name},
-                        {"authorityStatus", AuthorityStatusName(schema->authority_status)},
+                        {"authorityStatus",
+                         AuthorityStatusName(table.authority_status)},
                         {"capacity", table.capacity},
                         {"profileId", table.profile_id},
                         {"generation", table.lifecycle_generation},

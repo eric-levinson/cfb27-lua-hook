@@ -312,6 +312,24 @@ test('discoverFrtkCatalog preserves multi-fingerprint native timeout progress', 
     assert.deepEqual(error.details, details) === undefined);
 });
 
+test('discoverFrtkCatalog preserves descriptor-scan timeout progress', async (t) => {
+  const details = {
+    stage: 'scan', tableUniqueId: 1612938518, fingerprintOrdinal: null,
+    completedFingerprintCount: 0, elapsedMilliseconds: 15012,
+    pagesScanned: 141, chunksScanned: 1427, scannedBytes: 4710408192,
+    candidateWindows: 1148981, cappedMatches: 3,
+  };
+  const client = await fakeRawResponseClient(t, (request) => request.command === 'hello'
+    ? { protocol: 1, id: request.id, ok: true,
+      result: { protocolVersion: 1, hostVersion: '0.2.0', supportedBuild: true,
+        writesAllowed: false, capabilities: ['frtkCatalogV1'] } }
+    : { protocol: 1, id: request.id, ok: false,
+      error: { code: 'FRTK_DISCOVERY_TIMEOUT', message: 'private', details } });
+  await assert.rejects(client.discoverFrtkCatalog(), (error) =>
+    error.code === 'FRTK_DISCOVERY_TIMEOUT' &&
+    assert.deepEqual(error.details, details) === undefined);
+});
+
 test('discoverFrtkCatalog rejects hostile or unknown timeout detail keys', async (t) => {
   for (const hostile of ['address', 'bytesHex', 'pattern', 'mask', 'allocationBase', 'unknown']) {
     const client = await fakeRawResponseClient(t, (request) => request.command === 'hello'

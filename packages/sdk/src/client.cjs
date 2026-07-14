@@ -384,8 +384,7 @@ function validateFrtkTimeoutDetails(details) {
       !isSafeIntegerBetween(details.scannedBytes, 0, Number.MAX_SAFE_INTEGER) ||
       !isSafeIntegerBetween(details.candidateWindows, 0, Number.MAX_SAFE_INTEGER) ||
       !isSafeIntegerBetween(details.cappedMatches, 0, 8) ||
-      (details.stage === 'scan' &&
-        (details.tableUniqueId === null || details.fingerprintOrdinal === null)) ||
+      (details.stage === 'scan' && details.tableUniqueId === null) ||
       (details.stage !== 'scan' && details.fingerprintOrdinal !== null)) {
     throw invalidResponse('Host returned malformed FrTk timeout details');
   }
@@ -762,7 +761,7 @@ function validateTelemetryRegistration(result, types) {
   return result;
 }
 
-function createClient({ pid, pipeName, timeoutMs = 3000 } = {}) {
+function createClient({ pid, pipeName, timeoutMs = 20000 } = {}) {
   if (!pipeName && (!Number.isInteger(pid) || pid <= 0)) {
     throw new Cfb27HookError('INVALID_REQUEST', 'createClient requires a positive PID or pipe name');
   }

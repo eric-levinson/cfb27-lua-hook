@@ -26,10 +26,20 @@ const TableSchema* SchemaFor(const SchemaRegistry& schema,
   const auto* table = schema.FindTable(descriptor.session_table_id);
   if (!table || table->unique_id != descriptor.unique_id ||
       table->capacity != descriptor.capacity ||
-      table->record_size != descriptor.stride) {
+      (descriptor.storage == TableStorage::kIndexedReferenceArray
+           ? table->record_size != descriptor.virtual_width * 4
+           : table->record_size != descriptor.stride)) {
     return nullptr;
   }
   return table;
+}
+
+std::vector<std::uint8_t> SwapWords(std::vector<std::uint8_t> bytes) {
+  for (std::size_t start = 0; start < bytes.size(); start += 4) {
+    const auto end = (std::min)(start + 4, bytes.size());
+    std::reverse(bytes.begin() + start, bytes.begin() + end);
+  }
+  return bytes;
 }
 
 bool RowAddress(const CatalogDescriptor& descriptor, std::uint32_t row,
@@ -133,11 +143,46 @@ FieldReadResult RecordAccessor::ReadFields(
     if (!field) return {.code = kInvalid};
     definitions.push_back(field);
   }
-  std::vector<std::uint8_t> record(table->record_size);
-  if (!memory_backend_.Validate(address, record.size(), false) ||
-      !memory_backend_.Read(address, record)) {
+  if (descriptor->storage == TableStorage::kIndexedReferenceArray) {
+    if (!descriptor->virtual_target_table_id ||
+        descriptor->virtual_width == 0) {
+      return {.code = kInvalid};
+    }
+    FieldReadResult result{.ok = true};
+    for (std::size_t index = 0; index < definitions.size(); ++index) {
+      const auto* field = definitions[index];
+      if (field->encoding != "packed-reference" ||
+          field->storage_bytes != 4 || field->byte_offset % 4 != 0 ||
+          field->reference_table_id != descriptor->virtual_target_table_id) {
+        return {.code = kInvalid};
+      }
+      const auto ordinal = field->byte_offset / 4;
+      const auto target_row =
+          static_cast<std::uint64_t>(row) * descriptor->virtual_width +
+          ordinal;
+      if (ordinal >= descriptor->virtual_width ||
+          target_row > std::numeric_limits<std::uint32_t>::max()) {
+        return {.code = kInvalid};
+      }
+      DecodedField value = PackedReference{
+          *descriptor->virtual_target_table_id,
+          static_cast<std::uint32_t>(target_row)};
+      if (!ValidReference(catalog_, handle.generation, *field, value)) {
+        return {.code = kInvalid};
+      }
+      result.fields.push_back({std::string(fields[index]), std::move(value)});
+    }
+    return result;
+  }
+  std::vector<std::uint8_t> raw_record(table->record_size);
+  if (!memory_backend_.Validate(address, raw_record.size(), false) ||
+      !memory_backend_.Read(address, raw_record)) {
     return {.code = "READ_FAILED"};
   }
+  const auto record =
+      descriptor->storage == TableStorage::kWordSwappedRecords
+          ? SwapWords(raw_record)
+          : raw_record;
   FieldReadResult result{.ok = true};
   try {
     for (std::size_t index = 0; index < definitions.size(); ++index) {
@@ -183,11 +228,15 @@ FieldWritePlan RecordAccessor::PlanFieldWrites(
     }
     definitions.push_back(field);
   }
-  std::vector<std::uint8_t> original(table->record_size);
-  if (!memory_backend_.Validate(address, original.size(), false) ||
-      !memory_backend_.Read(address, original)) {
+  std::vector<std::uint8_t> original_live(table->record_size);
+  if (!memory_backend_.Validate(address, original_live.size(), false) ||
+      !memory_backend_.Read(address, original_live)) {
     return {.code = "READ_FAILED"};
   }
+  const auto original =
+      descriptor->storage == TableStorage::kWordSwappedRecords
+          ? SwapWords(original_live)
+          : original_live;
   auto replacement = original;
   try {
     for (std::size_t index = 0; index < changes.size(); ++index) {
@@ -197,23 +246,30 @@ FieldWritePlan RecordAccessor::PlanFieldWrites(
   } catch (...) {
     return {.code = kInvalid};
   }
+  const auto replacement_live =
+      descriptor->storage == TableStorage::kWordSwappedRecords
+          ? SwapWords(replacement)
+          : replacement;
 
   FieldWritePlan result{.ok = true, .evidence = std::move(evidence)};
   std::size_t index = 0;
-  while (index < original.size()) {
-    while (index < original.size() && original[index] == replacement[index]) {
+  while (index < original_live.size()) {
+    while (index < original_live.size() &&
+           original_live[index] == replacement_live[index]) {
       ++index;
     }
-    if (index == original.size()) break;
+    if (index == original_live.size()) break;
     const auto begin = index;
-    while (index < original.size() && original[index] != replacement[index]) {
+    while (index < original_live.size() &&
+           original_live[index] != replacement_live[index]) {
       ++index;
     }
     result.operations.push_back(
         {.address = Address(address + begin),
-         .expected = {original.begin() + begin, original.begin() + index},
-         .replacement = {replacement.begin() + begin,
-                         replacement.begin() + index}});
+         .expected = {original_live.begin() + begin,
+                      original_live.begin() + index},
+         .replacement = {replacement_live.begin() + begin,
+                         replacement_live.begin() + index}});
     if (result.operations.size() > memory::kMaxTransactionOperations) {
       return {.code = kInvalid};
     }

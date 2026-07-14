@@ -1,5 +1,13 @@
 # FrTk typed table API
 
+> **Current CFB27 status (verified July 13, 2026):** live scalar descriptors,
+> four-byte word-swapped records, and indexed reference arrays are implemented
+> in the catalog and covered by native tests. A guarded live Recruit write was
+> applied, reread, restored, and reread successfully. The final Player-specific
+> descriptor end-pointer variant is tested but still needs one installed-host
+> catalog retest before the FrTk catalog, record, and Lua database entry points
+> are declared live-ready. They continue to fail closed on any unresolved table.
+
 Use `createClient({ pid })` from `@cfb27/lua-hook`. Every FrTk operation first
 negotiates the corresponding protocol-v1 capability and fails closed with
 `PROTOCOL_MISMATCH` when the host does not advertise it.

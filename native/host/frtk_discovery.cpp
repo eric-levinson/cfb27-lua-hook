@@ -11,9 +11,20 @@ namespace cfb27::frtk {
 namespace {
 
 constexpr std::size_t kMaxFingerprintMatches = 8;
+constexpr std::size_t kMaximumDescriptorBlobBytes = 64ull * 1024 * 1024;
+constexpr std::size_t kMaximumReadRangeBytes = 64ull * 1024;
+constexpr std::size_t kMaximumBatchBytes = 256ull * 1024;
+constexpr std::uint32_t kPlayerUniqueId = 1612938518u;
+constexpr std::uint32_t kRecruitUniqueId = 1873209313u;
+constexpr std::uint32_t kProspectTargetSchoolUniqueId = 3789266353u;
 
 struct Candidate {
   TableDescriptor descriptor;
+};
+
+struct IndexedArrayLayout {
+  std::uint16_t target_table_id{};
+  std::uint32_t width{};
 };
 
 bool AddOverflows(std::uintptr_t left, std::size_t right) {
@@ -71,6 +82,15 @@ std::uint32_t ReadBigEndian(std::span<const std::uint8_t> bytes) {
   return value;
 }
 
+std::uint32_t ReadLittleEndian(std::span<const std::uint8_t> bytes) {
+  std::uint32_t value{};
+  for (std::size_t index = 0;
+       index < bytes.size() && index < sizeof(value); ++index) {
+    value |= static_cast<std::uint32_t>(bytes[index]) << (index * 8);
+  }
+  return value;
+}
+
 void SaturatingAdd(std::uint64_t& target, std::uint64_t value) {
   target = value > kMaxSafeDiagnosticCounter - target
                ? kMaxSafeDiagnosticCounter
@@ -88,6 +108,410 @@ void AddCounters(DiscoveryCounters& target, const DiscoveryCounters& value) {
               value.capped_matches >= match_cap - target.capped_matches
           ? match_cap
           : target.capped_matches + value.capped_matches;
+}
+
+RowFingerprint LiveFingerprint(const RowFingerprint& canonical) {
+  auto live = canonical;
+  for (std::size_t start = 0; start < live.pattern.size(); start += 4) {
+    const auto end = (std::min)(start + 4, live.pattern.size());
+    std::reverse(live.pattern.begin() + start, live.pattern.begin() + end);
+    std::reverse(live.mask.begin() + start, live.mask.begin() + end);
+  }
+  return live;
+}
+
+std::optional<std::uintptr_t> ReadLittleEndianPointer(
+    std::span<const std::uint8_t> bytes) {
+  if (bytes.size() != sizeof(std::uint64_t)) return std::nullopt;
+  std::uint64_t value{};
+  for (std::size_t index = 0; index < bytes.size(); ++index) {
+    value |= static_cast<std::uint64_t>(bytes[index]) << (index * 8);
+  }
+  if (value == 0 || value > std::numeric_limits<std::uintptr_t>::max()) {
+    return std::nullopt;
+  }
+  return static_cast<std::uintptr_t>(value);
+}
+
+bool ReadContiguous(DiscoveryBackend& backend, std::uintptr_t address,
+                    std::size_t length, const DiscoveryDeadline& deadline,
+                    std::vector<std::uint8_t>& output) {
+  output.clear();
+  output.reserve(length);
+  std::size_t completed{};
+  while (completed < length) {
+    if (deadline.Expired()) return false;
+    std::vector<ReadRequest> requests;
+    std::size_t batch_bytes{};
+    while (completed + batch_bytes < length &&
+           batch_bytes < kMaximumBatchBytes) {
+      const auto request_length = (std::min)(
+          kMaximumReadRangeBytes,
+          length - completed - batch_bytes);
+      requests.push_back({address + completed + batch_bytes, request_length});
+      batch_bytes += request_length;
+    }
+    std::vector<std::vector<std::uint8_t>> bytes;
+    if (!backend.ReadBatch(requests, bytes) || bytes.size() != requests.size()) {
+      return false;
+    }
+    for (std::size_t index = 0; index < bytes.size(); ++index) {
+      if (bytes[index].size() != requests[index].length) return false;
+      output.insert(output.end(), bytes[index].begin(), bytes[index].end());
+    }
+    completed += batch_bytes;
+  }
+  return output.size() == length;
+}
+
+std::vector<std::size_t> FindMaskedOffsets(
+    const std::vector<std::uint8_t>& bytes,
+    const RowFingerprint& fingerprint) {
+  std::vector<std::size_t> offsets;
+  if (fingerprint.pattern.empty() ||
+      fingerprint.pattern.size() != fingerprint.mask.size() ||
+      fingerprint.pattern.size() > bytes.size()) {
+    return offsets;
+  }
+  for (std::size_t offset = 0;
+       offset + fingerprint.pattern.size() <= bytes.size(); ++offset) {
+    bool match = true;
+    for (std::size_t index = 0; index < fingerprint.pattern.size(); ++index) {
+      if ((bytes[offset + index] & fingerprint.mask[index]) !=
+          (fingerprint.pattern[index] & fingerprint.mask[index])) {
+        match = false;
+        break;
+      }
+    }
+    if (match) offsets.push_back(offset);
+    if (offsets.size() == kMaxFingerprintMatches) break;
+  }
+  return offsets;
+}
+
+TableDiscovery DiscoverWordSwappedDescriptor(
+    const TableProfile& table, const ScanObservationResult& scan,
+    DiscoveryBackend& backend, const DiscoveryDeadline& deadline) {
+  TableDiscovery result{.unique_id = table.unique_id};
+  if (!scan.complete) {
+    Reject(result, TableState::kMissing, "DESCRIPTOR_SCAN_INCOMPLETE");
+    return result;
+  }
+  std::map<std::uintptr_t, TableDescriptor> candidates;
+  bool unstable{};
+  bool allocation_invalid{};
+  for (const auto& match : scan.matches) {
+    const std::size_t end_pointer_offset =
+        table.unique_id == kPlayerUniqueId ? 28 : 36;
+    if (deadline.Expired() ||
+        AddOverflows(match.address,
+                     end_pointer_offset + sizeof(std::uint64_t))) {
+      break;
+    }
+    const std::array pointer_requests{
+        ReadRequest{match.address + 12, sizeof(std::uint64_t)},
+        ReadRequest{match.address + end_pointer_offset,
+                    sizeof(std::uint64_t)}};
+    std::vector<std::vector<std::uint8_t>> pointer_bytes;
+    if (!backend.ReadBatch(pointer_requests, pointer_bytes) ||
+        pointer_bytes.size() != pointer_requests.size()) {
+      unstable = true;
+      continue;
+    }
+    const auto blob_start = ReadLittleEndianPointer(pointer_bytes[0]);
+    const auto blob_end = ReadLittleEndianPointer(pointer_bytes[1]);
+    if (!blob_start || !blob_end || *blob_end <= *blob_start) {
+      allocation_invalid = true;
+      continue;
+    }
+    const auto blob_size = *blob_end - *blob_start;
+    if (blob_size > kMaximumDescriptorBlobBytes ||
+        MultiplyOverflows(table.capacity, table.record_size) ||
+        table.capacity * table.record_size > blob_size ||
+        !backend.AllocationExists(*blob_start, blob_size, deadline)) {
+      allocation_invalid = true;
+      continue;
+    }
+    std::vector<std::uint8_t> blob;
+    if (!ReadContiguous(backend, *blob_start, blob_size, deadline, blob)) {
+      unstable = true;
+      continue;
+    }
+    std::vector<RowFingerprint> live_rows;
+    live_rows.reserve(table.rows.size());
+    for (const auto& row : table.rows) live_rows.push_back(LiveFingerprint(row));
+    const auto first_offsets = FindMaskedOffsets(blob, live_rows.front());
+    for (const auto first_offset : first_offsets) {
+      const auto first_row_offset =
+          static_cast<std::size_t>(table.rows.front().row_index) *
+          table.record_size;
+      if (first_offset < first_row_offset) continue;
+      const auto base_offset = first_offset - first_row_offset;
+      const auto extent = static_cast<std::size_t>(table.capacity) *
+                          table.record_size;
+      if (base_offset > blob.size() || extent > blob.size() - base_offset) {
+        continue;
+      }
+      bool consistent = true;
+      for (std::size_t index = 0; index < table.rows.size(); ++index) {
+        const auto offset = base_offset +
+            static_cast<std::size_t>(table.rows[index].row_index) *
+                table.record_size;
+        std::vector<std::uint8_t> record(
+            blob.begin() + offset,
+            blob.begin() + offset + live_rows[index].pattern.size());
+        if (!MaskedMatches(live_rows[index], record)) {
+          consistent = false;
+          break;
+        }
+      }
+      if (!consistent) continue;
+      const auto base = *blob_start + base_offset;
+      std::vector<ReadRequest> rereads;
+      for (const auto& row : table.rows) {
+        rereads.push_back({base + static_cast<std::size_t>(row.row_index) *
+                                      table.record_size,
+                           row.pattern.size()});
+      }
+      std::vector<std::vector<std::uint8_t>> reread_bytes;
+      bool stable = backend.ReadBatch(rereads, reread_bytes) &&
+                    reread_bytes.size() == live_rows.size();
+      for (std::size_t index = 0; stable && index < live_rows.size(); ++index) {
+        stable = MaskedMatches(live_rows[index], reread_bytes[index]);
+      }
+      if (!stable) {
+        unstable = true;
+        continue;
+      }
+      candidates.emplace(
+          base, TableDescriptor{.unique_id = table.unique_id,
+                                .base = base,
+                                .stride = table.record_size,
+                                .capacity = table.capacity,
+                                .allocation_base = *blob_start,
+                                .allocation_size = blob_size,
+                                .storage = TableStorage::kWordSwappedRecords,
+                                .direct_write_verified =
+                                    table.unique_id == kRecruitUniqueId ||
+                                    table.unique_id ==
+                                        kProspectTargetSchoolUniqueId});
+    }
+  }
+  if (candidates.size() == 1) {
+    result.state = TableState::kResolved;
+    result.descriptor = candidates.begin()->second;
+    result.evidence.push_back({.code = "LIVE_DESCRIPTOR_LAYOUT_STABLE",
+                               .fingerprint_count = table.rows.size()});
+  } else if (candidates.size() > 1) {
+    Reject(result, TableState::kAmbiguous, "MULTIPLE_LIVE_DESCRIPTORS");
+  } else if (unstable) {
+    Reject(result, TableState::kUnstable, "LIVE_DESCRIPTOR_REREAD_CHANGED");
+  } else if (allocation_invalid) {
+    Reject(result, TableState::kAllocationInvalid,
+           "LIVE_DESCRIPTOR_EXTENT_INVALID");
+  } else {
+    Reject(result, TableState::kMissing, "LIVE_DESCRIPTOR_NOT_FOUND");
+  }
+  return result;
+}
+
+std::optional<IndexedArrayLayout> DetectIndexedArray(
+    const ProfileBundle& profile, const TableProfile& table) {
+  const auto* schema = profile.schema.FindTable(table.table_id);
+  if (!schema || schema->fields.empty() ||
+      schema->record_size != schema->fields.size() * 4) {
+    return std::nullopt;
+  }
+  std::optional<std::uint16_t> target;
+  std::set<std::uint32_t> ordinals;
+  for (const auto& field : schema->fields) {
+    if (field.encoding != "packed-reference" || field.storage_bytes != 4 ||
+        field.bit_offset != 0 || field.bit_width != 32 ||
+        !field.reference_table_id || field.byte_offset % 4 != 0) {
+      return std::nullopt;
+    }
+    const auto ordinal = field.byte_offset / 4;
+    if (ordinal >= schema->fields.size() || !ordinals.insert(ordinal).second) {
+      return std::nullopt;
+    }
+    if (!target) target = field.reference_table_id;
+    if (*target != *field.reference_table_id) return std::nullopt;
+  }
+  for (const auto& relationship : table.relationships) {
+    const auto* field =
+        profile.schema.FindField(table.table_id, relationship.field_name);
+    if (!field || relationship.target_table_id != *target ||
+        relationship.target_row !=
+            relationship.source_row * schema->fields.size() +
+                field->byte_offset / 4) {
+      return std::nullopt;
+    }
+  }
+  return IndexedArrayLayout{*target,
+                            static_cast<std::uint32_t>(schema->fields.size())};
+}
+
+bool DescriptorCandidateHasValidExtent(
+    const TableProfile& table,
+    const std::optional<IndexedArrayLayout>& indexed,
+    const ScanObservation& observation, DiscoveryBackend& backend,
+    const DiscoveryDeadline& deadline) {
+  const std::size_t start_offset = indexed ? 20 : 12;
+  const std::size_t end_offset =
+      indexed ? 28 : table.unique_id == kPlayerUniqueId ? 28 : 36;
+  if (AddOverflows(observation.address,
+                   end_offset + sizeof(std::uint64_t))) {
+    return false;
+  }
+  const std::array requests{
+      ReadRequest{observation.address + start_offset, sizeof(std::uint64_t)},
+      ReadRequest{observation.address + end_offset, sizeof(std::uint64_t)}};
+  std::vector<std::vector<std::uint8_t>> bytes;
+  if (!backend.ReadBatch(requests, bytes) || bytes.size() != requests.size()) {
+    return false;
+  }
+  const auto start = ReadLittleEndianPointer(bytes[0]);
+  const auto end = ReadLittleEndianPointer(bytes[1]);
+  if (!start || !end || *end <= *start) return false;
+  const auto extent = *end - *start;
+  if (indexed) {
+    if (MultiplyOverflows(table.capacity, sizeof(std::uint64_t)) ||
+        extent != table.capacity * sizeof(std::uint64_t)) {
+      return false;
+    }
+  } else {
+    if (MultiplyOverflows(table.capacity, table.record_size) ||
+        extent > kMaximumDescriptorBlobBytes ||
+        table.capacity * table.record_size > extent) {
+      return false;
+    }
+  }
+  return backend.AllocationExists(*start, extent, deadline);
+}
+
+TableDiscovery DiscoverIndexedDescriptor(
+    const TableProfile& table, const IndexedArrayLayout& layout,
+    const ScanObservationResult& scan, DiscoveryBackend& backend,
+    const DiscoveryDeadline& deadline) {
+  TableDiscovery result{.unique_id = table.unique_id};
+  if (!scan.complete) {
+    Reject(result, TableState::kMissing, "DESCRIPTOR_SCAN_INCOMPLETE");
+    return result;
+  }
+  std::map<std::uintptr_t, TableDescriptor> candidates;
+  bool unstable{};
+  bool allocation_invalid{};
+  for (const auto& match : scan.matches) {
+    if (deadline.Expired() || AddOverflows(match.address, 36)) break;
+    const std::array pointer_requests{
+        ReadRequest{match.address + 20, sizeof(std::uint64_t)},
+        ReadRequest{match.address + 28, sizeof(std::uint64_t)}};
+    std::vector<std::vector<std::uint8_t>> pointer_bytes;
+    if (!backend.ReadBatch(pointer_requests, pointer_bytes) ||
+        pointer_bytes.size() != pointer_requests.size()) {
+      unstable = true;
+      continue;
+    }
+    const auto slots_start = ReadLittleEndianPointer(pointer_bytes[0]);
+    const auto slots_end = ReadLittleEndianPointer(pointer_bytes[1]);
+    if (!slots_start || !slots_end || *slots_end <= *slots_start ||
+        MultiplyOverflows(table.capacity, sizeof(std::uint64_t)) ||
+        *slots_end - *slots_start !=
+            table.capacity * sizeof(std::uint64_t) ||
+        !backend.AllocationExists(*slots_start, *slots_end - *slots_start,
+                                  deadline)) {
+      allocation_invalid = true;
+      continue;
+    }
+    std::vector<ReadRequest> slot_requests;
+    for (const auto& row : table.rows) {
+      if (row.row_index >= table.capacity) {
+        slot_requests.clear();
+        break;
+      }
+      slot_requests.push_back(
+          {*slots_start + row.row_index * sizeof(std::uint64_t),
+           sizeof(std::uint64_t)});
+    }
+    std::vector<std::vector<std::uint8_t>> slots_first;
+    std::vector<std::vector<std::uint8_t>> slots_second;
+    if (slot_requests.size() != table.rows.size() ||
+        !backend.ReadBatch(slot_requests, slots_first) ||
+        !backend.ReadBatch(slot_requests, slots_second) ||
+        slots_first != slots_second ||
+        slots_first.size() != table.rows.size()) {
+      unstable = true;
+      continue;
+    }
+    std::vector<ReadRequest> wrapper_requests;
+    for (const auto& slot : slots_first) {
+      const auto wrapper = ReadLittleEndianPointer(slot);
+      if (!wrapper || AddOverflows(*wrapper, 28)) {
+        wrapper_requests.clear();
+        break;
+      }
+      wrapper_requests.push_back({*wrapper, 28});
+    }
+    std::vector<std::vector<std::uint8_t>> wrappers_first;
+    std::vector<std::vector<std::uint8_t>> wrappers_second;
+    if (wrapper_requests.size() != table.rows.size() ||
+        !backend.ReadBatch(wrapper_requests, wrappers_first) ||
+        !backend.ReadBatch(wrapper_requests, wrappers_second) ||
+        wrappers_first != wrappers_second ||
+        wrappers_first.size() != table.rows.size()) {
+      unstable = true;
+      continue;
+    }
+    bool valid = true;
+    std::optional<std::uintptr_t> wrapper_type;
+    for (std::size_t index = 0; index < wrappers_first.size(); ++index) {
+      if (wrappers_first[index].size() != 28) {
+        valid = false;
+        break;
+      }
+      const auto type = ReadLittleEndianPointer(std::span(
+          wrappers_first[index].data(), sizeof(std::uint64_t)));
+      const auto wrapper_row = ReadLittleEndian(std::span(
+          wrappers_first[index].data() + 24, sizeof(std::uint32_t)));
+      if (!type || (wrapper_type && *wrapper_type != *type) ||
+          wrapper_row != table.rows[index].row_index) {
+        valid = false;
+        break;
+      }
+      wrapper_type = type;
+    }
+    if (!valid) {
+      unstable = true;
+      continue;
+    }
+    candidates.emplace(
+        *slots_start,
+        TableDescriptor{.unique_id = table.unique_id,
+                        .base = *slots_start,
+                        .stride = sizeof(std::uint64_t),
+                        .capacity = table.capacity,
+                        .allocation_base = *slots_start,
+                        .allocation_size = *slots_end - *slots_start,
+                        .storage = TableStorage::kIndexedReferenceArray,
+                        .virtual_target_table_id = layout.target_table_id,
+                        .virtual_width = layout.width});
+  }
+  if (candidates.size() == 1) {
+    result.state = TableState::kResolved;
+    result.descriptor = candidates.begin()->second;
+    result.evidence.push_back({.code = "LIVE_INDEXED_ARRAY_STABLE",
+                               .fingerprint_count = table.rows.size()});
+  } else if (candidates.size() > 1) {
+    Reject(result, TableState::kAmbiguous, "MULTIPLE_LIVE_DESCRIPTORS");
+  } else if (unstable) {
+    Reject(result, TableState::kUnstable, "LIVE_ARRAY_REREAD_CHANGED");
+  } else if (allocation_invalid) {
+    Reject(result, TableState::kAllocationInvalid,
+           "LIVE_ARRAY_EXTENT_INVALID");
+  } else {
+    Reject(result, TableState::kMissing, "LIVE_DESCRIPTOR_NOT_FOUND");
+  }
+  return result;
 }
 
 }  // namespace
@@ -160,6 +584,34 @@ DiscoveryResult DiscoverTables(const ProfileBundle& profile,
     auto& discovered = result.tables[table_index];
     if (profile_table.rows.size() < 3 || profile_table.record_size == 0) {
       Reject(discovered, TableState::kMissing, "INSUFFICIENT_FINGERPRINTS");
+      continue;
+    }
+
+    const auto indexed = DetectIndexedArray(profile, profile_table);
+    const auto descriptor_scan = backend.ScanTableDescriptor(
+        profile_table.table_id, profile_table.unique_id,
+        kMaxFingerprintMatches,
+        [&](const ScanObservation& observation) {
+          return DescriptorCandidateHasValidExtent(
+              profile_table, indexed, observation, backend, deadline);
+        },
+        deadline);
+    if (descriptor_scan.code != "DESCRIPTOR_SCAN_UNSUPPORTED") {
+      AddCounters(counters, descriptor_scan.counters);
+      if (descriptor_scan.code == "OPERATION_TIMEOUT" || deadline.Expired()) {
+        return timed_out(DiscoveryStage::kScan, profile_table.unique_id,
+                         std::nullopt);
+      }
+      discovered = indexed
+                       ? DiscoverIndexedDescriptor(profile_table, *indexed,
+                                                   descriptor_scan, backend,
+                                                   deadline)
+                       : DiscoverWordSwappedDescriptor(
+                             profile_table, descriptor_scan, backend, deadline);
+      if (deadline.Expired()) {
+        return timed_out(DiscoveryStage::kReread, profile_table.unique_id,
+                         std::nullopt);
+      }
       continue;
     }
 
@@ -384,6 +836,24 @@ DiscoveryResult DiscoverTables(const ProfileBundle& profile,
                "RELATIONSHIP_FIELD_INVALID");
         break;
       }
+      if (source.descriptor->storage ==
+          TableStorage::kIndexedReferenceArray) {
+        const auto ordinal = field->byte_offset / 4;
+        const bool mapped = source.descriptor->virtual_target_table_id ==
+                                relationship.target_table_id &&
+                            ordinal < source.descriptor->virtual_width &&
+                            relationship.target_row ==
+                                relationship.source_row *
+                                        source.descriptor->virtual_width +
+                                    ordinal;
+        if (!mapped) {
+          Reject(source, TableState::kRelationshipFailed,
+                 "RELATIONSHIP_REFERENCE_MISMATCH");
+          break;
+        }
+        source.evidence.push_back({.code = "RELATIONSHIP_VALIDATED"});
+        continue;
+      }
       const auto address = source.descriptor->base +
                            relationship.source_row * source.descriptor->stride +
                            field->byte_offset;
@@ -396,7 +866,11 @@ DiscoveryResult DiscoverTables(const ProfileBundle& profile,
                "RELATIONSHIP_READ_FAILED");
         break;
       }
-      const auto decoded = DecodePackedReference(ReadBigEndian(bytes[0]));
+      const auto encoded =
+          source.descriptor->storage == TableStorage::kWordSwappedRecords
+              ? ReadLittleEndian(bytes[0])
+              : ReadBigEndian(bytes[0]);
+      const auto decoded = DecodePackedReference(encoded);
       if (decoded.table_id != relationship.target_table_id ||
           decoded.row_index != relationship.target_row ||
           target.unique_id != target_profile->unique_id) {
