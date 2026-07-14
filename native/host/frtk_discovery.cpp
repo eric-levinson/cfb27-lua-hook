@@ -15,8 +15,29 @@ constexpr std::size_t kMaximumDescriptorBlobBytes = 64ull * 1024 * 1024;
 constexpr std::size_t kMaximumReadRangeBytes = 64ull * 1024;
 constexpr std::size_t kMaximumBatchBytes = 256ull * 1024;
 constexpr std::uint32_t kPlayerUniqueId = 1612938518u;
-constexpr std::uint32_t kRecruitUniqueId = 1873209313u;
-constexpr std::uint32_t kProspectTargetSchoolUniqueId = 3789266353u;
+
+struct DirectWriteEvidence {
+  std::uint16_t table_id;
+  std::uint32_t unique_id;
+  std::uint32_t record_size;
+};
+
+constexpr std::array kDirectWriteEvidence{
+    DirectWriteEvidence{4269, 1873209313u, 24},
+    DirectWriteEvidence{5840, 3789266353u, 4},
+    DirectWriteEvidence{4168, 3987156317u, 36},
+    DirectWriteEvidence{4176, 3093586546u, 4},
+    DirectWriteEvidence{4190, 1559900276u, 4},
+    DirectWriteEvidence{4251, 220276943u, 12},
+};
+
+bool HasDirectWriteEvidence(const TableProfile& table) {
+  return std::ranges::any_of(kDirectWriteEvidence, [&](const auto& evidence) {
+    return table.table_id == evidence.table_id &&
+           table.unique_id == evidence.unique_id &&
+           table.record_size == evidence.record_size;
+  });
+}
 
 struct Candidate {
   TableDescriptor descriptor;
@@ -292,9 +313,7 @@ TableDiscovery DiscoverWordSwappedDescriptor(
                                 .allocation_size = blob_size,
                                 .storage = TableStorage::kWordSwappedRecords,
                                 .direct_write_verified =
-                                    table.unique_id == kRecruitUniqueId ||
-                                    table.unique_id ==
-                                        kProspectTargetSchoolUniqueId});
+                                    HasDirectWriteEvidence(table)});
     }
   }
   if (candidates.size() == 1) {
