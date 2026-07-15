@@ -133,3 +133,28 @@ counters. It never exposes private memory or fingerprint material.
 
 The recruiting wrapper additionally reports `RECRUITING_ACTION_UNSUPPORTED`
 and `RECRUITING_HOURS_INSUFFICIENT` for its two domain-specific failures.
+
+## Live recruit class replacement POC
+
+With the game and Lua host running, one command generates a class with Brooks's
+engine and replaces the existing live Player, Recruit, and fixed Player-name
+rows:
+
+```powershell
+cfb27lua live-class replace `
+  --save "C:\path\to\DYNASTY-AUTOSAVE" `
+  --brooks-root "C:\path\to\cfb27-dynasty-modding" `
+  --seed poc-1
+```
+
+The save is read only and supplies the existing row skeleton; no save is
+rewritten and no live row is created. First name, last name, and hometown are
+mandatory. A generated portrait/head asset is written when present. Gear is
+skipped in this POC.
+
+Before the first write, the command requires one unique live Player surface,
+Recruit surface, and Player string surface, then snapshots the complete class.
+Writes use guarded batches of at most 32 operations with readback. Any later
+failure rolls earlier batches back to that snapshot; an ambiguous mirror aborts
+without guessing. Add `--dry-run` to generate, locate, and snapshot without
+writing anything.

@@ -47,6 +47,10 @@ function parseArgs(argv) {
     allowUnsupportedBuild: false,
     includeAllocationMetadata: false,
     allowExternalFile: false,
+    save: undefined,
+    brooksRoot: undefined,
+    seed: undefined,
+    dryRun: false,
     row: undefined,
     fields: [],
   };
@@ -62,6 +66,9 @@ function parseArgs(argv) {
     ['--max-pages', 'maxPages'],
     ['--context', 'context'],
     ['--row', 'row'],
+    ['--save', 'save'],
+    ['--brooks-root', 'brooksRoot'],
+    ['--seed', 'seed'],
   ]);
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -81,7 +88,7 @@ function parseArgs(argv) {
     }
     if (token === '--json' || token === '--follow' || token === '--allow-unsupported-build' ||
         token === '--include-allocation-metadata' ||
-        token === '--allow-external-file') {
+        token === '--allow-external-file' || token === '--dry-run') {
       if (seen.has(token)) throw usageError(`Duplicate option: ${token}`);
       seen.add(token);
       if (token === '--json') json = true;
@@ -90,6 +97,7 @@ function parseArgs(argv) {
       else if (token === '--include-allocation-metadata') {
         options.includeAllocationMetadata = true;
       }
+      else if (token === '--dry-run') options.dryRun = true;
       else options.allowExternalFile = true;
       continue;
     }

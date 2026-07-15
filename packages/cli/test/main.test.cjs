@@ -931,3 +931,90 @@ test('developer-only options are rejected outside their exact diagnostic operati
     assert.match(output.stderr, /not valid/, argv.join(' '));
   }
 });
+
+test('live-class replace runs generation, status, location, and replacement in order', async () => {
+  const calls = [];
+  const plan = { classSize: 4101 };
+  const surfaces = { playerBase: 'hidden', recruitBase: 'hidden', playerStringsBase: 'hidden' };
+  const result = {
+    status: 'dry_run', classSize: 4101, plannedBatches: 385, batchesApplied: 0,
+  };
+  const client = {
+    status: async () => {
+      calls.push(['status']);
+      return {
+        ready: true, supportedBuild: true, writesAllowed: true,
+        sessionWritesDisabled: false, ticks: 123,
+      };
+    },
+  };
+  const sdk = {
+    generateLiveClassPlan: async (options) => { calls.push(['generate', options]); return plan; },
+    discoverGame: async () => { calls.push(['discover']); return { pid: 42 }; },
+    createClient: (options) => { calls.push(['client', options]); return client; },
+    locateLiveClassSurfaces: async (options) => { calls.push(['locate', options]); return surfaces; },
+    replaceLiveClass: async (options) => { calls.push(['replace', options]); return result; },
+  };
+  const { io, output } = memoryIo();
+  const cwd = 'C:\\workspace';
+  assert.equal(await main([
+    'live-class', 'replace', '--save', 'autosave', '--brooks-root', '..\\brooks',
+    '--seed', 'poc-1', '--dry-run', '--json',
+  ], { sdk, io, cwd }), 0);
+
+  assert.deepEqual(calls, [
+    ['generate', {
+      savePath: path.resolve(cwd, 'autosave'),
+      brooksRoot: path.resolve(cwd, '..\\brooks'),
+      seed: 'poc-1',
+    }],
+    ['discover'],
+    ['client', { pid: 42, timeoutMs: 10_000 }],
+    ['status'],
+    ['locate', { client, plan }],
+    ['replace', { client, plan, surfaces, generation: 123, dryRun: true }],
+  ]);
+  assert.deepEqual(JSON.parse(output.stdout), {
+    ok: true,
+    command: 'live-class replace',
+    result,
+  });
+});
+
+test('live-class replace requires both paths and rejects misplaced options', async () => {
+  for (const argv of [
+    ['live-class', 'replace', '--brooks-root', 'brooks'],
+    ['live-class', 'replace', '--save', 'autosave'],
+    ['status', '--seed', 'wrong-command'],
+    ['live-class', 'replace', '--save', 'autosave', '--brooks-root', 'brooks', '--wat'],
+  ]) {
+    const { io, output } = memoryIo();
+    assert.equal(await main(argv, { sdk: {}, io }), 2, argv.join(' '));
+    assert.match(output.stderr, /required|only valid|Unknown option/, argv.join(' '));
+  }
+});
+
+test('live-class errors omit raw addresses and buffers', async () => {
+  const hostile = Object.assign(new Error('bad row at 0x7FF612340000: DEADBEEF'), {
+    code: 'LIVE_CLASS_APPLY_FAILED',
+    details: { address: '0x7FF612340000', bytesHex: 'DEADBEEF' },
+  });
+  const sdk = {
+    generateLiveClassPlan: async () => ({ classSize: 1 }),
+    discoverGame: async () => ({ pid: 42 }),
+    createClient: () => ({ status: async () => ({
+      ready: true, supportedBuild: true, writesAllowed: true,
+      sessionWritesDisabled: false, ticks: 12,
+    }) }),
+    locateLiveClassSurfaces: async () => ({}),
+    replaceLiveClass: async () => { throw hostile; },
+  };
+  const { io, output } = memoryIo();
+  assert.notEqual(await main([
+    'live-class', 'replace', '--save', 'autosave', '--brooks-root', 'brooks', '--json',
+  ], { sdk, io, cwd: 'C:\\workspace' }), 0);
+  assert.match(output.stdout, /LIVE_CLASS_APPLY_FAILED/);
+  assert.equal(output.stdout.includes('0x7FF612340000'), false);
+  assert.equal(output.stdout.includes('DEADBEEF'), false);
+  assert.equal(output.stdout.includes('bytesHex'), false);
+});

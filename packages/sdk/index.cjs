@@ -21,6 +21,15 @@ const {
   CONTACT_ACTIONS,
   createLiveRecruitingService,
 } = require('./src/live-recruiting.cjs');
+const {
+  generateLiveClassPlan,
+} = require('./src/live-class-generator.cjs');
+const {
+  locateLiveClassSurfaces,
+} = require('./src/live-class-locator.cjs');
+const {
+  replaceLiveClass,
+} = require('./src/live-class-replace.cjs');
 
 module.exports = {
   ERROR_CODES,
@@ -43,4 +52,7 @@ module.exports = {
   LIVE_RECRUITING_TABLES,
   CONTACT_ACTIONS,
   createLiveRecruitingService,
+  generateLiveClassPlan,
+  locateLiveClassSurfaces,
+  replaceLiveClass,
 };

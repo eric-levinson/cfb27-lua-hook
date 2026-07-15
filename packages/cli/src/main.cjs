@@ -20,6 +20,18 @@ const TRANSACTION_ERROR_MESSAGES = Object.freeze({
   INVALID_RESPONSE: 'Host returned an invalid writeTransaction response',
 });
 
+const LIVE_CLASS_ERROR_MESSAGES = Object.freeze({
+  GAME_NOT_RUNNING: 'College Football 27 is not running',
+  HOST_NOT_READY: 'The Lua host is not ready',
+  UNSUPPORTED_BUILD: 'Live recruit replacement requires the supported game build',
+  SESSION_WRITES_DISABLED: 'Writes are disabled for this host session',
+  PIPE_TIMEOUT: 'The live recruit class request timed out',
+  LIVE_CLASS_PLAN_INVALID: 'The generated recruit class plan is invalid',
+  LIVE_CLASS_SURFACE_UNVERIFIED: 'Live recruit class memory could not be uniquely verified',
+  LIVE_CLASS_APPLY_FAILED: 'Live recruit class replacement failed and applied batches were rolled back',
+  LIVE_CLASS_ROLLBACK_FAILED: 'Live recruit class replacement failed and rollback could not be verified',
+});
+
 const HELP = `cfb27lua <command> [options]
 
 Commands:
@@ -45,6 +57,8 @@ Commands:
                 Load a profile and read typed fields by numeric Unique ID
   telemetry register <type...>
                 Register structured telemetry type names
+  live-class replace --save <path> --brooks-root <path>
+                Generate with Brooks and replace the existing live recruit class
 
 Options:
   --game-dir <path>       College Football 27 directory
@@ -66,6 +80,10 @@ Options:
   --allow-external-file   Allow a FrTk profile outside .frtk or transaction JSON outside CWD
   --row <index>           Typed FrTk record row
   --field <name>          Typed FrTk field name; may be repeated
+  --save <path>           Read-only dynasty autosave used as the row skeleton
+  --brooks-root <path>    Brooks cfb27-dynasty-modding checkout
+  --seed <value>          Optional generator seed (default: default)
+  --dry-run               Generate, locate, and snapshot without writing
   -h, --help              Show this help`;
 
 const defaultIo = {
@@ -112,6 +130,11 @@ function rejectMisplacedDeveloperOptions(command, positionals, options) {
     options.includeAllocationMetadata || undefined,
   ];
   const frtkOptions = [options.row, options.fields.length ? options.fields : undefined];
+  const liveClassOptions = [options.save, options.brooksRoot, options.seed,
+    options.dryRun || undefined];
+  if (command !== 'live-class' && liveClassOptions.some((value) => value !== undefined)) {
+    throw usageError('Live class options are only valid for live-class replace');
+  }
   if (command !== 'memory' && (scanOptions.some((value) => value !== undefined) ||
       options.ranges.length || options.allowUnsupportedBuild)) {
     throw usageError('Memory diagnostic options are only valid for memory diagnostics; they are not valid for this command');
@@ -273,6 +296,14 @@ function printCommandSuccess(io, command, result, json) {
     }
     return;
   }
+  if (command === 'live-class replace') {
+    io.out(`Live recruit class: ${result.status}`);
+    io.out(`${result.classSize} recruits; ${result.batchesApplied} batches applied`);
+    if (result.optionalSkipped) {
+      io.out(`${result.optionalSkipped.portraits} portraits and ${result.optionalSkipped.gear} gear rows skipped`);
+    }
+    return;
+  }
   printSuccess(io, command, result, false);
 }
 
@@ -283,6 +314,30 @@ function sanitizeTransactionError(error) {
     ? error.code
     : 'INVALID_RESPONSE';
   return Object.assign(new Error(TRANSACTION_ERROR_MESSAGES[code]), { code });
+}
+
+function sanitizeLiveClassError(error) {
+  if (error?.code === 'USAGE') return error;
+  const code = typeof error?.code === 'string' &&
+    Object.hasOwn(LIVE_CLASS_ERROR_MESSAGES, error.code)
+    ? error.code
+    : 'LIVE_CLASS_PLAN_INVALID';
+  return Object.assign(new Error(LIVE_CLASS_ERROR_MESSAGES[code]), { code });
+}
+
+function assertLiveClassStatus(status, dryRun) {
+  if (!status || status.ready !== true) {
+    throw Object.assign(new Error('The Lua host is not ready'), { code: 'HOST_NOT_READY' });
+  }
+  if (status.supportedBuild !== true) {
+    throw Object.assign(new Error('The game build is unsupported'), { code: 'UNSUPPORTED_BUILD' });
+  }
+  if (!dryRun && (status.writesAllowed !== true || status.sessionWritesDisabled === true)) {
+    throw Object.assign(new Error('Writes are disabled'), { code: 'SESSION_WRITES_DISABLED' });
+  }
+  if (!Number.isSafeInteger(status.ticks) || status.ticks < 0) {
+    throw Object.assign(new Error('Host status is invalid'), { code: 'INVALID_RESPONSE' });
+  }
 }
 
 async function main(argv, {
@@ -467,6 +522,46 @@ async function main(argv, {
       } else {
         throw usageError('frtk requires profile validate, catalog discover/inspect, or records read');
       }
+    } else if (command === 'live-class') {
+      const [operation, ...extra] = positionals;
+      if (operation !== 'replace' || extra.length) {
+        throw usageError('live-class requires replace');
+      }
+      if (!options.save) throw usageError('--save is required for live-class replace');
+      if (!options.brooksRoot) {
+        throw usageError('--brooks-root is required for live-class replace');
+      }
+      if (options.seed !== undefined && (options.seed.length < 1 || options.seed.length > 128)) {
+        throw usageError('--seed must contain 1 to 128 characters');
+      }
+      const unrelated = [options.gameDir, options.mmcDir, options.artifactsDir,
+        options.follow || undefined, options.after, options.pattern, options.mask,
+        options.maxMatches, options.maxPages, options.context,
+        options.ranges.length ? options.ranges : undefined,
+        options.allowUnsupportedBuild || undefined,
+        options.includeAllocationMetadata || undefined,
+        options.allowExternalFile || undefined,
+        options.row, options.fields.length ? options.fields : undefined];
+      if (unrelated.some((value) => value !== undefined)) {
+        throw usageError('This option is not valid for live-class replace');
+      }
+      const plan = await sdk.generateLiveClassPlan({
+        savePath: path.resolve(cwd, options.save),
+        brooksRoot: path.resolve(cwd, options.brooksRoot),
+        seed: options.seed || 'default',
+      });
+      const game = await sdk.discoverGame();
+      const client = sdk.createClient({ pid: game.pid, timeoutMs: 10_000 });
+      const status = await client.status();
+      assertLiveClassStatus(status, options.dryRun);
+      const surfaces = await sdk.locateLiveClassSurfaces({ client, plan });
+      result = await sdk.replaceLiveClass({
+        client,
+        plan,
+        surfaces,
+        generation: status.ticks,
+        dryRun: options.dryRun,
+      });
     } else {
       throw usageError(`Unknown command: ${command}`);
     }
@@ -475,16 +570,20 @@ async function main(argv, {
       ? `${command} ${positionals[0]}`
       : command === 'frtk'
         ? `${command} ${positionals[0]} ${positionals[1]}`
+      : command === 'live-class'
+        ? `${command} ${positionals[0]}`
       : command;
     printCommandSuccess(io, displayCommand, result, json);
     return 0;
   } catch (error) {
     const safeError = parsed.command === 'memory' && parsed.positionals?.[0] === 'transact'
       ? sanitizeTransactionError(error)
-      : error;
+      : parsed.command === 'live-class'
+        ? sanitizeLiveClassError(error)
+        : error;
     printError(io, safeError, parsed.json === true, {
-      includeDetails: parsed.command !== 'frtk' ||
-        safeError?.code === 'FRTK_DISCOVERY_TIMEOUT',
+      includeDetails: parsed.command !== 'live-class' && (parsed.command !== 'frtk' ||
+        safeError?.code === 'FRTK_DISCOVERY_TIMEOUT'),
     });
     return exitCodeFor(safeError);
   }
