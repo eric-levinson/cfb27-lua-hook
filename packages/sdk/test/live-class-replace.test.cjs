@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { encodePlayerStringSlot } = require('../src/live-class-generator.cjs');
+const { encodePlayerStringSlot, toLiveMirrorHex } = require('../src/live-class-generator.cjs');
 const { replaceLiveClass } = require('../src/live-class-replace.cjs');
 
 function address(base, row, stride) {
@@ -56,8 +56,10 @@ function makeFixture({ count = 12, failForwardBatch = 0, failRollback = false } 
       maskHex: recruitMask.toString('hex').toUpperCase(),
       valueHex: recruitValue.toString('hex').toUpperCase(),
     });
-    memory.set(address(surfaces.playerBase, row, playerRecordSize), Buffer.from(playerBefore));
-    memory.set(address(surfaces.recruitBase, row, recruitRecordSize), Buffer.from(recruitBefore));
+    memory.set(address(surfaces.playerBase, row, playerRecordSize),
+      Buffer.from(toLiveMirrorHex(playerBefore.toString('hex').toUpperCase()), 'hex'));
+    memory.set(address(surfaces.recruitBase, row, recruitRecordSize),
+      Buffer.from(toLiveMirrorHex(recruitBefore.toString('hex').toUpperCase()), 'hex'));
     memory.set(address(surfaces.playerStringsBase, row, stringSize), Buffer.from(stringBefore));
   }
 
@@ -151,8 +153,8 @@ test('snapshots the full class, applies batches of at most 32, and verifies ever
   assert.equal(fixture.events.slice(0, firstWrite).reduce((sum, event) => sum + event.ranges, 0), 36);
 
   const firstPlayer = fixture.memory.get('0x100000');
-  assert.equal(firstPlayer[0], 0x80);
-  assert.equal(firstPlayer[1], 0x10, 'unmanaged player bytes are preserved');
+  assert.equal(firstPlayer[3], 0x80);
+  assert.equal(firstPlayer[0], 0x10, 'unmanaged player bytes are preserved');
   const firstStrings = fixture.memory.get('0x300000');
   assert.equal(firstStrings.subarray(0, 17).toString('utf8').replace(/\0.*$/s, ''), 'First0');
   assert.equal(firstStrings.subarray(17, 50).toString('utf8').replace(/\0.*$/s, ''), 'head_generated');

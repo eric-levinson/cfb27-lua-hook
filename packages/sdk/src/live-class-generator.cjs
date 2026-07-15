@@ -21,6 +21,18 @@ function fail(message) {
   return error;
 }
 
+function toLiveMirrorHex(value) {
+  if (typeof value !== 'string' || !/^[0-9A-F]+$/.test(value) ||
+      value.length % 8 !== 0) {
+    throw fail('live mirror values require complete aligned 32-bit words');
+  }
+  const bytes = Buffer.from(value, 'hex');
+  for (let offset = 0; offset < bytes.length; offset += 4) {
+    bytes.subarray(offset, offset + 4).reverse();
+  }
+  return bytes.toString('hex').toUpperCase();
+}
+
 async function hashFile(filePath) {
   const hash = crypto.createHash('sha256');
   for await (const chunk of fs.createReadStream(filePath)) hash.update(chunk);
@@ -258,4 +270,5 @@ module.exports = {
   encodePlayerStringSlot,
   generateLiveClassPlan,
   openBrooksWriteTables,
+  toLiveMirrorHex,
 };

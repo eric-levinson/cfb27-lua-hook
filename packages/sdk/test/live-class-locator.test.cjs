@@ -7,6 +7,7 @@ const {
   locateContiguousSurface,
   locateLiveClassSurfaces,
 } = require('../src/live-class-locator.cjs');
+const { toLiveMirrorHex } = require('../src/live-class-generator.cjs');
 
 const addr = (value) => `0x${BigInt(value).toString(16).toUpperCase()}`;
 
@@ -25,19 +26,24 @@ function makePlan() {
     playerRows: rows.map((row) => ({
       row,
       beforeHex: rowBytes(row, 8, 3).toString('hex').toUpperCase(),
+      maskHex: 'FFFFFFFFFFFFFFFF',
       beforeStringSlotHex: rowBytes(row, 138, 91).toString('hex').toUpperCase(),
     })),
     recruitRows: rows.map((row) => ({
       row,
       beforeHex: rowBytes(row, 4, 47).toString('hex').toUpperCase(),
+      maskHex: 'FFFFFFFF',
     })),
   };
 }
 
-function surface(base, stride, rows, hexField) {
+function surface(base, stride, rows, hexField, transform = false) {
   const maximum = Math.max(...rows.map((row) => row.row));
   const bytes = Buffer.alloc((maximum + 1) * stride, 0xee);
-  for (const row of rows) Buffer.from(row[hexField], 'hex').copy(bytes, row.row * stride);
+  for (const row of rows) {
+    const value = transform ? toLiveMirrorHex(row[hexField]) : row[hexField];
+    Buffer.from(value, 'hex').copy(bytes, row.row * stride);
+  }
   return { base: BigInt(base), bytes };
 }
 
@@ -50,10 +56,13 @@ function fakeClient(segments, options = {}) {
     async scanMemory(request) {
       scans.push(request);
       const pattern = Buffer.from(request.patternHex, 'hex');
+      const mask = Buffer.from(request.maskHex, 'hex');
       const matches = [];
       for (const segment of segments) {
         for (let offset = 0; offset + pattern.length <= segment.bytes.length; offset += 1) {
-          if (segment.bytes.subarray(offset, offset + pattern.length).equals(pattern)) {
+          const candidate = segment.bytes.subarray(offset, offset + pattern.length);
+          if (candidate.every((byte, index) =>
+            (byte & mask[index]) === (pattern[index] & mask[index]))) {
             matches.push({ address: addr(segment.base + BigInt(offset)) });
           }
         }
@@ -85,8 +94,8 @@ function fakeClient(segments, options = {}) {
 test('locates relocated Player, Recruit, and Player string surfaces', async () => {
   const plan = makePlan();
   const client = fakeClient([
-    surface(0x10000000, 8, plan.playerRows, 'beforeHex'),
-    surface(0x20000000, 4, plan.recruitRows, 'beforeHex'),
+    surface(0x10000000, 8, plan.playerRows, 'beforeHex', true),
+    surface(0x20000000, 4, plan.recruitRows, 'beforeHex', true),
     surface(0x30000000, 138, plan.playerRows, 'beforeStringSlotHex'),
   ]);
   assert.deepEqual(await locateLiveClassSurfaces({ client, plan }), {

@@ -11,6 +11,7 @@ const {
   encodePlayerStringSlot,
   generateLiveClassPlan,
   openBrooksWriteTables,
+  toLiveMirrorHex,
 } = require('../src/live-class-generator.cjs');
 
 async function fixture(t) {
@@ -85,6 +86,11 @@ test('buildMaskedPatch marks complete declared fields, including unchanged bits'
     maskHex: 'F00F',
     valueHex: '8000',
   });
+});
+
+test('converts save-order records into the live little-endian dword mirror', () => {
+  assert.equal(toLiveMirrorHex('0011223344556677'), '3322110077665544');
+  assert.throws(() => toLiveMirrorHex('0011'), /32-bit words/);
 });
 
 test('encodes mandatory Player strings into fixed table2 subslots', () => {

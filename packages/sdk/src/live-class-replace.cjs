@@ -1,7 +1,7 @@
 'use strict';
 
 const { Cfb27HookError } = require('./errors.cjs');
-const { PLAYER_STRING_SLOT_SIZE } = require('./live-class-generator.cjs');
+const { PLAYER_STRING_SLOT_SIZE, toLiveMirrorHex } = require('./live-class-generator.cjs');
 
 const READ_BATCH_SIZE = 64;
 const WRITE_BATCH_SIZE = 32;
@@ -84,8 +84,8 @@ function buildDescriptors(plan, surfaces) {
       kind: 'player',
       address: rowAddress(surfaces.playerBase, row.row, plan.playerRecordSize),
       length: plan.playerRecordSize,
-      maskHex: row.maskHex,
-      valueHex: row.valueHex,
+      maskHex: toLiveMirrorHex(row.maskHex),
+      valueHex: toLiveMirrorHex(row.valueHex),
     });
   }
   for (const row of plan.recruitRows) {
@@ -93,8 +93,8 @@ function buildDescriptors(plan, surfaces) {
       kind: 'recruit',
       address: rowAddress(surfaces.recruitBase, row.row, plan.recruitRecordSize),
       length: plan.recruitRecordSize,
-      maskHex: row.maskHex,
-      valueHex: row.valueHex,
+      maskHex: toLiveMirrorHex(row.maskHex),
+      valueHex: toLiveMirrorHex(row.valueHex),
     });
   }
   for (const row of plan.playerRows) {
@@ -246,4 +246,3 @@ async function replaceLiveClass({ client, plan, surfaces, generation, dryRun = f
 }
 
 module.exports = { replaceLiveClass };
-

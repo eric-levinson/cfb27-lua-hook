@@ -1,6 +1,6 @@
 'use strict';
 
-const { PLAYER_STRING_SLOT_SIZE } = require('./live-class-generator.cjs');
+const { PLAYER_STRING_SLOT_SIZE, toLiveMirrorHex } = require('./live-class-generator.cjs');
 
 function fail(message) {
   const error = new Error(message);
@@ -20,7 +20,7 @@ function formatAddress(value) {
   return `0x${value.toString(16).toUpperCase()}`;
 }
 
-function validateRows(rows, recordSize, hexField, label) {
+function validateRows(rows, recordSize, hexField, maskField, label) {
   if (!Array.isArray(rows) || rows.length < 4 || !Number.isInteger(recordSize) ||
       recordSize < 1 || typeof hexField !== 'string') {
     throw fail(`${label} locator requires at least four valid rows`);
@@ -28,7 +28,9 @@ function validateRows(rows, recordSize, hexField, label) {
   for (const row of rows) {
     if (!row || !Number.isInteger(row.row) || row.row < 0 ||
         typeof row[hexField] !== 'string' ||
-        !/^[0-9A-F]+$/.test(row[hexField]) || row[hexField].length !== recordSize * 2) {
+        !/^[0-9A-F]+$/.test(row[hexField]) || row[hexField].length !== recordSize * 2 ||
+        (maskField && (typeof row[maskField] !== 'string' ||
+          !/^[0-9A-F]+$/.test(row[maskField]) || row[maskField].length !== recordSize * 2))) {
       throw fail(`${label} locator row is malformed`);
     }
   }
@@ -57,7 +59,15 @@ function spreadRows(rows) {
   return selected;
 }
 
-async function candidateMatches(client, base, verificationRows, recordSize, hexField) {
+function maskedEqual(actualHex, expectedHex, maskHex) {
+  if (!maskHex) return actualHex === expectedHex;
+  const actual = Buffer.from(actualHex, 'hex');
+  const expected = Buffer.from(expectedHex, 'hex');
+  const mask = Buffer.from(maskHex, 'hex');
+  return actual.every((byte, index) => (byte & mask[index]) === (expected[index] & mask[index]));
+}
+
+async function candidateMatches(client, base, verificationRows, recordSize, hexField, maskField) {
   const ranges = verificationRows.map((row) => ({
     address: formatAddress(base + BigInt(row.row) * BigInt(recordSize)),
     length: recordSize,
@@ -75,7 +85,8 @@ async function candidateMatches(client, base, verificationRows, recordSize, hexF
     const actual = result.ranges[index];
     if (!actual || actual.length !== recordSize ||
         parseAddress(actual.address) !== parseAddress(ranges[index].address) ||
-        actual.bytesHex !== verificationRows[index][hexField]) {
+        !maskedEqual(actual.bytesHex, verificationRows[index][hexField],
+          maskField ? verificationRows[index][maskField] : undefined)) {
       return false;
     }
   }
@@ -83,18 +94,18 @@ async function candidateMatches(client, base, verificationRows, recordSize, hexF
 }
 
 async function locateContiguousSurface(client, {
-  rows, recordSize, hexField = 'beforeHex', label = 'surface',
+  rows, recordSize, hexField = 'beforeHex', maskField, label = 'surface',
 }) {
   if (!client || typeof client.scanMemory !== 'function' ||
       typeof client.readMemory !== 'function') {
     throw fail(`${label} locator requires memory scan and read support`);
   }
-  validateRows(rows, recordSize, hexField, label);
+  validateRows(rows, recordSize, hexField, maskField, label);
   const sorted = [...rows].sort((left, right) => left.row - right.row);
-  const anchor = sorted[0];
+  const anchor = rows[0];
   const scan = await client.scanMemory({
     patternHex: anchor[hexField],
-    maskHex: 'FF'.repeat(recordSize),
+    maskHex: maskField ? anchor[maskField] : 'FF'.repeat(recordSize),
     maxMatches: 64,
     contextBefore: 0,
     contextAfter: 0,
@@ -112,7 +123,7 @@ async function locateContiguousSurface(client, {
   const verified = [];
   const verificationRows = spreadRows(sorted);
   for (const base of candidateBases) {
-    if (await candidateMatches(client, base, verificationRows, recordSize, hexField)) {
+    if (await candidateMatches(client, base, verificationRows, recordSize, hexField, maskField)) {
       verified.push(base);
     }
   }
@@ -125,14 +136,21 @@ async function locateLiveClassSurfaces({ client, plan }) {
   if (!plan || !Array.isArray(plan.playerRows) || !Array.isArray(plan.recruitRows)) {
     throw fail('live class plan is invalid');
   }
+  const mirrorRows = (rows) => rows.map((row) => ({
+    ...row,
+    beforeHex: toLiveMirrorHex(row.beforeHex),
+    maskHex: toLiveMirrorHex(row.maskHex),
+  }));
   const playerBase = await locateContiguousSurface(client, {
-    rows: plan.playerRows,
+    rows: mirrorRows(plan.playerRows),
     recordSize: plan.playerRecordSize,
+    maskField: 'maskHex',
     label: 'Player',
   });
   const recruitBase = await locateContiguousSurface(client, {
-    rows: plan.recruitRows,
+    rows: mirrorRows(plan.recruitRows),
     recordSize: plan.recruitRecordSize,
+    maskField: 'maskHex',
     label: 'Recruit',
   });
   const playerStringsBase = await locateContiguousSurface(client, {
