@@ -34,6 +34,7 @@ const TRANSACTION_ID = /^[A-Za-z0-9._-]{1,64}$/;
 const RESERVED_TELEMETRY_TYPES = new Set(['game_ready', 'tick', 'log']);
 const PIPE_CONNECT_RETRY_DELAY_MS = 10;
 const MAX_UINT64 = 0xFFFFFFFFFFFFFFFFn;
+const NATIVE_CALL_CAPABILITY = 'nativeCall';
 const WRITE_TRANSACTION_ERROR_MESSAGES = Object.freeze({
   INVALID_REQUEST: 'Host rejected the write transaction request',
   UNSUPPORTED_BUILD: 'Memory writes require the supported game build',
@@ -752,6 +753,28 @@ function cloneTelemetryTypes(types) {
   return clone;
 }
 
+function cloneNativeCallOptions(options = {}) {
+  if (!isObject(options) || !hasOnlyKeys(options, ['address', 'arguments']) ||
+      typeof options.address !== 'string' || !CANONICAL_ADDRESS.test(options.address)) {
+    throw invalidRequest('nativeCall requires a canonical hexadecimal address');
+  }
+  const argumentsValue = options.arguments === undefined ? [] : options.arguments;
+  if (!Array.isArray(argumentsValue) || argumentsValue.length > 8 ||
+      !argumentsValue.every((value) =>
+        typeof value === 'string' && CANONICAL_ADDRESS.test(value))) {
+    throw invalidRequest('nativeCall accepts zero to eight canonical hexadecimal arguments');
+  }
+  return { address: options.address, arguments: [...argumentsValue] };
+}
+
+function validateNativeCallResult(result, params) {
+  if (!hasExactKeys(result, ['address', 'value']) || result.address !== params.address ||
+      typeof result.value !== 'string' || !CANONICAL_ADDRESS.test(result.value)) {
+    throw invalidResponse('Host returned an invalid nativeCall result');
+  }
+  return result;
+}
+
 function validateTelemetryRegistration(result, types) {
   if (!hasExactKeys(result, ['types']) || !Array.isArray(result.types) ||
       result.types.length !== types.length ||
@@ -897,6 +920,18 @@ function createClient({ pid, pipeName, timeoutMs = 20000 } = {}) {
     }
   }
 
+  async function requireNativeCallCapability() {
+    const hello = await request('hello');
+    if (!hello || hello.protocolVersion !== 1 ||
+        !Array.isArray(hello.capabilities) ||
+        !hello.capabilities.includes(NATIVE_CALL_CAPABILITY)) {
+      throw new Cfb27HookError(
+        'PROTOCOL_MISMATCH',
+        'Host does not advertise nativeCall capability',
+      );
+    }
+  }
+
   async function requireFrtkCapability(capability) {
     const hello = await request('hello');
     if (!hasExactKeys(hello, ['protocolVersion', 'hostVersion', 'supportedBuild', 'writesAllowed',
@@ -950,6 +985,11 @@ function createClient({ pid, pipeName, timeoutMs = 20000 } = {}) {
     },
     evaluateLua(source) {
       return request('evaluate', { source });
+    },
+    async nativeCall(options = {}) {
+      const params = cloneNativeCallOptions(options);
+      await requireNativeCallCapability();
+      return validateNativeCallResult(await request('nativeCall', params), params);
     },
     getLogs({ limit = 100 } = {}) {
       return request('logs', { limit });

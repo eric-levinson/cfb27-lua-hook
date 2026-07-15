@@ -59,6 +59,10 @@ local matches = cfb.aob_scan("4D 5A ?? ??", 8)
 -- byte, writable committed memory, and successful readback.
 local changed = cfb.write_u8(address, expected, replacement)
 
+-- Synchronously call executable code in the current process using the Win64
+-- integer/pointer ABI. The target is followed by zero to eight 64-bit values.
+local result = cfb.call(target, arg0, arg1)
+
 cfb.log("script loaded")
 
 -- The trusted main-process client must register this type first with
@@ -77,6 +81,16 @@ end)
 The lowercase `cfb` functions above are the legacy host scripting surface and
 are separate from `CFB27.db`; no raw-memory wrapper is added to the database
 API.
+
+`cfb.call` accepts any committed executable address in the current process,
+zero to eight integer or pointer arguments, and returns the function's 64-bit
+integer result. It is enabled only for the supported offline game build. Calls
+are serialized and execute synchronously on the host worker that evaluates the
+Lua buffer; the primitive does not move work onto a game-owned UI thread.
+Floating-point/vector arguments, structure returns, and alternate ABI shapes
+are not supported. A Windows structured exception becomes a Lua error, but
+that guard cannot make an invalid native call safe or undo side effects that
+occurred before the exception.
 
 Supported callback names are `game_ready` and `tick`. The host runs `tick`
 callbacks approximately every 100 ms. The event protocol coalesces observable

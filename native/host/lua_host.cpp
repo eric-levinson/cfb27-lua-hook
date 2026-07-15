@@ -4,6 +4,7 @@
 
 #include "memory_reader.h"
 #include "memory_transaction.h"
+#include "native_call.h"
 #include "frtk_catalog.h"
 #include "frtk_lua_api.h"
 #include "frtk_profile.h"
@@ -77,6 +78,7 @@ std::mutex g_host_write_mutex;
 std::mutex g_event_mutex;
 std::mutex g_file_log_mutex;
 std::mutex g_frtk_mutex;
+std::mutex g_native_call_mutex;
 lua_State* g_lua{};
 std::vector<Callback> g_callbacks;
 std::filesystem::path g_host_directory;
@@ -259,6 +261,11 @@ bool RealAnticheatIsRunning() {
 
 bool WriteEnvironmentAllowed() {
   return (SupportedBuild() || SmokeWritesAllowed()) && !RealAnticheatIsRunning();
+}
+
+bool NativeCallsAllowed() {
+  return !g_session_writes_disabled.load(std::memory_order_acquire) &&
+         WriteEnvironmentAllowed();
 }
 
 class ProcessDiscoveryBackend final : public cfb27::frtk::DiscoveryBackend {
@@ -535,6 +542,42 @@ int LuaWriteU8(lua_State* state) {
   }
   if (error) return luaL_error(state, "%s", error);
   lua_pushboolean(state, verified);
+  return 1;
+}
+
+int LuaNativeCall(lua_State* state) {
+  const int count = lua_gettop(state);
+  if (count < 1 || count > static_cast<int>(cfb27::native_call::kMaxArguments + 1)) {
+    return luaL_error(state, "cfb.call requires a target and zero to eight arguments");
+  }
+  if (!NativeCallsAllowed()) {
+    return luaL_error(state, "native calls require the supported offline game build");
+  }
+
+  const auto target = static_cast<std::uintptr_t>(luaL_checkinteger(state, 1));
+  std::array<std::uint64_t, cfb27::native_call::kMaxArguments> arguments{};
+  for (int index = 2; index <= count; ++index) {
+    arguments[static_cast<std::size_t>(index - 2)] =
+        static_cast<std::uint64_t>(luaL_checkinteger(state, index));
+  }
+  cfb27::native_call::Result result;
+  {
+    std::lock_guard call_lock(g_native_call_mutex);
+    result = cfb27::native_call::Invoke(
+        target, std::span<const std::uint64_t>(arguments.data(),
+                                               static_cast<std::size_t>(count - 1)));
+  }
+  if (result.status == cfb27::native_call::Status::kInvalidTarget) {
+    return luaL_error(state, "native call target is not executable process code");
+  }
+  if (result.status == cfb27::native_call::Status::kTooManyArguments) {
+    return luaL_error(state, "native call accepts at most eight arguments");
+  }
+  if (result.status == cfb27::native_call::Status::kException) {
+    return luaL_error(state, "native call raised exception 0x%08X",
+                      result.fault_code);
+  }
+  lua_pushinteger(state, static_cast<lua_Integer>(result.value));
   return 1;
 }
 
@@ -856,6 +899,7 @@ void RegisterApi(lua_State* state) {
   lua_pushcfunction(state, LuaModuleBase); lua_setfield(state, -2, "module_base");
   lua_pushcfunction(state, LuaReadU8); lua_setfield(state, -2, "read_u8");
   lua_pushcfunction(state, LuaWriteU8); lua_setfield(state, -2, "write_u8");
+  lua_pushcfunction(state, LuaNativeCall); lua_setfield(state, -2, "call");
   lua_pushcfunction(state, LuaAobScan); lua_setfield(state, -2, "aob_scan");
   lua_pushcfunction(state, LuaLog); lua_setfield(state, -2, "log");
   lua_pushcfunction(state, LuaEmit); lua_setfield(state, -2, "emit");
@@ -1269,6 +1313,7 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
         {"capabilities", {"status", "runScript", "evaluate", "logs", "events",
                           "memoryScan", "memoryScanAllocationMetadata", "memoryRead",
                           "memoryWriteTransaction",
+                          "nativeCall",
                           "telemetry", "frtkProfileV1", "frtkCatalogV1",
                           "frtkRecordReadV1", "frtkFieldTransactionV1"}},
     });
@@ -1288,6 +1333,72 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
         {"scriptsRun", g_scripts_run.load(std::memory_order_acquire)},
         {"ticks", g_ticks.load(std::memory_order_acquire)},
         {"lastError", std::move(last_error)},
+    });
+  }
+
+  if (command == "nativeCall") {
+    if (!HasOnlyKeys(params, {"address", "arguments"}) ||
+        !params.contains("address") || !params["address"].is_string() ||
+        !params.contains("arguments") || !params["arguments"].is_array() ||
+        params["arguments"].size() > cfb27::native_call::kMaxArguments) {
+      return ErrorResponse(id, "INVALID_REQUEST",
+                           "nativeCall requires an address and zero to eight arguments");
+    }
+    if (session_writes_disabled) {
+      return ErrorResponse(id, "SESSION_WRITES_DISABLED",
+                           "Native calls are disabled for this host session");
+    }
+    if (!NativeCallsAllowed()) {
+      return ErrorResponse(id, "UNSUPPORTED_BUILD",
+                           "Native calls require the supported offline game build");
+    }
+
+    const auto canonical_target = CanonicalAddress(params["address"].get<std::string>());
+    if (!canonical_target) {
+      return ErrorResponse(id, "INVALID_REQUEST",
+                           "nativeCall address must be canonical hexadecimal");
+    }
+    const auto target = cfb27::memory::ParseAddress(*canonical_target);
+    std::vector<std::uint64_t> arguments;
+    arguments.reserve(params["arguments"].size());
+    for (const auto& argument : params["arguments"]) {
+      if (!argument.is_string()) {
+        return ErrorResponse(id, "INVALID_REQUEST",
+                             "nativeCall arguments must be canonical hexadecimal strings");
+      }
+      const auto canonical_argument = CanonicalAddress(argument.get<std::string>());
+      if (!canonical_argument) {
+        return ErrorResponse(id, "INVALID_REQUEST",
+                             "nativeCall arguments must be canonical hexadecimal strings");
+      }
+      const auto parsed = cfb27::memory::ParseAddress(*canonical_argument);
+      if (!parsed) {
+        return ErrorResponse(id, "INVALID_REQUEST", "nativeCall argument is invalid");
+      }
+      arguments.push_back(static_cast<std::uint64_t>(*parsed));
+    }
+
+    cfb27::native_call::Result call;
+    {
+      std::lock_guard call_lock(g_native_call_mutex);
+      call = cfb27::native_call::Invoke(*target, arguments);
+    }
+    if (call.status == cfb27::native_call::Status::kInvalidTarget) {
+      return ErrorResponse(id, "NATIVE_CALL_TARGET_INVALID",
+                           "Native call target is not executable process code");
+    }
+    if (call.status == cfb27::native_call::Status::kTooManyArguments) {
+      return ErrorResponse(id, "INVALID_REQUEST",
+                           "nativeCall accepts at most eight arguments");
+    }
+    if (call.status == cfb27::native_call::Status::kException) {
+      return ErrorResponse(
+          id, "NATIVE_CALL_EXCEPTION", "Native call raised a structured exception",
+          {{"exceptionCode", FormatCanonicalAddress(call.fault_code)}});
+    }
+    return SuccessResponse(id, {
+        {"address", *canonical_target},
+        {"value", FormatCanonicalAddress(static_cast<std::uintptr_t>(call.value))},
     });
   }
 
