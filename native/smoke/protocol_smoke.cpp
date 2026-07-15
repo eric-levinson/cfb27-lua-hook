@@ -440,6 +440,8 @@ int wmain(int argc, wchar_t** argv) {
                 "memoryScanAllocationMetadata") == capabilities.end()) return 106;
   if (std::find(capabilities.begin(), capabilities.end(), "nativeCall") ==
       capabilities.end()) return 139;
+  if (std::find(capabilities.begin(), capabilities.end(), "researchWatch") ==
+      capabilities.end()) return 143;
   Json native_arguments = Json::array();
   for (std::uintptr_t value = 1; value <= 8; ++value) {
     native_arguments.push_back(FormatAddress(value));
@@ -461,6 +463,15 @@ int wmain(int argc, wchar_t** argv) {
                       {"command", "evaluate"},
                       {"params", {{"source", native_lua}}}},
                response, false) || !response.value("ok", false)) return 142;
+  const std::string watch_lua =
+      "assert(type(cfb.watch)=='function'); "
+      "assert(type(cfb.watch_exec)=='function'); "
+      "assert(type(cfb.watch_hits)=='function'); "
+      "assert(type(cfb.unwatch)=='function'); cfb.unwatch()";
+  if (!Request(pipe, {{"protocol", 1}, {"id", "research-watch-lua"},
+                      {"command", "evaluate"},
+                      {"params", {{"source", watch_lua}}}},
+               response, false) || !response.value("ok", false)) return 144;
   if (!Request(pipe, {{"protocol", 1}, {"id", "native-call-invalid"},
                       {"command", "nativeCall"},
                       {"params", {{"address", "0x1"},

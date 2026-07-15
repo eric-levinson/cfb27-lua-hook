@@ -10,6 +10,7 @@
 #include "frtk_profile.h"
 #include "frtk_record_access.h"
 #include "protocol.h"
+#include "research_watch.h"
 #include "telemetry.h"
 
 #include <array>
@@ -581,6 +582,77 @@ int LuaNativeCall(lua_State* state) {
   return 1;
 }
 
+int LuaArmWatch(lua_State* state, cfb27::research_watch::Kind kind) {
+  if (!NativeCallsAllowed()) {
+    return luaL_error(state, "research watches require the supported offline game build");
+  }
+  const auto address = static_cast<std::uintptr_t>(luaL_checkinteger(state, 1));
+  const auto length = kind == cfb27::research_watch::Kind::kExecute
+      ? 1u
+      : static_cast<std::size_t>(luaL_optinteger(state, 2, 4));
+  const auto result = cfb27::research_watch::Arm(kind, address, length);
+  if (result.status != cfb27::research_watch::ArmStatus::kOk) {
+    return luaL_error(state, "could not arm research watch: %s",
+                      cfb27::research_watch::ArmStatusCode(result.status));
+  }
+  lua_pushinteger(state, static_cast<lua_Integer>(result.slot));
+  lua_pushinteger(state, static_cast<lua_Integer>(result.thread_count));
+  return 2;
+}
+
+int LuaWatch(lua_State* state) {
+  return LuaArmWatch(state, cfb27::research_watch::Kind::kWrite);
+}
+
+int LuaWatchExec(lua_State* state) {
+  return LuaArmWatch(state, cfb27::research_watch::Kind::kExecute);
+}
+
+void PushHitInteger(lua_State* state, const char* name, std::uint64_t value) {
+  lua_pushinteger(state, static_cast<lua_Integer>(value));
+  lua_setfield(state, -2, name);
+}
+
+int LuaWatchHits(lua_State* state) {
+  const bool clear = lua_toboolean(state, 1) != 0;
+  const auto snapshot = cfb27::research_watch::Collect(clear);
+  lua_createtable(state, static_cast<int>(snapshot.hits.size()), 1);
+  for (std::size_t index = 0; index < snapshot.hits.size(); ++index) {
+    const auto& hit = snapshot.hits[index];
+    lua_createtable(state, 0, 16);
+    PushHitInteger(state, "slot", hit.slot);
+    PushHitInteger(state, "thread_id", hit.thread_id);
+    PushHitInteger(state, "rip", hit.rip);
+    PushHitInteger(state, "rsp", hit.rsp);
+    PushHitInteger(state, "rax", hit.rax);
+    PushHitInteger(state, "rbx", hit.rbx);
+    PushHitInteger(state, "rbp", hit.rbp);
+    PushHitInteger(state, "rsi", hit.rsi);
+    PushHitInteger(state, "rdi", hit.rdi);
+    PushHitInteger(state, "rcx", hit.rcx);
+    PushHitInteger(state, "rdx", hit.rdx);
+    PushHitInteger(state, "r8", hit.r8);
+    PushHitInteger(state, "r9", hit.r9);
+    PushHitInteger(state, "r10", hit.r10);
+    PushHitInteger(state, "r11", hit.r11);
+    lua_createtable(state, static_cast<int>(hit.stack_count), 0);
+    for (std::size_t stack_index = 0; stack_index < hit.stack_count; ++stack_index) {
+      lua_pushinteger(state, static_cast<lua_Integer>(hit.stack[stack_index]));
+      lua_rawseti(state, -2, static_cast<lua_Integer>(stack_index + 1));
+    }
+    lua_setfield(state, -2, "stack");
+    lua_rawseti(state, -2, static_cast<lua_Integer>(index + 1));
+  }
+  PushHitInteger(state, "dropped", snapshot.dropped);
+  return 1;
+}
+
+int LuaUnwatch(lua_State* state) {
+  lua_pushinteger(state,
+                  static_cast<lua_Integer>(cfb27::research_watch::Disarm()));
+  return 1;
+}
+
 struct PatternByte { std::uint8_t value{}; bool wildcard{}; };
 
 std::optional<std::vector<PatternByte>> ParsePattern(std::string_view text) {
@@ -900,6 +972,10 @@ void RegisterApi(lua_State* state) {
   lua_pushcfunction(state, LuaReadU8); lua_setfield(state, -2, "read_u8");
   lua_pushcfunction(state, LuaWriteU8); lua_setfield(state, -2, "write_u8");
   lua_pushcfunction(state, LuaNativeCall); lua_setfield(state, -2, "call");
+  lua_pushcfunction(state, LuaWatch); lua_setfield(state, -2, "watch");
+  lua_pushcfunction(state, LuaWatchExec); lua_setfield(state, -2, "watch_exec");
+  lua_pushcfunction(state, LuaWatchHits); lua_setfield(state, -2, "watch_hits");
+  lua_pushcfunction(state, LuaUnwatch); lua_setfield(state, -2, "unwatch");
   lua_pushcfunction(state, LuaAobScan); lua_setfield(state, -2, "aob_scan");
   lua_pushcfunction(state, LuaLog); lua_setfield(state, -2, "log");
   lua_pushcfunction(state, LuaEmit); lua_setfield(state, -2, "emit");
@@ -1314,6 +1390,7 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
                           "memoryScan", "memoryScanAllocationMetadata", "memoryRead",
                           "memoryWriteTransaction",
                           "nativeCall",
+                          "researchWatch",
                           "telemetry", "frtkProfileV1", "frtkCatalogV1",
                           "frtkRecordReadV1", "frtkFieldTransactionV1"}},
     });
