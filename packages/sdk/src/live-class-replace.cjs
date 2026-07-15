@@ -35,7 +35,8 @@ function validatePatchRows(rows, size, { strings = false } = {}) {
         !isHex(row.stringValueHex, PLAYER_STRING_SLOT_SIZE) || !row.strings ||
         typeof row.strings.FirstName !== 'string' || !row.strings.FirstName ||
         typeof row.strings.LastName !== 'string' || !row.strings.LastName ||
-        typeof row.strings.HomeTown !== 'string' || !row.strings.HomeTown)) return false;
+        (row.strings.HomeTown !== undefined &&
+          (typeof row.strings.HomeTown !== 'string' || !row.strings.HomeTown)))) return false;
     seen.add(row.row);
   }
   return true;
@@ -70,7 +71,9 @@ function buildStringMask(strings) {
   const mask = Buffer.alloc(PLAYER_STRING_SLOT_SIZE);
   mask.fill(0xFF, 0, 17);
   mask.fill(0xFF, 50, 71);
-  mask.fill(0xFF, 112, 138);
+  if (typeof strings.HomeTown === 'string' && strings.HomeTown) {
+    mask.fill(0xFF, 112, 138);
+  }
   if (typeof strings.GenericHeadAssetName === 'string' && strings.GenericHeadAssetName) {
     mask.fill(0xFF, 17, 50);
   }

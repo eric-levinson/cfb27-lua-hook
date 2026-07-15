@@ -93,8 +93,9 @@ async function candidateMatches(client, base, verificationRows, recordSize, hexF
   return true;
 }
 
-async function locateContiguousSurface(client, {
+async function locateContiguousSurfaceDetailed(client, {
   rows, recordSize, hexField = 'beforeHex', maskField, label = 'surface',
+  preferredAllocationBase,
 }) {
   if (!client || typeof client.scanMemory !== 'function' ||
       typeof client.readMemory !== 'function') {
@@ -110,26 +111,50 @@ async function locateContiguousSurface(client, {
     contextBefore: 0,
     contextAfter: 0,
     maxPages: 4096,
+    includeAllocationMetadata: true,
   });
   if (!scan || scan.complete !== true || !Array.isArray(scan.matches)) {
     throw fail(`${label} live surface scan was incomplete`);
   }
-  const candidateBases = new Set();
+  const candidateBases = new Map();
   for (const match of scan.matches) {
     const address = parseAddress(match.address);
     const displacement = BigInt(anchor.row) * BigInt(recordSize);
-    if (address >= displacement) candidateBases.add(address - displacement);
+    if (address >= displacement) {
+      const base = address - displacement;
+      candidateBases.set(base.toString(), {
+        base,
+        allocationBase: typeof match.allocationBase === 'string'
+          ? parseAddress(match.allocationBase) : null,
+        allocationSize: Number.isSafeInteger(match.allocationSize) && match.allocationSize > 0
+          ? match.allocationSize : null,
+      });
+    }
   }
   const verified = [];
   const verificationRows = spreadRows(sorted);
-  for (const base of candidateBases) {
-    if (await candidateMatches(client, base, verificationRows, recordSize, hexField, maskField)) {
-      verified.push(base);
+  for (const candidate of candidateBases.values()) {
+    if (await candidateMatches(client, candidate.base, verificationRows,
+      recordSize, hexField, maskField)) {
+      verified.push(candidate);
     }
   }
   if (verified.length === 0) throw fail(`${label} live surface was not found`);
-  if (verified.length !== 1) throw fail(`${label} live surface is ambiguous`);
-  return formatAddress(verified[0]);
+  let selected = verified;
+  if (selected.length > 1 && typeof preferredAllocationBase === 'bigint') {
+    selected = selected.filter((candidate) =>
+      candidate.allocationBase === preferredAllocationBase);
+  }
+  if (selected.length !== 1) throw fail(`${label} live surface is ambiguous`);
+  return Object.freeze({
+    base: formatAddress(selected[0].base),
+    allocationBase: selected[0].allocationBase,
+    allocationSize: selected[0].allocationSize,
+  });
+}
+
+async function locateContiguousSurface(client, options) {
+  return (await locateContiguousSurfaceDetailed(client, options)).base;
 }
 
 async function locateLiveClassSurfaces({ client, plan }) {
@@ -141,25 +166,30 @@ async function locateLiveClassSurfaces({ client, plan }) {
     beforeHex: toLiveMirrorHex(row.beforeHex),
     maskHex: toLiveMirrorHex(row.maskHex),
   }));
-  const playerBase = await locateContiguousSurface(client, {
+  const player = await locateContiguousSurfaceDetailed(client, {
     rows: mirrorRows(plan.playerRows),
     recordSize: plan.playerRecordSize,
-    maskField: 'maskHex',
     label: 'Player',
   });
-  const recruitBase = await locateContiguousSurface(client, {
+  const recruit = await locateContiguousSurfaceDetailed(client, {
     rows: mirrorRows(plan.recruitRows),
     recordSize: plan.recruitRecordSize,
-    maskField: 'maskHex',
     label: 'Recruit',
   });
-  const playerStringsBase = await locateContiguousSurface(client, {
+  const nextPlayerAllocation = player.allocationBase !== null && player.allocationSize !== null
+    ? player.allocationBase + BigInt(player.allocationSize) : undefined;
+  const playerStrings = await locateContiguousSurfaceDetailed(client, {
     rows: plan.playerRows,
     recordSize: PLAYER_STRING_SLOT_SIZE,
     hexField: 'beforeStringSlotHex',
     label: 'Player strings',
+    preferredAllocationBase: nextPlayerAllocation,
   });
-  return Object.freeze({ playerBase, recruitBase, playerStringsBase });
+  return Object.freeze({
+    playerBase: player.base,
+    recruitBase: recruit.base,
+    playerStringsBase: playerStrings.base,
+  });
 }
 
 module.exports = { locateContiguousSurface, locateLiveClassSurfaces };

@@ -180,6 +180,25 @@ test('dry-run performs the complete snapshot without writing', async () => {
   assert.deepEqual(snapshot(fixture.memory), fixture.initial);
 });
 
+test('skeleton plans may omit hometown and leave its live bytes unmanaged', async () => {
+  const fixture = makeFixture();
+  const first = fixture.plan.playerRows[0];
+  delete first.strings.HomeTown;
+  const hostileValue = Buffer.from(first.stringValueHex, 'hex');
+  hostileValue.fill(0x58, 112, 138);
+  first.stringValueHex = hostileValue.toString('hex').toUpperCase();
+
+  await replaceLiveClass({
+    client: fixture.client,
+    plan: fixture.plan,
+    surfaces: fixture.surfaces,
+    generation: 9,
+  });
+
+  const firstStrings = fixture.memory.get('0x300000');
+  assert.ok(firstStrings.subarray(112, 138).every((byte) => byte === 0x2E));
+});
+
 test('a later forward failure rolls every successful batch back to the live snapshot', async () => {
   const fixture = makeFixture({ failForwardBatch: 2 });
   await assert.rejects(

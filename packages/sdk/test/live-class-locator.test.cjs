@@ -37,14 +37,14 @@ function makePlan() {
   };
 }
 
-function surface(base, stride, rows, hexField, transform = false) {
+function surface(base, stride, rows, hexField, transform = false, allocation = {}) {
   const maximum = Math.max(...rows.map((row) => row.row));
   const bytes = Buffer.alloc((maximum + 1) * stride, 0xee);
   for (const row of rows) {
     const value = transform ? toLiveMirrorHex(row[hexField]) : row[hexField];
     Buffer.from(value, 'hex').copy(bytes, row.row * stride);
   }
-  return { base: BigInt(base), bytes };
+  return { base: BigInt(base), bytes, ...allocation };
 }
 
 function fakeClient(segments, options = {}) {
@@ -63,7 +63,12 @@ function fakeClient(segments, options = {}) {
           const candidate = segment.bytes.subarray(offset, offset + pattern.length);
           if (candidate.every((byte, index) =>
             (byte & mask[index]) === (pattern[index] & mask[index]))) {
-            matches.push({ address: addr(segment.base + BigInt(offset)) });
+            const match = { address: addr(segment.base + BigInt(offset)) };
+            if (request.includeAllocationMetadata && segment.allocationBase !== undefined) {
+              match.allocationBase = addr(segment.allocationBase);
+              match.allocationSize = segment.allocationSize;
+            }
+            matches.push(match);
           }
         }
       }
@@ -105,6 +110,50 @@ test('locates relocated Player, Recruit, and Player string surfaces', async () =
   });
   assert.equal(client.scans.length, 3);
   assert.ok(client.reads.every((request) => request.ranges.length >= 4));
+});
+
+test('locates numeric surfaces from full pre-write records instead of sparse write masks', async () => {
+  const plan = makePlan();
+  for (const row of plan.playerRows) row.maskHex = 'FF00000000000000';
+  for (const row of plan.recruitRows) row.maskHex = 'F0000000';
+  const client = fakeClient([
+    surface(0x11000000, 8, plan.playerRows, 'beforeHex', true),
+    surface(0x22000000, 4, plan.recruitRows, 'beforeHex', true),
+    surface(0x33000000, 138, plan.playerRows, 'beforeStringSlotHex'),
+  ]);
+
+  assert.deepEqual(await locateLiveClassSurfaces({ client, plan }), {
+    playerBase: '0x11000000',
+    recruitBase: '0x22000000',
+    playerStringsBase: '0x33000000',
+  });
+  assert.equal(client.scans[0].maskHex, 'FF'.repeat(plan.playerRecordSize));
+  assert.equal(client.scans[1].maskHex, 'FF'.repeat(plan.recruitRecordSize));
+});
+
+test('selects the duplicate string surface adjacent to the verified Player allocation', async () => {
+  const plan = makePlan();
+  const client = fakeClient([
+    surface(0x51000100, 8, plan.playerRows, 'beforeHex', true, {
+      allocationBase: 0x51000000n, allocationSize: 0x200000,
+    }),
+    surface(0x53000000, 4, plan.recruitRows, 'beforeHex', true, {
+      allocationBase: 0x53000000n, allocationSize: 0x100000,
+    }),
+    surface(0x51200070, 138, plan.playerRows, 'beforeStringSlotHex', false, {
+      allocationBase: 0x51200000n, allocationSize: 0x180000,
+    }),
+    surface(0x62000070, 138, plan.playerRows, 'beforeStringSlotHex', false, {
+      allocationBase: 0x62000000n, allocationSize: 0x180000,
+    }),
+  ]);
+
+  assert.deepEqual(await locateLiveClassSurfaces({ client, plan }), {
+    playerBase: '0x51000100',
+    recruitBase: '0x53000000',
+    playerStringsBase: '0x51200070',
+  });
+  assert.ok(client.scans.every((request) => request.includeAllocationMetadata === true));
 });
 
 test('selects the only candidate whose spread-out rows match', async () => {
