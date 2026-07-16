@@ -266,11 +266,11 @@ eight values. The host uses the Windows x64 integer/pointer ABI and returns the
 64-bit integer result as another canonical hexadecimal string.
 
 ```json
-{"protocol":1,"id":"call-1","command":"nativeCall","params":{"address":"0x140001000","arguments":["0x1","0x2"]}}
+{"protocol":1,"id":"call-1","command":"nativeCall","params":{"address":"0x1234AB80","arguments":["0x1","0x2"]}}
 ```
 
 ```json
-{"address":"0x140001000","value":"0x24"}
+{"address":"0x1234AB80","value":"0x24"}
 ```
 
 The target must be a committed executable address in the current process, and
