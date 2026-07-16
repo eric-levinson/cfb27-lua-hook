@@ -19,6 +19,8 @@ const standaloneSmokes = [
   'cfb27_memory_reader_smoke.exe',
   'cfb27_telemetry_smoke.exe',
   'cfb27_memory_transaction_smoke.exe',
+  'cfb27_native_call_smoke.exe',
+  'cfb27_research_watch_smoke.exe',
   'cfb27_frtk_profile_smoke.exe',
   'cfb27_frtk_field_schema_smoke.exe',
   'cfb27_frtk_discovery_smoke.exe',

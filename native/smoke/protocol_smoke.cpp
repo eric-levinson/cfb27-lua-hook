@@ -27,6 +27,12 @@ constexpr std::array<std::uint8_t, 16> kSentinel{
     0xD4, 0xE5, 0xF6, 0x07, 0x18, 0x29, 0x3A, 0x4B,
 };
 
+__declspec(noinline) std::uint64_t NativeCallSumEight(
+    std::uint64_t a, std::uint64_t b, std::uint64_t c, std::uint64_t d,
+    std::uint64_t e, std::uint64_t f, std::uint64_t g, std::uint64_t h) {
+  return a + b + c + d + e + f + g + h;
+}
+
 class Allocation {
  public:
   explicit Allocation(std::size_t size)
@@ -432,6 +438,52 @@ int wmain(int argc, wchar_t** argv) {
   if (std::find(capabilities.begin(), capabilities.end(), "telemetry") == capabilities.end()) return 51;
   if (std::find(capabilities.begin(), capabilities.end(),
                 "memoryScanAllocationMetadata") == capabilities.end()) return 106;
+  if (std::find(capabilities.begin(), capabilities.end(), "nativeCall") ==
+      capabilities.end()) return 139;
+  if (std::find(capabilities.begin(), capabilities.end(), "researchWatch") ==
+      capabilities.end()) return 143;
+  if (std::find(capabilities.begin(), capabilities.end(), "boardMutationV1") ==
+      capabilities.end()) return 145;
+  if (!Request(pipe, {{"protocol", 1}, {"id", "board-invalid"},
+                      {"command", "addBoard"},
+                      {"params", {{"recruitRow", 1}}}},
+               response, false) || !IsError(response, "INVALID_REQUEST")) return 146;
+  Json native_arguments = Json::array();
+  for (std::uintptr_t value = 1; value <= 8; ++value) {
+    native_arguments.push_back(FormatAddress(value));
+  }
+  const auto native_target =
+      FormatAddress(reinterpret_cast<std::uintptr_t>(&NativeCallSumEight));
+  if (!Request(pipe, {{"protocol", 1}, {"id", "native-call"},
+                      {"command", "nativeCall"},
+                      {"params", {{"address", native_target},
+                                  {"arguments", native_arguments}}}},
+               response, false) || !response.value("ok", false) ||
+      response["result"].value("address", "") != native_target ||
+      response["result"].value("value", "") != "0x24") return 140;
+  const std::string native_lua =
+      "assert(cfb.call(" +
+      std::to_string(reinterpret_cast<std::uintptr_t>(&NativeCallSumEight)) +
+      ", 1, 2, 3, 4, 5, 6, 7, 8) == 36)";
+  if (!Request(pipe, {{"protocol", 1}, {"id", "native-call-lua"},
+                      {"command", "evaluate"},
+                      {"params", {{"source", native_lua}}}},
+               response, false) || !response.value("ok", false)) return 142;
+  const std::string watch_lua =
+      "assert(type(cfb.watch)=='function'); "
+      "assert(type(cfb.watch_exec)=='function'); "
+      "assert(type(cfb.watch_hits)=='function'); "
+      "assert(type(cfb.unwatch)=='function'); cfb.unwatch()";
+  if (!Request(pipe, {{"protocol", 1}, {"id", "research-watch-lua"},
+                      {"command", "evaluate"},
+                      {"params", {{"source", watch_lua}}}},
+               response, false) || !response.value("ok", false)) return 144;
+  if (!Request(pipe, {{"protocol", 1}, {"id", "native-call-invalid"},
+                      {"command", "nativeCall"},
+                      {"params", {{"address", "0x1"},
+                                  {"arguments", Json::array()}}}},
+               response, false) ||
+      !IsError(response, "NATIVE_CALL_TARGET_INVALID")) return 141;
   const auto bundle = SyntheticBundle(std::span<const std::uint8_t>(frtk_bytes, 48));
   if (!Request(pipe, {{"protocol", 1}, {"id", "frtk-missing-profile"},
                       {"command", "discoverFrtkCatalog"}, {"params", Json::object()}},

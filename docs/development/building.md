@@ -19,6 +19,9 @@ native/build-release/Release/cfb27_startup_smoke.exe native/build-release/Releas
 native/build-release/Release/cfb27_memory_reader_smoke.exe
 native/build-release/Release/cfb27_telemetry_smoke.exe
 native/build-release/Release/cfb27_memory_transaction_smoke.exe
+native/build-release/Release/cfb27_native_call_smoke.exe
+native/build-release/Release/cfb27_board_mutation_smoke.exe
+native/build-release/Release/cfb27_research_watch_smoke.exe
 native/build-release/Release/cfb27_frtk_profile_smoke.exe
 native/build-release/Release/cfb27_frtk_field_schema_smoke.exe
 native/build-release/Release/cfb27_frtk_discovery_smoke.exe

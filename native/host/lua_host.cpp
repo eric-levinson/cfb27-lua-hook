@@ -4,11 +4,14 @@
 
 #include "memory_reader.h"
 #include "memory_transaction.h"
+#include "native_call.h"
+#include "board_mutation.h"
 #include "frtk_catalog.h"
 #include "frtk_lua_api.h"
 #include "frtk_profile.h"
 #include "frtk_record_access.h"
 #include "protocol.h"
+#include "research_watch.h"
 #include "telemetry.h"
 
 #include <array>
@@ -77,6 +80,7 @@ std::mutex g_host_write_mutex;
 std::mutex g_event_mutex;
 std::mutex g_file_log_mutex;
 std::mutex g_frtk_mutex;
+std::mutex g_native_call_mutex;
 lua_State* g_lua{};
 std::vector<Callback> g_callbacks;
 std::filesystem::path g_host_directory;
@@ -259,6 +263,11 @@ bool RealAnticheatIsRunning() {
 
 bool WriteEnvironmentAllowed() {
   return (SupportedBuild() || SmokeWritesAllowed()) && !RealAnticheatIsRunning();
+}
+
+bool NativeCallsAllowed() {
+  return !g_session_writes_disabled.load(std::memory_order_acquire) &&
+         WriteEnvironmentAllowed();
 }
 
 class ProcessDiscoveryBackend final : public cfb27::frtk::DiscoveryBackend {
@@ -535,6 +544,131 @@ int LuaWriteU8(lua_State* state) {
   }
   if (error) return luaL_error(state, "%s", error);
   lua_pushboolean(state, verified);
+  return 1;
+}
+
+int LuaNativeCall(lua_State* state) {
+  const int count = lua_gettop(state);
+  if (count < 1 || count > static_cast<int>(cfb27::native_call::kMaxArguments + 1)) {
+    return luaL_error(state, "cfb.call requires a target and zero to eight arguments");
+  }
+  if (!NativeCallsAllowed()) {
+    return luaL_error(state, "native calls require the supported offline game build");
+  }
+
+  const auto target = static_cast<std::uintptr_t>(luaL_checkinteger(state, 1));
+  std::array<std::uint64_t, cfb27::native_call::kMaxArguments> arguments{};
+  for (int index = 2; index <= count; ++index) {
+    arguments[static_cast<std::size_t>(index - 2)] =
+        static_cast<std::uint64_t>(luaL_checkinteger(state, index));
+  }
+  cfb27::native_call::Result result;
+  {
+    std::lock_guard call_lock(g_native_call_mutex);
+    result = cfb27::native_call::Invoke(
+        target, std::span<const std::uint64_t>(arguments.data(),
+                                               static_cast<std::size_t>(count - 1)));
+  }
+  if (result.status == cfb27::native_call::Status::kInvalidTarget) {
+    return luaL_error(state, "native call target is not executable process code");
+  }
+  if (result.status == cfb27::native_call::Status::kTooManyArguments) {
+    return luaL_error(state, "native call accepts at most eight arguments");
+  }
+  if (result.status == cfb27::native_call::Status::kException) {
+    return luaL_error(state, "native call raised exception 0x%08X",
+                      result.fault_code);
+  }
+  lua_pushinteger(state, static_cast<lua_Integer>(result.value));
+  return 1;
+}
+
+int LuaArmWatch(lua_State* state, cfb27::research_watch::Kind kind) {
+  if (!NativeCallsAllowed()) {
+    return luaL_error(state, "research watches require the supported offline game build");
+  }
+  const auto address = static_cast<std::uintptr_t>(luaL_checkinteger(state, 1));
+  const auto length = kind == cfb27::research_watch::Kind::kExecute
+      ? 1u
+      : static_cast<std::size_t>(luaL_optinteger(state, 2, 4));
+  const auto result = cfb27::research_watch::Arm(kind, address, length);
+  if (result.status != cfb27::research_watch::ArmStatus::kOk) {
+    return luaL_error(state, "could not arm research watch: %s",
+                      cfb27::research_watch::ArmStatusCode(result.status));
+  }
+  lua_pushinteger(state, static_cast<lua_Integer>(result.slot));
+  lua_pushinteger(state, static_cast<lua_Integer>(result.thread_count));
+  return 2;
+}
+
+int LuaWatch(lua_State* state) {
+  return LuaArmWatch(state, cfb27::research_watch::Kind::kWrite);
+}
+
+int LuaWatchExec(lua_State* state) {
+  return LuaArmWatch(state, cfb27::research_watch::Kind::kExecute);
+}
+
+void PushHitInteger(lua_State* state, const char* name, std::uint64_t value) {
+  lua_pushinteger(state, static_cast<lua_Integer>(value));
+  lua_setfield(state, -2, name);
+}
+
+void PushPointerSnapshot(
+    lua_State* state, const char* name,
+    const cfb27::research_watch::PointerSnapshot& snapshot) {
+  lua_createtable(state, static_cast<int>(snapshot.count), 0);
+  for (std::size_t index = 0; index < snapshot.count; ++index) {
+    lua_pushinteger(state, static_cast<lua_Integer>(snapshot.words[index]));
+    lua_rawseti(state, -2, static_cast<lua_Integer>(index + 1));
+  }
+  lua_setfield(state, -2, name);
+}
+
+int LuaWatchHits(lua_State* state) {
+  const bool clear = lua_toboolean(state, 1) != 0;
+  const auto snapshot = cfb27::research_watch::Collect(clear);
+  lua_createtable(state, static_cast<int>(snapshot.hits.size()), 1);
+  for (std::size_t index = 0; index < snapshot.hits.size(); ++index) {
+    const auto& hit = snapshot.hits[index];
+    lua_createtable(state, 0, 23);
+    PushHitInteger(state, "slot", hit.slot);
+    PushHitInteger(state, "thread_id", hit.thread_id);
+    PushHitInteger(state, "rip", hit.rip);
+    PushHitInteger(state, "rsp", hit.rsp);
+    PushHitInteger(state, "rax", hit.rax);
+    PushHitInteger(state, "rbx", hit.rbx);
+    PushHitInteger(state, "rbp", hit.rbp);
+    PushHitInteger(state, "rsi", hit.rsi);
+    PushHitInteger(state, "rdi", hit.rdi);
+    PushHitInteger(state, "rcx", hit.rcx);
+    PushHitInteger(state, "rdx", hit.rdx);
+    PushHitInteger(state, "r8", hit.r8);
+    PushHitInteger(state, "r9", hit.r9);
+    PushHitInteger(state, "r10", hit.r10);
+    PushHitInteger(state, "r11", hit.r11);
+    PushPointerSnapshot(state, "rbx_memory", hit.rbx_memory);
+    PushPointerSnapshot(state, "rsi_memory", hit.rsi_memory);
+    PushPointerSnapshot(state, "rdi_memory", hit.rdi_memory);
+    PushPointerSnapshot(state, "rcx_memory", hit.rcx_memory);
+    PushPointerSnapshot(state, "rdx_memory", hit.rdx_memory);
+    PushPointerSnapshot(state, "r8_memory", hit.r8_memory);
+    PushPointerSnapshot(state, "r9_memory", hit.r9_memory);
+    lua_createtable(state, static_cast<int>(hit.stack_count), 0);
+    for (std::size_t stack_index = 0; stack_index < hit.stack_count; ++stack_index) {
+      lua_pushinteger(state, static_cast<lua_Integer>(hit.stack[stack_index]));
+      lua_rawseti(state, -2, static_cast<lua_Integer>(stack_index + 1));
+    }
+    lua_setfield(state, -2, "stack");
+    lua_rawseti(state, -2, static_cast<lua_Integer>(index + 1));
+  }
+  PushHitInteger(state, "dropped", snapshot.dropped);
+  return 1;
+}
+
+int LuaUnwatch(lua_State* state) {
+  lua_pushinteger(state,
+                  static_cast<lua_Integer>(cfb27::research_watch::Disarm()));
   return 1;
 }
 
@@ -856,6 +990,11 @@ void RegisterApi(lua_State* state) {
   lua_pushcfunction(state, LuaModuleBase); lua_setfield(state, -2, "module_base");
   lua_pushcfunction(state, LuaReadU8); lua_setfield(state, -2, "read_u8");
   lua_pushcfunction(state, LuaWriteU8); lua_setfield(state, -2, "write_u8");
+  lua_pushcfunction(state, LuaNativeCall); lua_setfield(state, -2, "call");
+  lua_pushcfunction(state, LuaWatch); lua_setfield(state, -2, "watch");
+  lua_pushcfunction(state, LuaWatchExec); lua_setfield(state, -2, "watch_exec");
+  lua_pushcfunction(state, LuaWatchHits); lua_setfield(state, -2, "watch_hits");
+  lua_pushcfunction(state, LuaUnwatch); lua_setfield(state, -2, "unwatch");
   lua_pushcfunction(state, LuaAobScan); lua_setfield(state, -2, "aob_scan");
   lua_pushcfunction(state, LuaLog); lua_setfield(state, -2, "log");
   lua_pushcfunction(state, LuaEmit); lua_setfield(state, -2, "emit");
@@ -1269,6 +1408,9 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
         {"capabilities", {"status", "runScript", "evaluate", "logs", "events",
                           "memoryScan", "memoryScanAllocationMetadata", "memoryRead",
                           "memoryWriteTransaction",
+                          "nativeCall",
+                          "boardMutationV1",
+                          "researchWatch",
                           "telemetry", "frtkProfileV1", "frtkCatalogV1",
                           "frtkRecordReadV1", "frtkFieldTransactionV1"}},
     });
@@ -1288,6 +1430,140 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
         {"scriptsRun", g_scripts_run.load(std::memory_order_acquire)},
         {"ticks", g_ticks.load(std::memory_order_acquire)},
         {"lastError", std::move(last_error)},
+    });
+  }
+
+  if (command == "nativeCall") {
+    if (!HasOnlyKeys(params, {"address", "arguments"}) ||
+        !params.contains("address") || !params["address"].is_string() ||
+        !params.contains("arguments") || !params["arguments"].is_array() ||
+        params["arguments"].size() > cfb27::native_call::kMaxArguments) {
+      return ErrorResponse(id, "INVALID_REQUEST",
+                           "nativeCall requires an address and zero to eight arguments");
+    }
+    if (session_writes_disabled) {
+      return ErrorResponse(id, "SESSION_WRITES_DISABLED",
+                           "Native calls are disabled for this host session");
+    }
+    if (!NativeCallsAllowed()) {
+      return ErrorResponse(id, "UNSUPPORTED_BUILD",
+                           "Native calls require the supported offline game build");
+    }
+
+    const auto canonical_target = CanonicalAddress(params["address"].get<std::string>());
+    if (!canonical_target) {
+      return ErrorResponse(id, "INVALID_REQUEST",
+                           "nativeCall address must be canonical hexadecimal");
+    }
+    const auto target = cfb27::memory::ParseAddress(*canonical_target);
+    std::vector<std::uint64_t> arguments;
+    arguments.reserve(params["arguments"].size());
+    for (const auto& argument : params["arguments"]) {
+      if (!argument.is_string()) {
+        return ErrorResponse(id, "INVALID_REQUEST",
+                             "nativeCall arguments must be canonical hexadecimal strings");
+      }
+      const auto canonical_argument = CanonicalAddress(argument.get<std::string>());
+      if (!canonical_argument) {
+        return ErrorResponse(id, "INVALID_REQUEST",
+                             "nativeCall arguments must be canonical hexadecimal strings");
+      }
+      const auto parsed = cfb27::memory::ParseAddress(*canonical_argument);
+      if (!parsed) {
+        return ErrorResponse(id, "INVALID_REQUEST", "nativeCall argument is invalid");
+      }
+      arguments.push_back(static_cast<std::uint64_t>(*parsed));
+    }
+
+    cfb27::native_call::Result call;
+    {
+      std::lock_guard call_lock(g_native_call_mutex);
+      call = cfb27::native_call::Invoke(*target, arguments);
+    }
+    if (call.status == cfb27::native_call::Status::kInvalidTarget) {
+      return ErrorResponse(id, "NATIVE_CALL_TARGET_INVALID",
+                           "Native call target is not executable process code");
+    }
+    if (call.status == cfb27::native_call::Status::kTooManyArguments) {
+      return ErrorResponse(id, "INVALID_REQUEST",
+                           "nativeCall accepts at most eight arguments");
+    }
+    if (call.status == cfb27::native_call::Status::kException) {
+      return ErrorResponse(
+          id, "NATIVE_CALL_EXCEPTION", "Native call raised a structured exception",
+          {{"exceptionCode", FormatCanonicalAddress(call.fault_code)}});
+    }
+    return SuccessResponse(id, {
+        {"address", *canonical_target},
+        {"value", FormatCanonicalAddress(static_cast<std::uintptr_t>(call.value))},
+    });
+  }
+
+  if (command == "addBoard" || command == "removeBoard") {
+    if (!HasOnlyKeys(params, {"recruitRow", "teamRow"}) ||
+        !params.contains("recruitRow") || !params["recruitRow"].is_number_unsigned() ||
+        !params.contains("teamRow") || !params["teamRow"].is_number_unsigned()) {
+      return ErrorResponse(id, "INVALID_REQUEST",
+                           "Board mutation requires recruitRow and teamRow");
+    }
+    const auto recruit_row64 = params["recruitRow"].get<std::uint64_t>();
+    const auto team_row64 = params["teamRow"].get<std::uint64_t>();
+    if (recruit_row64 > 0x1FFFF || team_row64 > 0x1FFFF) {
+      return ErrorResponse(id, "INVALID_REQUEST",
+                           "Board mutation rows are outside the supported range");
+    }
+    if (session_writes_disabled) {
+      return ErrorResponse(id, "SESSION_WRITES_DISABLED",
+                           "Board mutations are disabled for this host session");
+    }
+    if (!NativeCallsAllowed()) {
+      return ErrorResponse(id, "UNSUPPORTED_BUILD",
+                           "Board mutations require the supported offline game build");
+    }
+    const auto operation = command == "addBoard"
+        ? cfb27::board_mutation::Operation::kAdd
+        : cfb27::board_mutation::Operation::kRemove;
+    cfb27::board_mutation::Result mutation;
+    {
+      std::scoped_lock call_lock(g_host_write_mutex, g_native_call_mutex);
+      mutation = cfb27::board_mutation::Invoke(
+          operation, static_cast<std::uint32_t>(recruit_row64),
+          static_cast<std::uint32_t>(team_row64));
+    }
+    using BoardStatus = cfb27::board_mutation::Status;
+    if (mutation.status != BoardStatus::kApplied &&
+        mutation.status != BoardStatus::kUnchanged) {
+      const std::string code = cfb27::board_mutation::StatusCode(mutation.status);
+      if (mutation.status == BoardStatus::kPostconditionFailed) {
+        g_session_writes_disabled.store(true, std::memory_order_release);
+      }
+      Json details{
+          {"operation", command == "addBoard" ? "add" : "remove"},
+          {"recruitRow", recruit_row64},
+          {"teamRow", team_row64},
+      };
+      if (mutation.fault_code) {
+        details["exceptionCode"] = FormatCanonicalAddress(mutation.fault_code);
+      }
+      return ErrorResponse(id, code, "Board mutation could not be verified",
+                           std::move(details));
+    }
+    auto optional_row = [](std::uint32_t value) -> Json {
+      return value == UINT32_MAX ? Json(nullptr) : Json(value);
+    };
+    return SuccessResponse(id, {
+        {"operation", command == "addBoard" ? "add" : "remove"},
+        {"status", mutation.status == BoardStatus::kApplied
+            ? "applied_verified" : "unchanged"},
+        {"recruitRow", mutation.recruit_row},
+        {"teamRow", mutation.team_row},
+        {"membershipRow", mutation.membership_row},
+        {"boardSlot", optional_row(mutation.board_slot)},
+        {"targetRow", optional_row(mutation.target_row)},
+        {"activePitchRow", optional_row(mutation.active_pitch_row)},
+        {"callValue", FormatCanonicalAddress(
+            static_cast<std::uintptr_t>(mutation.call_value))},
+        {"uiRefresh", "next_recruiting_screen_change"},
     });
   }
 

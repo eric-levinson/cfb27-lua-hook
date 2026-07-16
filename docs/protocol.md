@@ -47,6 +47,8 @@ Error response:
   readable private-memory ranges.
 - `writeTransaction { transactionId, operations }` — apply a bounded guarded
   batch with complete preflight comparison, readback, and rollback.
+- `nativeCall { address, arguments }` — synchronously invoke an executable
+  in-process address with zero to eight Win64 integer/pointer arguments.
 - `loadFrtkProfile { profile, layout }` — atomically validate and load a
   matching version-1 bundle.
 - `discoverFrtkCatalog {}` — resolve every required table into a new catalog.
@@ -61,7 +63,8 @@ Error response:
 `hello.capabilities` advertises the memory commands as `memoryScan` and
 `memoryRead`, allocation-aware scans as `memoryScanAllocationMetadata`, guarded
 writes as `memoryWriteTransaction`, and structured event registration as
-`telemetry`. `status.sessionWritesDisabled` reports whether an
+`telemetry`. Direct native invocation is advertised as `nativeCall`.
+`status.sessionWritesDisabled` reports whether an
 unverifiable rollback has permanently disabled writes for the current host
 session.
 
@@ -254,6 +257,64 @@ mutate memory while preflight, apply, verification, or rollback is running.
 Callers must establish a stable window appropriate to the target data before
 submitting a transaction.
 
+### Native call
+
+`nativeCall` is the low-level in-process invocation primitive. `address` and
+every entry in `arguments` use canonical uppercase hexadecimal strings so all
+64 bits survive JSON transport. The argument array may contain zero through
+eight values. The host uses the Windows x64 integer/pointer ABI and returns the
+64-bit integer result as another canonical hexadecimal string.
+
+```json
+{"protocol":1,"id":"call-1","command":"nativeCall","params":{"address":"0x1234AB80","arguments":["0x1","0x2"]}}
+```
+
+```json
+{"address":"0x1234AB80","value":"0x24"}
+```
+
+The target must be a committed executable address in the current process, and
+the host must recognize the supported offline game build. Calls are serialized
+and run synchronously on the named-pipe request worker; this command does not
+schedule onto a game-owned UI thread. The primitive supports integer and
+pointer arguments only—no floating-point/vector arguments, structures, or
+alternate calling conventions. `NATIVE_CALL_TARGET_INVALID` rejects a
+non-executable target. `NATIVE_CALL_EXCEPTION` reports a structured-exception
+code, but cannot roll back native side effects that occurred before the fault.
+
+The SDK method is `client.nativeCall({ address, arguments })` and negotiates the
+`nativeCall` capability before sending the request.
+
+## Recruiting board mutations
+
+`addBoard { recruitRow, teamRow }` and `removeBoard { recruitRow, teamRow }`
+invoke the current supported build's verified full recruiting handlers. The
+rows identify the requested Recruit record and the active Team record; no team
+is hardcoded. Both commands require the `boardMutationV1` capability and must
+be called while the recruiting runtime is loaded, but they do not depend on a
+specific recruiting screen or selected UI row.
+
+The host freshly resolves the recruiting controller and both record wrappers,
+validates compact membership and freelist state before the call, and verifies
+the complete table postcondition afterward. A successful result uses status
+`applied_verified`; an already-satisfied add or remove uses `unchanged`.
+
+```json
+{"protocol":1,"id":"board-1","command":"addBoard","params":{"recruitRow":3182,"teamRow":92}}
+```
+
+An already-open Recruiting Board view refreshes on the next recruiting screen
+change. The returned `uiRefresh` value is therefore
+`next_recruiting_screen_change`. This is a rendering limitation, not delayed
+table materialization; save durability follows the normal dynasty autosave
+path.
+
+Typed board failures include `RECRUITING_NOT_LOADED`,
+`RUNTIME_DISCOVERY_AMBIGUOUS`, `BOARD_TABLE_DISCOVERY_FAILED`,
+`BOARD_STATE_INVALID`, `BOARD_FULL`, `BOARD_NATIVE_CALL_FAILED`, and
+`BOARD_POSTCONDITION_FAILED`. A postcondition failure disables further writes
+for that host session.
+
 The host retains at most 512 log entries and 1,024 events. Event cursors are
 monotonic for one host session. Tick events are coalesced to at most one per
 second; Lua tick callbacks still run at their normal cadence.
@@ -293,6 +354,8 @@ transaction shapes, addresses, hex, and overlapping operations return
 Typed FrTk commands additionally return `FRTK_PROFILE_INVALID`,
 `FRTK_DISCOVERY_FAILED`, `FRTK_CATALOG_STALE`, `FRTK_FIELD_INVALID`, and
 `FRTK_AUTHORITY_UNPROVEN`.
+Native calls additionally return `NATIVE_CALL_TARGET_INVALID` and
+`NATIVE_CALL_EXCEPTION`.
 
 The unversioned legacy text pipe remains temporarily available for migration,
 but it is not the integration contract for new tools.
