@@ -11,8 +11,8 @@ namespace {
 
 alignas(8) volatile std::uint64_t g_watched{};
 
-__declspec(noinline) std::uint64_t ExecTarget(std::uint64_t value) {
-  return value + 1;
+__declspec(noinline) std::uint64_t ExecTarget(const std::uint64_t* value) {
+  return *value + 1;
 }
 
 void Require(bool condition, const char* message) {
@@ -67,12 +67,13 @@ int main() {
     cfb27::research_watch::Collect(true);
 
     volatile std::uint64_t result{};
+    const std::uint64_t argument = 41;
     const auto exec_thread = RunWorkerAfterArm(
         cfb27::research_watch::Kind::kExecute,
         reinterpret_cast<std::uintptr_t>(&ExecTarget), 1,
         [&] {
           auto* volatile target = &ExecTarget;
-          result = target(41);
+          result = target(&argument);
         });
     const auto exec_hits = cfb27::research_watch::Collect(false);
     Require(result == 42, "execute target did not complete");
@@ -82,6 +83,12 @@ int main() {
     Require(exec_hits.hits.front().rip ==
                 reinterpret_cast<std::uintptr_t>(&ExecTarget),
             "execute watch captured the wrong instruction");
+    Require(exec_hits.hits.front().rcx ==
+                reinterpret_cast<std::uintptr_t>(&argument),
+            "execute watch captured the wrong first argument");
+    Require(exec_hits.hits.front().rcx_memory.count != 0 &&
+                exec_hits.hits.front().rcx_memory.words[0] == argument,
+            "execute watch omitted first-argument memory");
     cfb27::research_watch::Disarm();
 
     std::cout << "research watch smoke passed\n";

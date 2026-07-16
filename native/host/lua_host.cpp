@@ -613,13 +613,24 @@ void PushHitInteger(lua_State* state, const char* name, std::uint64_t value) {
   lua_setfield(state, -2, name);
 }
 
+void PushPointerSnapshot(
+    lua_State* state, const char* name,
+    const cfb27::research_watch::PointerSnapshot& snapshot) {
+  lua_createtable(state, static_cast<int>(snapshot.count), 0);
+  for (std::size_t index = 0; index < snapshot.count; ++index) {
+    lua_pushinteger(state, static_cast<lua_Integer>(snapshot.words[index]));
+    lua_rawseti(state, -2, static_cast<lua_Integer>(index + 1));
+  }
+  lua_setfield(state, -2, name);
+}
+
 int LuaWatchHits(lua_State* state) {
   const bool clear = lua_toboolean(state, 1) != 0;
   const auto snapshot = cfb27::research_watch::Collect(clear);
   lua_createtable(state, static_cast<int>(snapshot.hits.size()), 1);
   for (std::size_t index = 0; index < snapshot.hits.size(); ++index) {
     const auto& hit = snapshot.hits[index];
-    lua_createtable(state, 0, 16);
+    lua_createtable(state, 0, 23);
     PushHitInteger(state, "slot", hit.slot);
     PushHitInteger(state, "thread_id", hit.thread_id);
     PushHitInteger(state, "rip", hit.rip);
@@ -635,6 +646,13 @@ int LuaWatchHits(lua_State* state) {
     PushHitInteger(state, "r9", hit.r9);
     PushHitInteger(state, "r10", hit.r10);
     PushHitInteger(state, "r11", hit.r11);
+    PushPointerSnapshot(state, "rbx_memory", hit.rbx_memory);
+    PushPointerSnapshot(state, "rsi_memory", hit.rsi_memory);
+    PushPointerSnapshot(state, "rdi_memory", hit.rdi_memory);
+    PushPointerSnapshot(state, "rcx_memory", hit.rcx_memory);
+    PushPointerSnapshot(state, "rdx_memory", hit.rdx_memory);
+    PushPointerSnapshot(state, "r8_memory", hit.r8_memory);
+    PushPointerSnapshot(state, "r9_memory", hit.r9_memory);
     lua_createtable(state, static_cast<int>(hit.stack_count), 0);
     for (std::size_t stack_index = 0; stack_index < hit.stack_count; ++stack_index) {
       lua_pushinteger(state, static_cast<lua_Integer>(hit.stack[stack_index]));

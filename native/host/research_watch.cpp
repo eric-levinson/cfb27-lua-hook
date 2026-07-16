@@ -198,6 +198,25 @@ void ClearHits() {
   for (auto& buffered : g_hits) buffered.ready.store(false, std::memory_order_release);
 }
 
+void CapturePointer(std::uint64_t address, PointerSnapshot& snapshot) {
+  if (!address) return;
+  for (std::size_t index = 0; index < kPointerWords; ++index) {
+#if defined(_MSC_VER)
+    __try {
+      snapshot.words[index] =
+          *(reinterpret_cast<const std::uint64_t*>(address) + index);
+      snapshot.count = index + 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+      break;
+    }
+#else
+    snapshot.words[index] =
+        *(reinterpret_cast<const std::uint64_t*>(address) + index);
+    snapshot.count = index + 1;
+#endif
+  }
+}
+
 LONG CALLBACK HandleException(EXCEPTION_POINTERS* pointers) {
   if (!pointers || !pointers->ExceptionRecord || !pointers->ContextRecord ||
       pointers->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP) {
@@ -235,6 +254,13 @@ LONG CALLBACK HandleException(EXCEPTION_POINTERS* pointers) {
     hit.r9 = context.R9;
     hit.r10 = context.R10;
     hit.r11 = context.R11;
+    CapturePointer(hit.rbx, hit.rbx_memory);
+    CapturePointer(hit.rsi, hit.rsi_memory);
+    CapturePointer(hit.rdi, hit.rdi_memory);
+    CapturePointer(hit.rcx, hit.rcx_memory);
+    CapturePointer(hit.rdx, hit.rdx_memory);
+    CapturePointer(hit.r8, hit.r8_memory);
+    CapturePointer(hit.r9, hit.r9_memory);
     for (std::size_t index = 0; index < kStackWords; ++index) {
 #if defined(_MSC_VER)
       __try {

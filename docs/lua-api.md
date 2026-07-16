@@ -103,10 +103,13 @@ the address must be naturally aligned. `cfb.watch_exec(address)` arms an
 execute breakpoint. At most four total slots may be active. Existing process
 threads that are accessible and do not already own hardware breakpoints are
 armed; the returned values are the zero-based slot and armed-thread count.
-`cfb.watch_hits(clear)` returns at most 128 fixed register/stack snapshots plus
-a `dropped` count. `cfb.unwatch()` restores saved debug-register state. These
-functions are current-process research tools; always collect and disarm before
-continuing normal play.
+`cfb.watch_hits(clear)` returns at most 128 fixed snapshots plus a `dropped`
+count. Each hit includes the integer registers, up to 256 stack qwords, and up
+to eight safely readable qwords at each of `rbx`, `rsi`, `rdi`, `rcx`, `rdx`,
+`r8`, and `r9` in fields such as `rcx_memory`. An unreadable pointer produces
+an empty or partial array. `cfb.unwatch()` restores saved debug-register state.
+These functions are current-process research tools; always collect and disarm
+before continuing normal play.
 
 Supported callback names are `game_ready` and `tick`. The host runs `tick`
 callbacks approximately every 100 ms. The event protocol coalesces observable

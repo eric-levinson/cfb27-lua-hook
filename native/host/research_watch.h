@@ -9,7 +9,8 @@ namespace cfb27::research_watch {
 
 constexpr std::size_t kMaxSlots = 4;
 constexpr std::size_t kMaxHits = 128;
-constexpr std::size_t kStackWords = 32;
+constexpr std::size_t kStackWords = 256;
+constexpr std::size_t kPointerWords = 8;
 
 enum class Kind : std::uint8_t {
   kWrite,
@@ -30,6 +31,11 @@ struct ArmResult {
   std::size_t thread_count{};
 };
 
+struct PointerSnapshot {
+  std::array<std::uint64_t, kPointerWords> words{};
+  std::size_t count{};
+};
+
 struct Hit {
   std::size_t slot{};
   std::uint32_t thread_id{};
@@ -46,6 +52,13 @@ struct Hit {
   std::uint64_t r9{};
   std::uint64_t r10{};
   std::uint64_t r11{};
+  PointerSnapshot rbx_memory{};
+  PointerSnapshot rsi_memory{};
+  PointerSnapshot rdi_memory{};
+  PointerSnapshot rcx_memory{};
+  PointerSnapshot rdx_memory{};
+  PointerSnapshot r8_memory{};
+  PointerSnapshot r9_memory{};
   std::array<std::uint64_t, kStackWords> stack{};
   std::size_t stack_count{};
 };
