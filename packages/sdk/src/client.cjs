@@ -35,6 +35,7 @@ const RESERVED_TELEMETRY_TYPES = new Set(['game_ready', 'tick', 'log']);
 const PIPE_CONNECT_RETRY_DELAY_MS = 10;
 const MAX_UINT64 = 0xFFFFFFFFFFFFFFFFn;
 const NATIVE_CALL_CAPABILITY = 'nativeCall';
+const BOARD_MUTATION_CAPABILITY = 'boardMutationV1';
 const WRITE_TRANSACTION_ERROR_MESSAGES = Object.freeze({
   INVALID_REQUEST: 'Host rejected the write transaction request',
   UNSUPPORTED_BUILD: 'Memory writes require the supported game build',
@@ -775,6 +776,35 @@ function validateNativeCallResult(result, params) {
   return result;
 }
 
+function cloneBoardMutationOptions(options = {}) {
+  if (!isObject(options) || !hasExactKeys(options, ['recruitRow', 'teamRow']) ||
+      !isSafeIntegerBetween(options.recruitRow, 0, 0x1FFFF) ||
+      !isSafeIntegerBetween(options.teamRow, 0, 0x1FFFF)) {
+    throw invalidRequest('Board mutation requires recruitRow and teamRow');
+  }
+  return { recruitRow: options.recruitRow, teamRow: options.teamRow };
+}
+
+function validateBoardMutationResult(result, params, operation) {
+  const keys = ['operation', 'status', 'recruitRow', 'teamRow', 'membershipRow',
+    'boardSlot', 'targetRow', 'activePitchRow', 'callValue', 'uiRefresh'];
+  const optionalRow = (value) => value === null || isSafeIntegerBetween(value, 0, 0x1FFFF);
+  if (!hasExactKeys(result, keys) || result.operation !== operation ||
+      !['applied_verified', 'unchanged'].includes(result.status) ||
+      result.recruitRow !== params.recruitRow || result.teamRow !== params.teamRow ||
+      !isSafeIntegerBetween(result.membershipRow, 0, 137) ||
+      !optionalRow(result.boardSlot) || !optionalRow(result.targetRow) ||
+      !optionalRow(result.activePitchRow) || typeof result.callValue !== 'string' ||
+      !CANONICAL_ADDRESS.test(result.callValue) ||
+      result.uiRefresh !== 'next_recruiting_screen_change') {
+    throw invalidResponse('Host returned an invalid board mutation result');
+  }
+  if (result.boardSlot !== null && result.boardSlot > 34) {
+    throw invalidResponse('Host returned an invalid board slot');
+  }
+  return result;
+}
+
 function validateTelemetryRegistration(result, types) {
   if (!hasExactKeys(result, ['types']) || !Array.isArray(result.types) ||
       result.types.length !== types.length ||
@@ -932,6 +962,18 @@ function createClient({ pid, pipeName, timeoutMs = 20000 } = {}) {
     }
   }
 
+  async function requireBoardMutationCapability() {
+    const hello = await request('hello');
+    if (!hello || hello.protocolVersion !== 1 ||
+        !Array.isArray(hello.capabilities) ||
+        !hello.capabilities.includes(BOARD_MUTATION_CAPABILITY)) {
+      throw new Cfb27HookError(
+        'PROTOCOL_MISMATCH',
+        'Host does not advertise boardMutationV1 capability',
+      );
+    }
+  }
+
   async function requireFrtkCapability(capability) {
     const hello = await request('hello');
     if (!hasExactKeys(hello, ['protocolVersion', 'hostVersion', 'supportedBuild', 'writesAllowed',
@@ -990,6 +1032,16 @@ function createClient({ pid, pipeName, timeoutMs = 20000 } = {}) {
       const params = cloneNativeCallOptions(options);
       await requireNativeCallCapability();
       return validateNativeCallResult(await request('nativeCall', params), params);
+    },
+    async addBoard(options = {}) {
+      const params = cloneBoardMutationOptions(options);
+      await requireBoardMutationCapability();
+      return validateBoardMutationResult(await request('addBoard', params), params, 'add');
+    },
+    async removeBoard(options = {}) {
+      const params = cloneBoardMutationOptions(options);
+      await requireBoardMutationCapability();
+      return validateBoardMutationResult(await request('removeBoard', params), params, 'remove');
     },
     getLogs({ limit = 100 } = {}) {
       return request('logs', { limit });

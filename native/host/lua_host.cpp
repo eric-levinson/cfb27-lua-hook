@@ -5,6 +5,7 @@
 #include "memory_reader.h"
 #include "memory_transaction.h"
 #include "native_call.h"
+#include "board_mutation.h"
 #include "frtk_catalog.h"
 #include "frtk_lua_api.h"
 #include "frtk_profile.h"
@@ -1408,6 +1409,7 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
                           "memoryScan", "memoryScanAllocationMetadata", "memoryRead",
                           "memoryWriteTransaction",
                           "nativeCall",
+                          "boardMutationV1",
                           "researchWatch",
                           "telemetry", "frtkProfileV1", "frtkCatalogV1",
                           "frtkRecordReadV1", "frtkFieldTransactionV1"}},
@@ -1494,6 +1496,74 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
     return SuccessResponse(id, {
         {"address", *canonical_target},
         {"value", FormatCanonicalAddress(static_cast<std::uintptr_t>(call.value))},
+    });
+  }
+
+  if (command == "addBoard" || command == "removeBoard") {
+    if (!HasOnlyKeys(params, {"recruitRow", "teamRow"}) ||
+        !params.contains("recruitRow") || !params["recruitRow"].is_number_unsigned() ||
+        !params.contains("teamRow") || !params["teamRow"].is_number_unsigned()) {
+      return ErrorResponse(id, "INVALID_REQUEST",
+                           "Board mutation requires recruitRow and teamRow");
+    }
+    const auto recruit_row64 = params["recruitRow"].get<std::uint64_t>();
+    const auto team_row64 = params["teamRow"].get<std::uint64_t>();
+    if (recruit_row64 > 0x1FFFF || team_row64 > 0x1FFFF) {
+      return ErrorResponse(id, "INVALID_REQUEST",
+                           "Board mutation rows are outside the supported range");
+    }
+    if (session_writes_disabled) {
+      return ErrorResponse(id, "SESSION_WRITES_DISABLED",
+                           "Board mutations are disabled for this host session");
+    }
+    if (!NativeCallsAllowed()) {
+      return ErrorResponse(id, "UNSUPPORTED_BUILD",
+                           "Board mutations require the supported offline game build");
+    }
+    const auto operation = command == "addBoard"
+        ? cfb27::board_mutation::Operation::kAdd
+        : cfb27::board_mutation::Operation::kRemove;
+    cfb27::board_mutation::Result mutation;
+    {
+      std::scoped_lock call_lock(g_host_write_mutex, g_native_call_mutex);
+      mutation = cfb27::board_mutation::Invoke(
+          operation, static_cast<std::uint32_t>(recruit_row64),
+          static_cast<std::uint32_t>(team_row64));
+    }
+    using BoardStatus = cfb27::board_mutation::Status;
+    if (mutation.status != BoardStatus::kApplied &&
+        mutation.status != BoardStatus::kUnchanged) {
+      const std::string code = cfb27::board_mutation::StatusCode(mutation.status);
+      if (mutation.status == BoardStatus::kPostconditionFailed) {
+        g_session_writes_disabled.store(true, std::memory_order_release);
+      }
+      Json details{
+          {"operation", command == "addBoard" ? "add" : "remove"},
+          {"recruitRow", recruit_row64},
+          {"teamRow", team_row64},
+      };
+      if (mutation.fault_code) {
+        details["exceptionCode"] = FormatCanonicalAddress(mutation.fault_code);
+      }
+      return ErrorResponse(id, code, "Board mutation could not be verified",
+                           std::move(details));
+    }
+    auto optional_row = [](std::uint32_t value) -> Json {
+      return value == UINT32_MAX ? Json(nullptr) : Json(value);
+    };
+    return SuccessResponse(id, {
+        {"operation", command == "addBoard" ? "add" : "remove"},
+        {"status", mutation.status == BoardStatus::kApplied
+            ? "applied_verified" : "unchanged"},
+        {"recruitRow", mutation.recruit_row},
+        {"teamRow", mutation.team_row},
+        {"membershipRow", mutation.membership_row},
+        {"boardSlot", optional_row(mutation.board_slot)},
+        {"targetRow", optional_row(mutation.target_row)},
+        {"activePitchRow", optional_row(mutation.active_pitch_row)},
+        {"callValue", FormatCanonicalAddress(
+            static_cast<std::uintptr_t>(mutation.call_value))},
+        {"uiRefresh", "next_recruiting_screen_change"},
     });
   }
 

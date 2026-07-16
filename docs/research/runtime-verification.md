@@ -263,3 +263,50 @@ scholarships, scouting, board membership, pitch-intensity changes, and pitch or
 visit creation/removal. Verification for this import is automated and offline;
 no additional installed-host, CFB27, MMC, weekly-advance, or autosave gate was
 performed.
+
+## Independent board mutation verification on July 15, 2026
+
+Board membership was retested on the supported current build using a disposable
+dynasty with a verified backup. Brooks's dossier and earlier synthetic results
+were treated only as leads.
+
+Multiple vanilla UI adds and removes established the authoritative table
+behavior. An add allocates one UserRecruitTarget row (4168), one
+ActivePitchRecord row (5790), and appends one compact 4168 reference to the
+user's 5847 membership row. A remove returns both rows to their freelists,
+clears the Recruit and ActivePitches references, and compacts membership.
+Tables 4176, 4190, and 4251 did not change in the no-pitch/no-visit cases.
+
+The verified full current-build routines are:
+
+- add: module RVA `0x8109060`;
+- remove: module RVA `0x8166090`.
+
+Both receive the active recruiting controller plus pointer cells containing an
+active Team record wrapper and the requested Recruit record wrapper. The Team
+row is dynamic; no school is hardcoded. The low-level remove routine at RVA
+`0x80116B0` is prohibited because calling it alone left stale runtime state and
+later produced a membership hole.
+
+The full add routine first passed an already-targeted no-op with byte-identical
+tables. It then added Storm Thompson Jr. (Recruit row 3182), produced the exact
+vanilla allocation/membership diff, rendered after normal recruiting
+navigation, and survived a dynasty reload.
+
+The full remove chain was captured twice from real UI removals, including a
+function-entry capture with zero dropped hits. An already-absent Julian Holmes
+no-op left all six observed tables byte-identical. A synthetic removal of
+Derrick Wilder from slot 0 compacted Keith Pearson from slot 1 into slot 0,
+returned both allocated rows to their freelists, rendered after leaving and
+re-entering the Recruiting Board, and survived a dynasty reload.
+
+An already-open Recruiting Board does not redraw immediately after a direct
+worker-thread call because the surrounding UI caller's refresh code is not
+executed. The mutation is visible on the next recruiting screen change; this is
+screen-change rendering, not reload materialization. Save durability follows
+the normal dynasty autosave path.
+
+The exact claim that board addition constructs six runtime objects was not
+independently enumerated and remains unverified as a count. The public board API
+does not synthesize those objects: it invokes the verified full game routines,
+which own their required runtime construction and teardown.

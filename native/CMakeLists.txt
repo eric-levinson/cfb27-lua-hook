@@ -44,6 +44,7 @@ target_include_directories(lua54 PUBLIC ${LUA_DIR})
 set_target_properties(lua54 PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 add_library(cfb27_lua_host SHARED
+  host/board_mutation.cpp
   host/frtk_catalog.cpp
   host/frtk_discovery.cpp
   host/frtk_field_schema.cpp
@@ -104,6 +105,15 @@ add_executable(cfb27_native_call_smoke
 target_compile_features(cfb27_native_call_smoke PRIVATE cxx_std_20)
 target_compile_definitions(cfb27_native_call_smoke PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_options(cfb27_native_call_smoke PRIVATE /STACK:1048576)
+
+add_executable(cfb27_board_mutation_smoke
+  smoke/board_mutation_smoke.cpp
+  host/board_mutation.cpp
+  host/native_call.cpp
+)
+target_compile_features(cfb27_board_mutation_smoke PRIVATE cxx_std_20)
+target_compile_definitions(cfb27_board_mutation_smoke PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_options(cfb27_board_mutation_smoke PRIVATE /STACK:1048576)
 
 add_executable(cfb27_research_watch_smoke
   smoke/research_watch_smoke.cpp

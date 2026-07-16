@@ -442,6 +442,12 @@ int wmain(int argc, wchar_t** argv) {
       capabilities.end()) return 139;
   if (std::find(capabilities.begin(), capabilities.end(), "researchWatch") ==
       capabilities.end()) return 143;
+  if (std::find(capabilities.begin(), capabilities.end(), "boardMutationV1") ==
+      capabilities.end()) return 145;
+  if (!Request(pipe, {{"protocol", 1}, {"id", "board-invalid"},
+                      {"command", "addBoard"},
+                      {"params", {{"recruitRow", 1}}}},
+               response, false) || !IsError(response, "INVALID_REQUEST")) return 146;
   Json native_arguments = Json::array();
   for (std::uintptr_t value = 1; value <= 8; ++value) {
     native_arguments.push_back(FormatAddress(value));

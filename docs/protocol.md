@@ -285,6 +285,36 @@ code, but cannot roll back native side effects that occurred before the fault.
 The SDK method is `client.nativeCall({ address, arguments })` and negotiates the
 `nativeCall` capability before sending the request.
 
+## Recruiting board mutations
+
+`addBoard { recruitRow, teamRow }` and `removeBoard { recruitRow, teamRow }`
+invoke the current supported build's verified full recruiting handlers. The
+rows identify the requested Recruit record and the active Team record; no team
+is hardcoded. Both commands require the `boardMutationV1` capability and must
+be called while the recruiting runtime is loaded, but they do not depend on a
+specific recruiting screen or selected UI row.
+
+The host freshly resolves the recruiting controller and both record wrappers,
+validates compact membership and freelist state before the call, and verifies
+the complete table postcondition afterward. A successful result uses status
+`applied_verified`; an already-satisfied add or remove uses `unchanged`.
+
+```json
+{"protocol":1,"id":"board-1","command":"addBoard","params":{"recruitRow":3182,"teamRow":92}}
+```
+
+An already-open Recruiting Board view refreshes on the next recruiting screen
+change. The returned `uiRefresh` value is therefore
+`next_recruiting_screen_change`. This is a rendering limitation, not delayed
+table materialization; save durability follows the normal dynasty autosave
+path.
+
+Typed board failures include `RECRUITING_NOT_LOADED`,
+`RUNTIME_DISCOVERY_AMBIGUOUS`, `BOARD_TABLE_DISCOVERY_FAILED`,
+`BOARD_STATE_INVALID`, `BOARD_FULL`, `BOARD_NATIVE_CALL_FAILED`, and
+`BOARD_POSTCONDITION_FAILED`. A postcondition failure disables further writes
+for that host session.
+
 The host retains at most 512 log entries and 1,024 events. Event cursors are
 monotonic for one host session. Tick events are coalesced to at most one per
 second; Lua tick callbacks still run at their normal cadence.
