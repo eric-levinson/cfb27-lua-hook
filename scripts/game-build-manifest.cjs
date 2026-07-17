@@ -144,11 +144,15 @@ function loadManifest(manifestPath) {
   return parseManifest(JSON.parse(fs.readFileSync(manifestPath, 'utf8')));
 }
 
+function normalizeNewlines(value) {
+  return value.replace(/\r\n?/g, '\n');
+}
+
 function writeGeneratedHeader({ manifestPath, headerPath, check = false }) {
   const generated = generateHeader(loadManifest(manifestPath));
   if (check) {
     try {
-      return fs.readFileSync(headerPath, 'utf8') === generated;
+      return normalizeNewlines(fs.readFileSync(headerPath, 'utf8')) === generated;
     } catch (error) {
       if (error.code === 'ENOENT') {
         return false;

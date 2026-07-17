@@ -172,6 +172,11 @@ test('writeGeneratedHeader writes deterministically and check mode never changes
     assert.equal(writeGeneratedHeader({ manifestPath, headerPath, check: true }), true);
     assert.equal(fs.readFileSync(headerPath, 'utf8'), generated);
 
+    const windowsCheckout = generated.replace(/\n/g, '\r\n');
+    fs.writeFileSync(headerPath, windowsCheckout, 'utf8');
+    assert.equal(writeGeneratedHeader({ manifestPath, headerPath, check: true }), true);
+    assert.equal(fs.readFileSync(headerPath, 'utf8'), windowsCheckout);
+
     fs.writeFileSync(headerPath, 'stale\n', 'utf8');
     assert.equal(writeGeneratedHeader({ manifestPath, headerPath, check: true }), false);
     assert.equal(fs.readFileSync(headerPath, 'utf8'), 'stale\n');
@@ -182,5 +187,5 @@ test('writeGeneratedHeader writes deterministically and check mode never changes
 
 test('the checked-in generated header is current', () => {
   const parsed = parseManifest(JSON.parse(fs.readFileSync(MANIFEST, 'utf8')));
-  assert.equal(fs.readFileSync(HEADER, 'utf8'), generateHeader(parsed));
+  assert.equal(fs.readFileSync(HEADER, 'utf8').replace(/\r\n?/g, '\n'), generateHeader(parsed));
 });
