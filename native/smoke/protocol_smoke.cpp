@@ -453,6 +453,10 @@ int wmain(int argc, wchar_t** argv) {
                       {"command", "addBoard"},
                       {"params", {{"recruitRow", 1}}}},
                response, false) || !IsError(response, "INVALID_REQUEST")) return 146;
+  if (!Request(pipe, {{"protocol", 1}, {"id", "board-unknown-build"},
+                      {"command", "addBoard"},
+                      {"params", {{"recruitRow", 1}, {"teamRow", 1}}}},
+               response, false) || !IsError(response, "UNSUPPORTED_BUILD")) return 147;
   Json native_arguments = Json::array();
   for (std::uintptr_t value = 1; value <= 8; ++value) {
     native_arguments.push_back(FormatAddress(value));

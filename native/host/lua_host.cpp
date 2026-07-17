@@ -261,17 +261,21 @@ bool RealAnticheatIsRunning() {
 }
 
 bool WriteEnvironmentAllowed() {
-  return (CertifiedBuild() || SmokeWritesAllowed()) &&
-         !RealAnticheatIsRunning();
+  return cfb27::build_policy::WritesAllowed(
+      g_game_build.load(std::memory_order_acquire), RealAnticheatIsRunning(),
+      false, SmokeWritesAllowed());
 }
 
 bool ResearchWatchesAllowed() {
-  return DiagnosticOrCertifiedBuild() && !RealAnticheatIsRunning();
+  return cfb27::build_policy::ResearchWatchesAllowed(
+      g_game_build.load(std::memory_order_acquire), RealAnticheatIsRunning());
 }
 
 bool NativeCallsAllowed() {
-  return !g_session_writes_disabled.load(std::memory_order_acquire) &&
-         WriteEnvironmentAllowed();
+  return cfb27::build_policy::WritesAllowed(
+      g_game_build.load(std::memory_order_acquire), RealAnticheatIsRunning(),
+      g_session_writes_disabled.load(std::memory_order_acquire),
+      SmokeWritesAllowed());
 }
 
 const char* WriteBuildDenialText() {
