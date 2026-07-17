@@ -7,10 +7,12 @@ int main() {
   using cfb27::board_mutation::Operation;
   using cfb27::board_mutation::Status;
 
-  const auto invalid = Invoke(Operation::kAdd, 0x20000, 0);
+  const cfb27::game_builds::BoardLayout layout{1, 2, 3, 4};
+
+  const auto invalid = Invoke(layout, Operation::kAdd, 0x20000, 0);
   if (invalid.status != Status::kInvalidArgument) return 1;
 
-  const auto unloaded = Invoke(Operation::kRemove, 1, 1);
+  const auto unloaded = Invoke(layout, Operation::kRemove, 1, 1);
   if (unloaded.status != Status::kRecruitingNotLoaded) return 2;
 
   if (std::string(cfb27::board_mutation::StatusCode(Status::kBoardFull)) !=

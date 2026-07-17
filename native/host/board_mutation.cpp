@@ -16,10 +16,6 @@
 namespace cfb27::board_mutation {
 namespace {
 
-constexpr std::uintptr_t kGenericRecordWrapperVtableRva = 0xB093F68;
-constexpr std::uintptr_t kRecruitingControllerVtableRva = 0xB0B5BA8;
-constexpr std::uintptr_t kFullAddRva = 0x8109060;
-constexpr std::uintptr_t kFullRemoveRva = 0x8166090;
 constexpr std::uint32_t kRecruitTableId = 4269;
 constexpr std::uint32_t kTeamTableId = 6334;
 constexpr std::uint32_t kControllerDescriptorTableId = 5003;
@@ -242,13 +238,14 @@ std::uint32_t DescriptorTableId(std::uintptr_t descriptor) {
   return static_cast<std::uint32_t>(encoded >> 32);
 }
 
-void FindRuntimeObjects(const std::vector<Region>& regions, std::uintptr_t module,
+void FindRuntimeObjects(const game_builds::BoardLayout& layout,
+                        const std::vector<Region>& regions, std::uintptr_t module,
                         std::uint32_t recruit_row, std::uint32_t team_row,
                         std::vector<std::uintptr_t>& controllers,
                         std::vector<std::uintptr_t>& recruit_wrappers,
                         std::vector<std::uintptr_t>& team_wrappers) {
-  const auto wrapper_vtable = module + kGenericRecordWrapperVtableRva;
-  const auto controller_vtable = module + kRecruitingControllerVtableRva;
+  const auto wrapper_vtable = module + layout.generic_record_wrapper_vtable_rva;
+  const auto controller_vtable = module + layout.recruiting_controller_vtable_rva;
   const auto wrapper_bytes = QwordBytes(wrapper_vtable);
   const auto controller_bytes = QwordBytes(controller_vtable);
   for (const auto& region : regions) {
@@ -329,8 +326,8 @@ Result BaseResult(Operation operation, std::uint32_t recruit_row,
 
 }  // namespace
 
-Result Invoke(Operation operation, std::uint32_t recruit_row,
-              std::uint32_t team_row) {
+Result Invoke(const game_builds::BoardLayout& layout, Operation operation,
+              std::uint32_t recruit_row, std::uint32_t team_row) {
   auto result = BaseResult(operation, recruit_row, team_row);
   if (recruit_row > kReferenceRowMask || team_row > kReferenceRowMask) {
     result.status = Status::kInvalidArgument;
@@ -345,7 +342,7 @@ Result Invoke(Operation operation, std::uint32_t recruit_row,
   std::vector<std::uintptr_t> controllers;
   std::vector<std::uintptr_t> recruit_wrappers;
   std::vector<std::uintptr_t> team_wrappers;
-  FindRuntimeObjects(regions, module, recruit_row, team_row, controllers,
+  FindRuntimeObjects(layout, regions, module, recruit_row, team_row, controllers,
                      recruit_wrappers, team_wrappers);
   if (controllers.empty() || recruit_wrappers.empty() || team_wrappers.empty()) {
     result.status = Status::kRecruitingNotLoaded;
@@ -421,7 +418,7 @@ Result Invoke(Operation operation, std::uint32_t recruit_row,
       controllers[0], reinterpret_cast<std::uint64_t>(&team_cell),
       reinterpret_cast<std::uint64_t>(&recruit_cell)};
   const auto target = module +
-      (operation == Operation::kAdd ? kFullAddRva : kFullRemoveRva);
+      (operation == Operation::kAdd ? layout.full_add_rva : layout.full_remove_rva);
   const auto call = native_call::Invoke(target, arguments);
   result.call_value = call.value;
   result.fault_code = call.fault_code;
