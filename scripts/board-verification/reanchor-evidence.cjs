@@ -27,6 +27,7 @@ const REQUIRED_GATE_NAMES = Object.freeze([
 const IMAGE_SCN_MEM_EXECUTE = 0x20000000;
 const IMAGE_SCN_MEM_READ = 0x40000000;
 const PARSED_PE_VALUES = new WeakSet();
+let evidenceWriteTestHook = null;
 
 function canonicalSha(value) {
   if (typeof value !== 'string' || !/^[0-9A-F]{64}$/.test(value)) {
@@ -140,6 +141,14 @@ function canonicalNonzeroHex(value, label) {
   return value;
 }
 
+function canonicalNonzeroAddress(value, label) {
+  if (typeof value !== 'string' || !/^0x[0-9A-F]+$/.test(value) || canonicalHex(value, label) !== value ||
+      toAddress(value, label) === 0n) {
+    throw new TypeError(`${label} must be a nonzero canonical uppercase hexadecimal address`);
+  }
+  return value;
+}
+
 function comparablePath(value) {
   const normalized = path.normalize(value);
   return process.platform === 'win32' ? normalized.toUpperCase() : normalized;
@@ -213,6 +222,53 @@ function resolveContainedEvidencePath(relativePath, executableSha256, { createPa
   return target;
 }
 
+function setEvidenceWriteTestHook(hook) {
+  if (hook !== null && typeof hook !== 'function') throw new TypeError('Evidence write test hook must be a function or null');
+  evidenceWriteTestHook = hook;
+}
+
+function sameFileIdentity(left, right) {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function verifyOwnedTemporary(relativePath, sha, temporary, identity, requireEmpty) {
+  const parts = evidencePathParts(relativePath);
+  const parent = ensureDirectoryComponents(
+    ['.frtk', 'board-reanchor', sha, ...parts.slice(0, -1)], false);
+  if (!samePath(path.dirname(temporary), parent)) throw new Error('Evidence temporary parent changed containment');
+  const status = fs.lstatSync(temporary, { bigint: true });
+  if (!status.isFile() || status.isSymbolicLink() || !sameFileIdentity(status, identity)) {
+    throw new Error('Evidence temporary identity changed containment');
+  }
+  if (requireEmpty && status.size !== 0n) throw new Error('Exclusive evidence temporary was not empty before content write');
+  const expectedReal = path.join(realpath(parent), path.basename(temporary));
+  if (!samePath(realpath(temporary), expectedReal)) throw new Error('Evidence temporary real path escaped containment');
+}
+
+function removeOwnedTemporary(sha, temporaryName, identity) {
+  let root;
+  try {
+    root = ensureDirectoryComponents(['.frtk', 'board-reanchor', sha], false);
+  } catch {
+    return;
+  }
+  const pending = [root];
+  while (pending.length > 0) {
+    const directory = pending.pop();
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const entryPath = path.join(directory, entry.name);
+      const status = fs.lstatSync(entryPath, { bigint: true });
+      if (status.isSymbolicLink()) continue;
+      if (status.isDirectory()) {
+        pending.push(entryPath);
+      } else if (status.isFile() && entry.name === temporaryName && sameFileIdentity(status, identity)) {
+        fs.rmSync(entryPath);
+        return;
+      }
+    }
+  }
+}
+
 function writeEvidence(relativePath, evidence) {
   validateEvidenceEnvelope(evidence);
   const sha = evidence.build.executableSha256;
@@ -220,24 +276,52 @@ function writeEvidence(relativePath, evidence) {
   const directory = path.dirname(target);
   const temporary = path.join(directory,
     `.${path.basename(target)}.${process.pid}-${crypto.randomBytes(12).toString('hex')}.tmp`);
-  const serialized = `${JSON.stringify(evidence, null, 2)}\n`;
-  let temporaryCreated = false;
+  const serialized = Buffer.from(`${JSON.stringify(evidence, null, 2)}\n`, 'utf8');
+  let descriptor = null;
+  let temporaryIdentity = null;
+  let committed = false;
   try {
-    fs.writeFileSync(temporary, serialized, { encoding: 'utf8', flag: 'wx' });
-    temporaryCreated = true;
+    descriptor = fs.openSync(temporary, 'wx', 0o600);
+    temporaryIdentity = fs.fstatSync(descriptor, { bigint: true });
+    if (!temporaryIdentity.isFile() || temporaryIdentity.size !== 0n) {
+      throw new Error('Exclusive evidence temporary was not a zero-byte regular file');
+    }
+    evidenceWriteTestHook?.({ temporaryPath: temporary, targetPath: target });
+    verifyOwnedTemporary(relativePath, sha, temporary, temporaryIdentity, true);
+    const written = fs.writeSync(descriptor, serialized, 0, serialized.length, 0);
+    if (written !== serialized.length) throw new Error('Evidence temporary write was incomplete');
+    fs.fsyncSync(descriptor);
+    fs.closeSync(descriptor);
+    descriptor = null;
+    verifyOwnedTemporary(relativePath, sha, temporary, temporaryIdentity, false);
     const rechecked = resolveContainedEvidencePath(relativePath, sha, { createParents: false, requireFile: false });
     if (!samePath(rechecked, target)) throw new Error('Evidence target changed during atomic write');
     fs.renameSync(temporary, target);
-    temporaryCreated = false;
+    committed = true;
   } catch (error) {
-    if (temporaryCreated) {
+    if (descriptor !== null) {
       try {
-        fs.rmSync(temporary, { force: true });
+        fs.ftruncateSync(descriptor, 0);
+        fs.fsyncSync(descriptor);
       } catch {
-        // Preserve the original failure and never touch the destination.
+        // Preserve the original failure.
       }
+      try {
+        fs.closeSync(descriptor);
+      } catch {
+        // Preserve the original failure.
+      }
+      descriptor = null;
     }
     throw error;
+  } finally {
+    if (!committed && temporaryIdentity !== null) {
+      try {
+        removeOwnedTemporary(sha, path.basename(temporary), temporaryIdentity);
+      } catch {
+        // Cleanup is identity-bound and must not mask the original failure.
+      }
+    }
   }
   return target;
 }
@@ -276,6 +360,10 @@ function rangesOverlap(left, right) {
   return left.start < right.end && right.start < left.end;
 }
 
+function alignUp(value, alignment) {
+  return Math.ceil(value / alignment) * alignment;
+}
+
 function parsePeSections(image) {
   requireBufferRange(image, 0, 0x40, 'the DOS header');
   if (image.toString('ascii', 0, 2) !== 'MZ') throw new Error('PE image has no MZ signature');
@@ -306,6 +394,8 @@ function parsePeSections(image) {
   if (sizeOfHeaders === 0 || sizeOfHeaders % fileAlignment !== 0 || sizeOfHeaders > image.length) {
     throw new Error('PE SizeOfHeaders is invalid');
   }
+  if (sizeOfHeaders > sizeOfImage) throw new Error('PE SizeOfHeaders exceeds SizeOfImage');
+  const headerImageRange = { start: 0, end: alignUp(sizeOfHeaders, sectionAlignment) };
 
   const sectionTableOffset = optionalHeaderOffset + optionalHeaderSize;
   const sectionTableLength = numberOfSections * 40;
@@ -330,6 +420,9 @@ function parsePeSections(image) {
     }
     const virtualRange = { start: virtualAddress, end: virtualAddress + mappedSize };
     if (virtualRange.end > sizeOfImage) throw new Error(`PE section ${name || index} escapes SizeOfImage`);
+    if (rangesOverlap(headerImageRange, virtualRange)) {
+      throw new Error(`PE header image range overlaps section ${name || index}`);
+    }
     if (virtualRanges.some((range) => rangesOverlap(range, virtualRange))) {
       throw new Error(`PE virtual section ranges overlap at ${name || index}`);
     }
@@ -362,6 +455,8 @@ function parsePeSections(image) {
     }));
   }
   const result = Object.freeze({
+    fileSize: image.length,
+    executableSha256: crypto.createHash('sha256').update(image).digest('hex').toUpperCase(),
     sizeOfImage,
     sizeOfHeaders,
     sectionAlignment,
@@ -459,13 +554,15 @@ function validRow(value) {
 
 function validateVtable(object, label, moduleBase, pe) {
   try {
-    const table = classifyModuleAddress(object?.vtableAddress, moduleBase, pe);
+    const vtableAddress = canonicalNonzeroAddress(object?.vtableAddress, `${label} vtable address`);
+    const table = classifyModuleAddress(vtableAddress, moduleBase, pe);
     if (!table.insideImage || !table.readable) return `${label} vtable is not in readable main-module image memory`;
     if (!Array.isArray(object.vtableEntries) || object.vtableEntries.length === 0) {
       return `${label} vtable has no sampled entries`;
     }
     for (const entry of object.vtableEntries) {
-      const target = classifyModuleAddress(entry, moduleBase, pe);
+      const target = classifyModuleAddress(
+        canonicalNonzeroAddress(entry, `${label} vtable entry`), moduleBase, pe);
       if (!target.insideImage || !target.executable) {
         return `${label} vtable entry is not in an executable main-module section`;
       }
@@ -494,6 +591,25 @@ function validateObjectShapes(capture, { moduleBase, pe }) {
     const recruit = capture?.recruit;
     const expected = capture?.expected;
     if (!args || !cells || !controller || !team || !recruit || !expected) return reject('Full entry object shape is incomplete');
+    for (const [address, label] of [
+      [args.rcx, 'RCX'], [args.rdx, 'RDX'], [args.r8, 'R8'],
+      [controller.address, 'Controller object'], [team.address, 'Team wrapper'],
+      [recruit.address, 'Recruit wrapper'], [cells.team?.address, 'Team pointer cell'],
+      [cells.team?.value, 'Team pointer value'], [cells.recruit?.address, 'Recruit pointer cell'],
+      [cells.recruit?.value, 'Recruit pointer value'],
+    ]) canonicalNonzeroAddress(address, label);
+    const distinctObjectsAndCells = [
+      controller.address, team.address, recruit.address, cells.team.address, cells.recruit.address,
+    ].map((address) => canonicalHex(address));
+    if (new Set(distinctObjectsAndCells).size !== distinctObjectsAndCells.length) {
+      return reject('Controller, wrappers, and pointer cells must have distinct nonzero addresses');
+    }
+    canonicalNonzeroAddress(controller.vtableAddress, 'Controller vtable');
+    canonicalNonzeroAddress(team.vtableAddress, 'Team vtable');
+    canonicalNonzeroAddress(recruit.vtableAddress, 'Recruit vtable');
+    if (sameAddress(controller.vtableAddress, team.vtableAddress)) {
+      return reject('Controller and generic record-wrapper vtables must be distinct');
+    }
     if (![expected.membershipRow, expected.teamRow, expected.recruitRow].every(validRow)) {
       return reject('Expected membership, Team, and Recruit rows must be nonnegative safe integers');
     }
@@ -620,60 +736,73 @@ function validateBoardRvas(board) {
   return Object.fromEntries(BOARD_RVAS.map((name) => [name, canonicalNonzeroHex(board[name], `Nonzero ${name} RVA`)]));
 }
 
-function validateGates(gates) {
-  if (!Array.isArray(gates) || gates.length !== REQUIRED_GATE_NAMES.length) {
-    throw new TypeError('Candidate must contain the exact required gate set');
+function validateProofCapture(capture, label, build, session, requireEntryAddress) {
+  plainObject(capture, `${label} proof capture`);
+  nonemptyString(capture.captureId, `${label} proof capture ID`);
+  assertExactKeys(capture.build, ['executableSize', 'executableSha256'], `${label} proof capture build identity`);
+  assertExactKeys(capture.session, ['pid', 'sessionId'], `${label} proof capture session identity`);
+  const captureSize = positiveInteger(capture.build.executableSize, `${label} proof capture executable size`);
+  const captureSha = canonicalSha(capture.build.executableSha256);
+  const capturePid = positiveInteger(capture.session.pid, `${label} proof capture PID`);
+  const captureSessionId = nonemptyString(capture.session.sessionId, `${label} proof capture session ID`);
+  if (captureSize !== build.executableSize || captureSha !== build.executableSha256) {
+    throw new Error(`${label} proof capture build identity does not match the authenticated candidate build size and SHA`);
   }
-  const byName = new Map();
-  for (const gate of gates) {
-    assertExactKeys(gate, ['name', 'passed', 'detail'], 'Candidate gate');
-    if (typeof gate.name !== 'string' || !REQUIRED_GATE_NAMES.includes(gate.name)) {
-      throw new TypeError('Candidate contains a gate outside the required gate set');
-    }
-    if (byName.has(gate.name)) throw new TypeError(`Candidate contains duplicate required gate ${gate.name}`);
-    if (typeof gate.passed !== 'boolean' || typeof gate.detail !== 'string') {
-      throw new TypeError(`Required gate ${gate.name} must contain a boolean and detail string`);
-    }
-    byName.set(gate.name, gate);
+  if (capturePid !== session.pid || captureSessionId !== session.sessionId) {
+    throw new Error(`${label} proof capture session identity does not match candidate PID and session ID`);
   }
-  if (REQUIRED_GATE_NAMES.some((name) => !byName.has(name))) throw new TypeError('Candidate is missing a required gate');
-  return byName;
+  if (requireEntryAddress) canonicalNonzeroAddress(capture.entryAddress, `${label} proof capture entry address`);
+  return capture;
 }
 
-function validateProof(proof) {
+function validateProof(proof, build, session) {
   assertExactKeys(proof, [
-    'pe', 'fullAddAddress', 'fullRemoveAddress', 'addObjectCapture',
-    'removeObjectCapture', 'transitionObjectCapture',
+    'pe', 'fullAddCapture', 'fullRemoveCapture', 'transitionObjectCapture',
   ], 'Candidate proof');
   if (!PARSED_PE_VALUES.has(proof.pe)) throw new TypeError('Candidate proof PE metadata must come from parsePeSections');
-  toAddress(proof.fullAddAddress, 'full add address');
-  toAddress(proof.fullRemoveAddress, 'full remove address');
-  plainObject(proof.addObjectCapture, 'Add object proof');
-  plainObject(proof.removeObjectCapture, 'Remove object proof');
-  plainObject(proof.transitionObjectCapture, 'Transition object proof');
-  return proof;
+  const peIdentityMatches = proof.pe.fileSize === build.executableSize &&
+    proof.pe.executableSha256 === build.executableSha256;
+  if (!peIdentityMatches) {
+    throw new Error('Candidate build size and SHA must exactly match authenticated PE metadata');
+  }
+  const fullAddCapture = validateProofCapture(proof.fullAddCapture, 'Add execute', build, session, true);
+  const fullRemoveCapture = validateProofCapture(proof.fullRemoveCapture, 'Remove execute', build, session, true);
+  const transitionObjectCapture = validateProofCapture(
+    proof.transitionObjectCapture, 'Transition object', build, session, false);
+  const captureIds = [fullAddCapture.captureId, fullRemoveCapture.captureId, transitionObjectCapture.captureId];
+  if (new Set(captureIds).size !== captureIds.length) throw new Error('Proof captures must have distinct capture IDs');
+  return {
+    pe: proof.pe,
+    fullAddCapture,
+    fullRemoveCapture,
+    transitionObjectCapture,
+    buildIdentityPassed: peIdentityMatches && [fullAddCapture, fullRemoveCapture, transitionObjectCapture].every(
+      (capture) => capture.build.executableSize === build.executableSize &&
+        capture.build.executableSha256 === build.executableSha256),
+    sessionIdentityPassed: [fullAddCapture, fullRemoveCapture, transitionObjectCapture].every(
+      (capture) => capture.session.pid === session.pid && capture.session.sessionId === session.sessionId),
+  };
 }
 
 function buildCandidateArtifact(input) {
-  assertExactKeys(input, ['build', 'session', 'tables', 'captures', 'proposedBoard', 'proof', 'gates'],
+  assertExactKeys(input, ['build', 'session', 'tables', 'captures', 'proposedBoard', 'proof'],
     'Candidate input');
   const build = validateBuild(input.build);
   const session = validateSession(input.session);
   const tables = validateTables(input.tables);
   const captures = validateCaptures(input.captures);
   const proposedBoard = validateBoardRvas(input.proposedBoard);
-  const callerGates = validateGates(input.gates);
-  const proof = validateProof(input.proof);
+  const proof = validateProof(input.proof, build, session);
   const moduleBase = session.moduleBase;
 
-  const addRoutine = classifyModuleAddress(proof.fullAddAddress, moduleBase, proof.pe);
-  const removeRoutine = classifyModuleAddress(proof.fullRemoveAddress, moduleBase, proof.pe);
+  const addRoutine = classifyModuleAddress(proof.fullAddCapture.entryAddress, moduleBase, proof.pe);
+  const removeRoutine = classifyModuleAddress(proof.fullRemoveCapture.entryAddress, moduleBase, proof.pe);
   const routinePeSections = addRoutine.executable && removeRoutine.executable &&
     addRoutine.rva === proposedBoard.fullAddRva && removeRoutine.rva === proposedBoard.fullRemoveRva;
-  const addShape = validateObjectShapes(proof.addObjectCapture, { moduleBase, pe: proof.pe });
-  const removeShape = validateObjectShapes(proof.removeObjectCapture, { moduleBase, pe: proof.pe });
+  const addShape = validateObjectShapes(proof.fullAddCapture, { moduleBase, pe: proof.pe });
+  const removeShape = validateObjectShapes(proof.fullRemoveCapture, { moduleBase, pe: proof.pe });
   const argumentShapes = addShape.passed && removeShape.passed;
-  const allObjectCaptures = [proof.addObjectCapture, proof.removeObjectCapture, proof.transitionObjectCapture];
+  const allObjectCaptures = [proof.fullAddCapture, proof.fullRemoveCapture, proof.transitionObjectCapture];
   const vtablePeSections = allObjectCaptures.every((entry) =>
     validateCaptureVtables(entry, moduleBase, proof.pe).passed);
   let vtableTransitionStability = false;
@@ -686,24 +815,53 @@ function buildCandidateArtifact(input) {
     vtableTransitionStability = false;
   }
   const tableAnchors = Object.values(tables).every((table) =>
-    table.passed && table.candidateCount > 0 && table.score > 0 && table.rereadPassed);
+    table.passed && table.candidateCount === 1 && table.score > 0 && table.rereadPassed);
   const addCaptureConsistency = captures.add.writeCount >= 2 && captures.add.executeCount >= 1 && captures.add.consistent;
   const removeCaptureConsistency = captures.remove.writeCount >= 2 && captures.remove.executeCount >= 1 && captures.remove.consistent;
-  const derivedConditions = {
-    buildIdentity: true,
-    sessionIdentity: true,
-    tableAnchors,
-    addCaptureConsistency,
-    removeCaptureConsistency,
-    routinePeSections,
-    argumentShapes,
-    vtablePeSections,
-    vtableTransitionStability,
+  const derivedGates = {
+    buildIdentity: {
+      passed: proof.buildIdentityPassed,
+      detail: `Authenticated PE and all proof captures match executable size ${build.executableSize} and SHA-256 ${build.executableSha256}`,
+    },
+    sessionIdentity: {
+      passed: proof.sessionIdentityPassed,
+      detail: `All proof captures match PID ${session.pid} and host session ${session.sessionId}`,
+    },
+    tableAnchors: {
+      passed: tableAnchors,
+      detail: tableAnchors ? 'All six tables have exactly one positive, reread-verified candidate' :
+        'One or more tables lack exactly one positive, reread-verified candidate',
+    },
+    addCaptureConsistency: {
+      passed: addCaptureConsistency,
+      detail: `Add evidence has ${captures.add.writeCount} write captures, ${captures.add.executeCount} execute captures, consistent=${captures.add.consistent}`,
+    },
+    removeCaptureConsistency: {
+      passed: removeCaptureConsistency,
+      detail: `Remove evidence has ${captures.remove.writeCount} write captures, ${captures.remove.executeCount} execute captures, consistent=${captures.remove.consistent}`,
+    },
+    routinePeSections: {
+      passed: routinePeSections,
+      detail: routinePeSections ? `Add ${addRoutine.rva} and remove ${removeRoutine.rva} entries match executable image sections` :
+        'An executed entry is non-executable or does not equal the proposed operation RVA',
+    },
+    argumentShapes: {
+      passed: argumentShapes,
+      detail: argumentShapes ? 'Add and remove executed entries carry the required RCX/RDX/R8 object shapes' :
+        `Add: ${addShape.detail}; remove: ${removeShape.detail}`,
+    },
+    vtablePeSections: {
+      passed: vtablePeSections,
+      detail: vtablePeSections ? 'All proof vtables are readable with executable sampled entries' :
+        'A proof vtable or sampled entry failed main-module PE checks',
+    },
+    vtableTransitionStability: {
+      passed: vtableTransitionStability,
+      detail: vtableTransitionStability ? 'Wrapper and controller vtable RVAs remain stable across all identity-bound proofs' :
+        'Wrapper or controller vtable RVAs are invalid, mismatched, or unstable',
+    },
   };
-  const gates = REQUIRED_GATE_NAMES.map((name) => {
-    const supplied = callerGates.get(name);
-    return { name, passed: supplied.passed && derivedConditions[name], detail: supplied.detail };
-  });
+  const gates = REQUIRED_GATE_NAMES.map((name) => ({ name, ...derivedGates[name] }));
 
   return {
     schemaVersion: 1,
@@ -719,6 +877,7 @@ function buildCandidateArtifact(input) {
 
 module.exports = {
   REQUIRED_GATE_NAMES,
+  setEvidenceWriteTestHook,
   evidenceDirectory,
   writeEvidence,
   readEvidence,

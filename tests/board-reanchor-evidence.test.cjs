@@ -8,6 +8,7 @@ const test = require('node:test');
 
 const {
   REQUIRED_GATE_NAMES,
+  setEvidenceWriteTestHook,
   evidenceDirectory,
   writeEvidence,
   readEvidence,
@@ -140,6 +141,16 @@ function objectShape(heapOffset = 0n) {
   };
 }
 
+function proofCapture(captureId, heapOffset, pe, entryAddress) {
+  return {
+    captureId,
+    build: { executableSize: pe.fileSize, executableSha256: pe.executableSha256 },
+    session: { pid: 77, sessionId: 'host-start-1' },
+    ...(entryAddress === undefined ? {} : { entryAddress: canonical(entryAddress) }),
+    ...objectShape(heapOffset),
+  };
+}
+
 function tableSummaries() {
   return Object.fromEntries(['4168', '4176', '4190', '4251', '5790', '5847'].map((id) => [id, {
     passed: true,
@@ -152,7 +163,7 @@ function tableSummaries() {
 function candidateInput() {
   const pe = parsePeSections(peFixture());
   return {
-    build: { label: 'Patch 1', executableSize: 123, executableSha256: SHA },
+    build: { label: 'Patch 1', executableSize: pe.fileSize, executableSha256: pe.executableSha256 },
     session: { pid: 77, sessionId: 'host-start-1', moduleBase: canonical(MODULE_BASE), capturedAt: '2026-07-16T12:00:00.000Z' },
     tables: tableSummaries(),
     captures: {
@@ -167,13 +178,10 @@ function candidateInput() {
     },
     proof: {
       pe,
-      fullAddAddress: canonical(MODULE_BASE + 0x1100n),
-      fullRemoveAddress: canonical(MODULE_BASE + 0x1200n),
-      addObjectCapture: objectShape(),
-      removeObjectCapture: objectShape(0x100000n),
-      transitionObjectCapture: objectShape(0x200000n),
+      fullAddCapture: proofCapture('add-execute', 0n, pe, MODULE_BASE + 0x1100n),
+      fullRemoveCapture: proofCapture('remove-execute', 0x100000n, pe, MODULE_BASE + 0x1200n),
+      transitionObjectCapture: proofCapture('transition', 0x200000n, pe),
     },
-    gates: REQUIRED_GATE_NAMES.map((name) => ({ name, passed: true, detail: `${name} passed` })),
   };
 }
 
@@ -261,10 +269,41 @@ test('rename failure removes only the owned temp and preserves the existing dest
   assert.deepEqual(fs.readdirSync(evidenceDirectory(sha)), ['blocked.json']);
 });
 
+test('parent swap after exclusive temp open writes zero raw bytes outside containment', (t) => {
+  const sha = shaFor('parent-swap');
+  cleanupSha(t, sha);
+  const envelope = evidenceEnvelope(sha);
+  const shaDirectory = evidenceDirectory(sha);
+  const parent = path.join(shaDirectory, 'captures');
+  const movedParent = path.join(shaDirectory, 'captures-moved');
+  const outside = path.join(EVIDENCE_ROOT, `${sha}-OUTSIDE`);
+  fs.mkdirSync(parent, { recursive: true });
+  fs.mkdirSync(outside, { recursive: true });
+  t.after(() => {
+    try {
+      if (typeof setEvidenceWriteTestHook === 'function') setEvidenceWriteTestHook(null);
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+  setEvidenceWriteTestHook(({ temporaryPath }) => {
+    assert.equal(path.dirname(temporaryPath), parent);
+    fs.renameSync(parent, movedParent);
+    fs.symlinkSync(outside, parent, process.platform === 'win32' ? 'junction' : 'dir');
+  });
+
+  assert.throws(() => writeEvidence('captures/swap.json', envelope), /junction|real path|containment|EPERM/i);
+  assert.deepEqual(fs.readdirSync(outside), []);
+  assert.deepEqual(fs.readdirSync(fs.existsSync(movedParent) ? movedParent : parent), []);
+});
+
 test('parsePeSections classifies valid aligned sections and rejects malformed layouts', () => {
   const valid = peFixture();
   const pe = parsePeSections(valid);
   assert.equal(pe.sizeOfImage, 0x3000);
+  assert.equal(pe.fileSize, valid.length);
+  assert.equal(pe.executableSha256, crypto.createHash('sha256').update(valid).digest('hex').toUpperCase());
+  assert.equal(Object.isFrozen(pe), true);
   assert.deepEqual(pe.sections.map(({ name, readable, executable }) => ({ name, readable, executable })), [
     { name: '.text', readable: true, executable: true },
     { name: '.rdata', readable: true, executable: false },
@@ -279,12 +318,20 @@ test('parsePeSections classifies valid aligned sections and rejects malformed la
   misaligned.writeUInt32LE(0x1800, 0x98 + 0xF0 + 40 + 12);
   const badAlignment = Buffer.from(valid);
   badAlignment.writeUInt32LE(0x300, 0x98 + 36);
+  const headersLargerThanImage = Buffer.alloc(0x4000);
+  valid.copy(headersLargerThanImage);
+  headersLargerThanImage.writeUInt32LE(0x4000, 0x98 + 60);
+  const headersOverlapSection = Buffer.alloc(0x1400);
+  valid.copy(headersOverlapSection);
+  headersOverlapSection.writeUInt32LE(0x1200, 0x98 + 60);
   for (const [image, message] of [
     [truncated, /raw range|truncated/i],
     [rawOverlap, /raw.*overlap/i],
     [virtualOverlap, /virtual.*overlap/i],
     [misaligned, /section alignment/i],
     [badAlignment, /file alignment/i],
+    [headersLargerThanImage, /headers.*image/i],
+    [headersOverlapSection, /header image range.*overlap/i],
   ]) assert.throws(() => parsePeSections(image), message);
 });
 
@@ -334,6 +381,27 @@ test('object validation requires integer expected and captured membership, Team,
   }
 });
 
+test('object validation rejects zero and mutually contradictory object or pointer addresses', () => {
+  const pe = parsePeSections(peFixture());
+  for (const mutate of [
+    (shape) => { shape.arguments.rcx = '0x0'; shape.controller.address = '0x0'; },
+    (shape) => { shape.arguments.rdx = '0x0'; shape.pointerCells.team.address = '0x0'; },
+    (shape) => {
+      shape.team.address = shape.recruit.address;
+      shape.pointerCells.team.value = shape.recruit.address;
+    },
+    (shape) => {
+      shape.pointerCells.team.address = shape.pointerCells.recruit.address;
+      shape.arguments.rdx = shape.arguments.r8;
+    },
+    (shape) => { shape.controller.vtableAddress = shape.team.vtableAddress; },
+  ]) {
+    const shape = objectShape();
+    mutate(shape);
+    assert.equal(validateObjectShapes(shape, { moduleBase: MODULE_BASE, pe }).passed, false);
+  }
+});
+
 test('wrong arguments and PE-invalid vtables are decisive object-shape rejections', () => {
   const pe = parsePeSections(peFixture());
   const lowLevel = objectShape();
@@ -365,14 +433,37 @@ test('buildCandidateArtifact requires exact schema, exact gates, and independent
   assert.deepEqual(candidate.proposedBoard, input.proposedBoard);
   assert.deepEqual(candidate.gates.map(({ name }) => name), REQUIRED_GATE_NAMES);
   assert.equal(candidate.gates.every((gate) => typeof gate.passed === 'boolean'), true);
+  assert.equal(candidate.gates.every((gate) => gate.detail.length > 0 && !gate.detail.includes('caller')), true);
   assert.equal(candidate.passed, true);
 
   const nonExecutableRoutine = candidateInput();
-  nonExecutableRoutine.proof.fullAddAddress = canonical(MODULE_BASE + 0x2100n);
+  nonExecutableRoutine.proof.fullAddCapture.entryAddress = canonical(MODULE_BASE + 0x2100n);
   assert.equal(buildCandidateArtifact(nonExecutableRoutine).passed, false);
   const wrongArguments = candidateInput();
-  wrongArguments.proof.addObjectCapture.arguments.rcx = wrongArguments.proof.addObjectCapture.team.address;
+  wrongArguments.proof.fullAddCapture.arguments.rcx = wrongArguments.proof.fullAddCapture.team.address;
   assert.equal(buildCandidateArtifact(wrongArguments).passed, false);
+  const wrongEntry = candidateInput();
+  wrongEntry.proof.fullAddCapture.entryAddress = canonical(MODULE_BASE + 0x1200n);
+  const wrongEntryCandidate = buildCandidateArtifact(wrongEntry);
+  assert.equal(wrongEntryCandidate.passed, false);
+  assert.equal(wrongEntryCandidate.gates.find(({ name }) => name === 'routinePeSections').passed, false);
+  const ambiguousTable = candidateInput();
+  ambiguousTable.tables['4168'].candidateCount = 2;
+  assert.equal(buildCandidateArtifact(ambiguousTable).passed, false);
+});
+
+test('buildCandidateArtifact binds authenticated PE and every proof capture to build and session identity', () => {
+  const mutateAndReject = (mutate, message) => {
+    const input = candidateInput();
+    mutate(input);
+    assert.throws(() => buildCandidateArtifact(input), message);
+  };
+  mutateAndReject((input) => { input.build.executableSize += 1; }, /authenticated PE.*size|build.*PE/i);
+  mutateAndReject((input) => { input.build.executableSha256 = 'A'.repeat(64); }, /authenticated PE.*SHA|build.*PE/i);
+  mutateAndReject((input) => { input.proof.fullAddCapture.session.pid = 78; }, /proof capture.*PID|session identity/i);
+  mutateAndReject((input) => { input.proof.fullRemoveCapture.session.sessionId = 'other'; }, /proof capture.*session|session identity/i);
+  mutateAndReject((input) => { input.proof.transitionObjectCapture.build.executableSha256 = 'A'.repeat(64); }, /proof capture.*SHA|build identity/i);
+  mutateAndReject((input) => { input.proof.fullAddCapture.build.executableSize += 1; }, /proof capture.*size|build identity/i);
 });
 
 test('buildCandidateArtifact rejects invalid metadata, zero RVAs, incomplete summaries, proofs, and gate sets', () => {
@@ -392,8 +483,9 @@ test('buildCandidateArtifact rejects invalid metadata, zero RVAs, incomplete sum
   mutateAndReject((input) => { input.tables.extra = input.tables['4168']; }, /exactly six table/i);
   mutateAndReject((input) => { input.captures.add.writeCount = -1; }, /capture summary/i);
   mutateAndReject((input) => { delete input.proof.pe; }, /proof/i);
+  mutateAndReject((input) => { delete input.proof.fullAddCapture; }, /proof/i);
   mutateAndReject((input) => { input.unreviewedEvidence = true; }, /candidate input.*exactly/i);
-  mutateAndReject((input) => { input.gates.pop(); }, /required gate/i);
-  mutateAndReject((input) => { input.gates.push({ name: 'extra', passed: true, detail: 'x' }); }, /required gate/i);
-  mutateAndReject((input) => { input.gates[1].name = input.gates[0].name; }, /duplicate|required gate/i);
+  mutateAndReject((input) => {
+    input.gates = REQUIRED_GATE_NAMES.map((name) => ({ name, passed: true, detail: 'caller says pass' }));
+  }, /candidate input.*exactly/i);
 });
