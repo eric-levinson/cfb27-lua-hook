@@ -45,10 +45,10 @@ test('watch log parser requires complete zero-drop evidence', () => {
 
 test('session identity is stable and sensitive to host start evidence', () => {
   const input = { pid: 77, creationDate: '20260716120000.000000-300',
-    hostVersion: '0.2.0-dev.2', readyTimestampMs: 1234 };
+    hostVersion: '0.2.0-dev.2' };
   assert.match(sessionId(input), /^[0-9A-F]{64}$/);
   assert.equal(sessionId(input), sessionId({ ...input }));
-  assert.notEqual(sessionId(input), sessionId({ ...input, readyTimestampMs: 1235 }));
+  assert.notEqual(sessionId(input), sessionId({ ...input, creationDate: '20260716120001.000000-300' }));
 });
 
 test('board slot lookup follows membership to the recruit target', () => {

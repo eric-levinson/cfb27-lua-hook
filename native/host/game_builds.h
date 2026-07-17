@@ -13,6 +13,12 @@ struct BoardLayout {
   std::uintptr_t recruiting_controller_vtable_rva{};
   std::uintptr_t full_add_rva{};
   std::uintptr_t full_remove_rva{};
+  std::uint32_t recruit_table_id{};
+  std::uint32_t team_table_id{};
+  std::uint32_t controller_descriptor_table_id{};
+  std::uint32_t user_target_table_id{};
+  std::uint32_t active_pitch_table_id{};
+  std::uint32_t membership_table_id{};
 };
 
 struct Build {

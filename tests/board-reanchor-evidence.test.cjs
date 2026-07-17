@@ -137,7 +137,7 @@ function objectShape(heapOffset = 0n) {
       vtableAddress: canonical(wrapperVtableAddress),
       vtableEntries: executableEntries.map(canonical),
     },
-    expected: { membershipRow: 11, teamRow: 22, recruitRow: 33 },
+    expected: { membershipRow: 11, teamRow: 22, recruitRow: 33, recruitTableId: 4269 },
   };
 }
 
@@ -175,6 +175,12 @@ function candidateInput() {
       recruitingControllerVtableRva: '0x2200',
       fullAddRva: '0x1100',
       fullRemoveRva: '0x1200',
+      recruitTableId: '0x10AD',
+      teamTableId: '0x18BE',
+      controllerDescriptorTableId: '0x138B',
+      userTargetTableId: '0x1048',
+      activePitchTableId: '0x169E',
+      membershipTableId: '0x16D7',
     },
     proof: {
       pe,

@@ -60,12 +60,18 @@ function isFreeRow(table, data, row) {
 function isContentRow(table, data, row) {
   const offset = row * table.stride;
   const first = data.readUInt32LE(offset);
-  if (table.id === 4168) return expectedRef(data.readUInt32LE(offset + 12), 4269);
-  if (table.id === 4251) return expectedRef(first, 5847, 138);
+  if (table.id === 4168) {
+    const ref = decodeRef(data.readUInt32LE(offset + 12));
+    return ref.tableId > 0;
+  }
+  if (table.id === 4251) {
+    const ref = decodeRef(first);
+    return ref.tableId > 0 && ref.row < 138;
+  }
   if (table.id === 5790) return expectedRef(first, 4190, 9380);
   if (table.id === 5847) {
     const ref = decodeRef(first);
-    return (ref.tableId === 4168 || ref.tableId === 4288) && ref.row < 0x20000;
+    return ref.tableId > 0 && ref.row < 0x20000;
   }
   return false;
 }
@@ -218,12 +224,57 @@ function findUserBoard(tables) {
   if (!userRows || !boardIndex || !membership) {
     throw new Error('User rows, board index, and membership tables are required');
   }
+  const membershipTableIds = new Set();
+  for (let boardRow = 0; boardRow < boardIndex.capacity; boardRow += 1) {
+    const value = boardIndex.data.readUInt32LE(boardRow * boardIndex.stride);
+    const ref = decodeRef(value);
+    if (ref.tableId > 0 && ref.row < membership.capacity) membershipTableIds.add(ref.tableId);
+  }
+  if (membershipTableIds.size !== 1) {
+    throw new Error('Board index does not identify one stable membership table ID');
+  }
+  const membershipTableId = [...membershipTableIds][0];
+  const userTableIds = new Set();
+  for (let row = 0; row < membership.capacity; row += 1) {
+    const offset = row * membership.stride;
+    for (let slot = 0; slot < membership.words; slot += 1) {
+      const ref = decodeRef(membership.data.readUInt32LE(offset + slot * 4));
+      if (ref.tableId > 0 && ref.row < userRows.capacity && isContentRow(userRows, userRows.data, ref.row)) {
+        userTableIds.add(ref.tableId);
+      }
+    }
+  }
+  if (userTableIds.size !== 1) {
+    throw new Error('Membership rows contain mixed or out-of-range user-board table IDs');
+  }
+  const userTableId = [...userTableIds][0];
+  const recruitTableIds = new Set();
+  const activePitchTableIds = new Set();
+  for (let row = 0; row < membership.capacity; row += 1) {
+    const offset = row * membership.stride;
+    for (let slot = 0; slot < membership.words; slot += 1) {
+      const ref = decodeRef(membership.data.readUInt32LE(offset + slot * 4));
+      if (ref.tableId !== userTableId || ref.row >= userRows.capacity) continue;
+      const recruitRef = decodeRef(userRows.data.readUInt32LE(ref.row * userRows.stride + 12));
+      if (recruitRef.tableId > 0) recruitTableIds.add(recruitRef.tableId);
+      const pitchRef = decodeRef(userRows.data.readUInt32LE(ref.row * userRows.stride + 16));
+      if (pitchRef.tableId > 0) activePitchTableIds.add(pitchRef.tableId);
+    }
+  }
+  if (recruitTableIds.size !== 1) {
+    throw new Error('User-board rows contain mixed or missing recruit table IDs');
+  }
+  const recruitTableId = [...recruitTableIds][0];
+  if (activePitchTableIds.size !== 1) {
+    throw new Error('User-board rows contain mixed or missing active-pitch table IDs');
+  }
+  const activePitchTableId = [...activePitchTableIds][0];
   const candidates = [];
   for (let boardRow = 0; boardRow < boardIndex.capacity; boardRow += 1) {
     const boardOffset = boardRow * boardIndex.stride;
     const boardRefValue = boardIndex.data.readUInt32LE(boardOffset);
     const boardRef = decodeRef(boardRefValue);
-    if (boardRef.tableId !== 5847 || boardRef.row >= membership.capacity) continue;
+    if (boardRef.tableId !== membershipTableId || boardRef.row >= membership.capacity) continue;
 
     const membershipOffset = boardRef.row * membership.stride;
     let userRefs = 0;
@@ -241,11 +292,11 @@ function findUserBoard(tables) {
       if (firstFreeSlot >= 0) compact = false;
       occupied += 1;
       const ref = decodeRef(value);
-      if (ref.tableId === 4168) {
+      if (ref.tableId === userTableId) {
         userRefs += 1;
         if (ref.row >= userRows.capacity) invalidUserRefs += 1;
       }
-      if (ref.tableId === 4288) cpuRefs += 1;
+      if (ref.tableId !== userTableId) cpuRefs += 1;
     }
     candidates.push({
       boardRow,
@@ -269,11 +320,11 @@ function findUserBoard(tables) {
     candidate.compact && candidate.invalidUserRefs === 0 &&
     candidate.occupied === candidate.userRefs);
   if (eligibleCandidates.length > 1) {
-    throw new Error('Could not uniquely identify the user board from table 4168 membership references');
+    throw new Error('Could not uniquely identify the user board from user-record membership references');
   }
   if (eligibleCandidates.length === 0) {
     if (userCandidates.some((candidate) => candidate.invalidUserRefs > 0)) {
-      throw new Error('User board membership contains an out-of-range table 4168 reference');
+      throw new Error('User board membership contains an out-of-range user-record reference');
     }
     if (userCandidates.some((candidate) => candidate.occupied !== candidate.userRefs)) {
       throw new Error('User board membership is not user-only and contains a mixed table reference');
@@ -281,9 +332,10 @@ function findUserBoard(tables) {
     if (userCandidates.some((candidate) => !candidate.compact)) {
       throw new Error('Could not identify a compact user board membership row');
     }
-    throw new Error('Could not uniquely identify the user board from table 4168 membership references');
+    throw new Error('Could not uniquely identify the user board from user-record membership references');
   }
-  const selected = eligibleCandidates[0];
+  const selected = { ...eligibleCandidates[0], membershipTableId, userTableId,
+    recruitTableId, activePitchTableId };
   if (selected.firstFreeSlot < 0) throw new Error('The active recruiting board has no free membership slot');
   return { selected, candidates: candidates.slice(0, 8) };
 }

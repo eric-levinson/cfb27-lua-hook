@@ -19,8 +19,12 @@ int main() {
       249801616ULL,
       "A048578530F7ED5967DF38803B63AD9B9F04FC71287F1E151C901A94AB240BFD");
   if (!patch1 || patch1->label != "patch-1-2026-07-16" ||
-      patch1->support != Support::kDiagnostic || patch1->board ||
-      IsCertified(patch1) || !IsDiagnosticOrCertified(patch1)) return 2;
+      patch1->support != Support::kCertified || !patch1->board ||
+      patch1->board->full_add_rva != 0x810AC70ULL ||
+      patch1->board->full_remove_rva != 0x8168AA0ULL ||
+      patch1->board->recruit_table_id != 0x10B1 ||
+      patch1->board->team_table_id != 0x18B1 ||
+      !IsCertified(patch1) || !IsDiagnosticOrCertified(patch1)) return 2;
 
   if (FindBuild(
           247845777ULL,

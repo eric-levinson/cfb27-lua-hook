@@ -100,7 +100,10 @@ async function queryProcess(pid, execFileImpl = execFile) {
 }
 
 async function anticheatProcesses(execFileImpl = execFile) {
-  const script = "$ErrorActionPreference='Stop'; @(Get-Process | Where-Object { $_.ProcessName -match 'Javelin|EAAntiCheat|EAAntiCheat.GameService' } | Select-Object Id,ProcessName) | ConvertTo-Json -Compress";
+  const script = "$ErrorActionPreference='Stop'; @(Get-CimInstance Win32_Process | " +
+    "Where-Object { $_.Name -match 'Javelin|EAAntiCheat|EAAntiCheat.GameService' } | " +
+    "ForEach-Object { $bytes=$null; if ($_.ExecutablePath) { try { $bytes=(Get-Item -LiteralPath $_.ExecutablePath).Length } catch {} }; " +
+    "if ($null -eq $bytes -or $bytes -ge 1MB) { [pscustomobject]@{ Id=$_.ProcessId; ProcessName=$_.Name; ExecutablePath=$_.ExecutablePath; Bytes=$bytes } } }) | ConvertTo-Json -Compress";
   const { stdout } = await execFileImpl(POWERSHELL,
     ['-NoProfile', '-NonInteractive', '-Command', script],
     { windowsHide: true, encoding: 'utf8' });
@@ -188,8 +191,8 @@ async function moduleBase(client) {
   return canonical(entry.message.slice(prefix.length + 1));
 }
 
-function sessionId({ pid, creationDate, hostVersion, readyTimestampMs }) {
-  return sha256Buffer(Buffer.from(`${pid}|${creationDate}|${hostVersion}|${readyTimestampMs}`, 'utf8'));
+function sessionId({ pid, creationDate, hostVersion }) {
+  return sha256Buffer(Buffer.from(`${pid}|${creationDate}|${hostVersion}`, 'utf8'));
 }
 
 function evidenceIdentity(runtime) {
@@ -227,16 +230,13 @@ async function establishRuntime(options, dependencies = {}) {
   const hello = await client.hello();
   const status = await client.status();
   if (!status.ready || !hello.capabilities.includes('researchWatch')) throw new Error('Research-capable host is not ready');
-  const logs = (await client.getLogs({ limit: 256 })).logs;
-  const ready = logs.findLast((entry) => entry.message === 'CFB27 Lua host ready');
-  if (!ready) throw new Error('Host-ready session marker is absent');
   const base = await moduleBase(client);
   const runtime = {
     build: { label: build.label, executableSize: build.size, executableSha256: build.sha256 },
     session: {
       pid: game.pid,
       sessionId: sessionId({ pid: game.pid, creationDate: process.creationDate,
-        hostVersion: hello.hostVersion, readyTimestampMs: ready.timestampMs }),
+        hostVersion: hello.hostVersion }),
       moduleBase: base,
       capturedAt: new Date().toISOString(),
     },
@@ -268,6 +268,43 @@ async function backupSave(savePath, runtime) {
   return { source, sourceHash, backupPath: target, backupHash, size: stat.size, verified: true };
 }
 
+function archiveStaleSession(runtime) {
+  const directory = evidenceDirectory(runtime.build.executableSha256);
+  const preflightPath = path.join(directory, 'preflight.json');
+  if (!fs.existsSync(preflightPath)) return null;
+  const preflightStatus = fs.lstatSync(preflightPath);
+  if (!preflightStatus.isFile() || preflightStatus.isSymbolicLink()) {
+    throw new Error('Existing preflight evidence is not a regular file');
+  }
+  const previous = JSON.parse(fs.readFileSync(preflightPath, 'utf8'));
+  const previousSession = previous?.session?.sessionId;
+  if (previous?.session?.pid === runtime.session.pid &&
+      previousSession === runtime.session.sessionId &&
+      previous?.build?.executableSha256 === runtime.build.executableSha256) {
+    return previous;
+  }
+  if (typeof previousSession !== 'string' || !/^[0-9A-F]{64}$/.test(previousSession)) {
+    throw new Error('Existing preflight has no valid session identity');
+  }
+  const archiveRoot = path.join(directory, 'archive');
+  if (fs.existsSync(archiveRoot)) {
+    const status = fs.lstatSync(archiveRoot);
+    if (!status.isDirectory() || status.isSymbolicLink()) {
+      throw new Error('Evidence archive is not a regular directory');
+    }
+  } else {
+    fs.mkdirSync(archiveRoot);
+  }
+  const sessionArchive = path.join(archiveRoot, previousSession);
+  fs.mkdirSync(sessionArchive, { recursive: false });
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    if (entry.name === 'archive' || entry.name === 'save-backup') continue;
+    if (entry.isSymbolicLink()) throw new Error(`Refusing to archive evidence symlink: ${entry.name}`);
+    fs.renameSync(path.join(directory, entry.name), path.join(sessionArchive, entry.name));
+  }
+  return null;
+}
+
 async function locateAll(client, log = (text) => process.stderr.write(text)) {
   const located = [];
   for (const table of TABLES.values()) located.push(await locateTable(client, table, { log }));
@@ -290,7 +327,25 @@ function serializeTables(result) {
   };
 }
 
-async function hydrateTables(client, stored) {
+function recoverEmptyStoredBoard(tables, storedBoard) {
+  if (!storedBoard || !Number.isSafeInteger(storedBoard.boardRow) ||
+      !Number.isSafeInteger(storedBoard.teamRow)) return null;
+  const boardIndex = tables.get(4251);
+  const membership = tables.get(5847);
+  if (storedBoard.boardRow < 0 || storedBoard.boardRow >= boardIndex.capacity ||
+      storedBoard.teamRow < 0 || storedBoard.teamRow >= membership.capacity) return null;
+  const boardRefValue = boardIndex.data.readUInt32LE(storedBoard.boardRow * boardIndex.stride);
+  const boardRef = decodeRef(boardRefValue);
+  if (boardRef.tableId <= 0 || boardRef.row !== storedBoard.teamRow) return null;
+  const offset = storedBoard.teamRow * membership.stride;
+  for (let slot = 0; slot < membership.words; slot += 1) {
+    if (membership.data.readUInt32LE(offset + slot * 4) !== 0) return null;
+  }
+  return { selected: { ...storedBoard, boardRefValue, occupied: 0, userRefs: 0, cpuRefs: 0,
+    invalidUserRefs: 0, firstFreeSlot: 0, compact: true }, candidates: [] };
+}
+
+async function hydrateTables(client, stored, { requireBoard = true } = {}) {
   const located = [];
   for (const [idText, saved] of Object.entries(stored.tables)) {
     const spec = TABLES.get(Number(idText));
@@ -304,7 +359,15 @@ async function hydrateTables(client, stored) {
     located.push(table);
   }
   const tables = new Map(located.map((entry) => [entry.id, entry]));
-  return { located, tables, board: findUserBoard(tables) };
+  if (!requireBoard) return { located, tables, board: null };
+  let board;
+  try {
+    board = findUserBoard(tables);
+  } catch (error) {
+    board = recoverEmptyStoredBoard(tables, stored.userBoard);
+    if (!board) throw error;
+  }
+  return { located, tables, board };
 }
 
 function findBoardSlot(tables, teamRow, recruitRow) {
@@ -316,9 +379,9 @@ function findBoardSlot(tables, teamRow, recruitRow) {
   const offset = teamRow * membership.stride;
   for (let slot = 0; slot < membership.words; slot += 1) {
     const membershipRef = decodeRef(membership.data.readUInt32LE(offset + slot * 4));
-    if (membershipRef.tableId !== 4168 || membershipRef.row >= targets.capacity) continue;
+    if (membershipRef.tableId <= 0 || membershipRef.row >= targets.capacity) continue;
     const recruitRef = decodeRef(targets.data.readUInt32LE(membershipRef.row * targets.stride + 12));
-    if (recruitRef.tableId === 4269 && recruitRef.row === recruitRow) return slot;
+    if (recruitRef.tableId > 0 && recruitRef.row === recruitRow) return slot;
   }
   throw new Error(`Recruit row ${recruitRow} is not on membership row ${teamRow}`);
 }
@@ -330,11 +393,35 @@ function armScript(watches, execute) {
   return `cfb.unwatch()\n${calls}`;
 }
 
-async function promptAction(message, input = process.stdin, output = process.stdout) {
-  if (!input.isTTY) throw new Error('Interactive vanilla action confirmation requires a TTY');
-  const rl = readline.createInterface({ input, output });
-  try { await rl.question(`${message}\nPress Enter only after the vanilla UI action finishes... `); }
-  finally { rl.close(); }
+async function watchState(client) {
+  const prefix = `REANCHOR_WAIT_${crypto.randomBytes(8).toString('hex').toUpperCase()}`;
+  await client.evaluateLua(`local h=cfb.watch_hits(false); cfb.log(${JSON.stringify(prefix)}.."|"..#h.."|"..(h.dropped or 0))`);
+  const logs = (await client.getLogs({ limit: 64 })).logs;
+  const entry = logs.findLast((item) => item.message.startsWith(`${prefix}|`));
+  if (!entry) throw new Error('Could not poll the armed research watch');
+  const [, countText, droppedText] = entry.message.split('|');
+  return { count: Number(countText), dropped: Number(droppedText) };
+}
+
+async function promptAction(message, client, input = process.stdin, output = process.stdout) {
+  output.write(`${message}\n`);
+  if (input.isTTY) {
+    const rl = readline.createInterface({ input, output });
+    try { await rl.question('Press Enter only after the vanilla UI action finishes... '); }
+    finally { rl.close(); }
+    return;
+  }
+  output.write('Watch armed; waiting up to 120 seconds for the vanilla UI action...\n');
+  for (let attempt = 0; attempt < 240; attempt += 1) {
+    const state = await watchState(client);
+    if (state.dropped !== 0) throw new Error(`Research watch dropped ${state.dropped} hits`);
+    if (state.count > 0) {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error('Timed out waiting for the vanilla UI action');
 }
 
 async function collectWatch(client, prefix) {
@@ -357,8 +444,21 @@ async function descriptorTableId(client, descriptor) {
   return Number((await readQword(client, descriptor + 40n)) >> 32n);
 }
 
+async function readLuaBytes(client, address, length) {
+  const prefix = `REANCHOR_BYTES_${crypto.randomBytes(8).toString('hex').toUpperCase()}`;
+  await client.evaluateLua(`local s='' for i=0,${length - 1} do s=s..string.format('%02X',cfb.read_u8(${luaHex(address)}+i)) end cfb.log(${JSON.stringify(prefix)}..'|'..s)`);
+  const logs = (await client.getLogs({ limit: 64 })).logs;
+  const entry = logs.findLast((item) => item.message.startsWith(`${prefix}|`));
+  if (!entry) throw new Error('Could not collect executable-memory bytes');
+  const bytesHex = entry.message.slice(prefix.length + 1);
+  if (!new RegExp(`^[0-9A-F]{${length * 2}}$`).test(bytesHex)) {
+    throw new Error('Executable-memory byte capture was malformed');
+  }
+  return Buffer.from(bytesHex, 'hex');
+}
+
 async function vtableEntries(client, address) {
-  const bytes = await readBytes(client, address, 16);
+  const bytes = await readLuaBytes(client, address, 16);
   return [canonical(bytes.readBigUInt64LE(0)), canonical(bytes.readBigUInt64LE(8))];
 }
 
@@ -378,6 +478,7 @@ async function enrichExecuteHit(client, hit, expected, runtime, captureId) {
   const wrapperVtable = team.readBigUInt64LE(0);
   const recruitVtable = recruit.readBigUInt64LE(0);
   const membershipRow = Number(controller.readBigUInt64LE(8));
+  const teamRow = Number(team.readBigUInt64LE(24));
   const boardStore = controller.readBigUInt64LE(0x138);
   await readBytes(client, boardStore, 8);
   return {
@@ -401,7 +502,7 @@ async function enrichExecuteHit(client, hit, expected, runtime, captureId) {
     team: {
       address: canonical(teamAddress), readable: true,
       descriptorTableId: await descriptorTableId(client, teamDescriptor),
-      row: Number(team.readBigUInt64LE(24)), field10Readable: true, field18Readable: true,
+      row: teamRow, field10Readable: true, field18Readable: true,
       vtableAddress: canonical(wrapperVtable), vtableEntries: await vtableEntries(client, wrapperVtable),
     },
     recruit: {
@@ -410,8 +511,8 @@ async function enrichExecuteHit(client, hit, expected, runtime, captureId) {
       row: Number(recruit.readBigUInt64LE(24)), field10Readable: true, field18Readable: true,
       vtableAddress: canonical(recruitVtable), vtableEntries: await vtableEntries(client, recruitVtable),
     },
-    expected: { membershipRow: expected.membershipRow, teamRow: expected.teamRow,
-      recruitRow: expected.recruitRow },
+    expected: { membershipRow: expected.membershipRow, teamRow,
+      recruitRow: expected.recruitRow, recruitTableId: expected.recruitTableId },
   };
 }
 
@@ -429,7 +530,15 @@ async function commandPreflight(options, dependencies) {
       runtime.hello.writesAllowed !== false || runtime.status.writesAllowed !== false) {
     throw new Error('Preflight requires an exact diagnostic host with writes disabled');
   }
+  const existing = archiveStaleSession(runtime);
   const saveBackup = await backupSave(options.save, runtime);
+  if (existing) {
+    if (existing.saveBackup?.verified !== true || existing.saveBackup.sourceHash !== saveBackup.sourceHash ||
+        existing.saveBackup.backupHash !== saveBackup.backupHash) {
+      throw new Error('Existing preflight does not match the selected verified save backup');
+    }
+    return existing;
+  }
   const record = envelope(runtime, {
     process: { path: runtime.process.path, creationDate: runtime.process.creationDate },
     host: { version: runtime.hello.hostVersion, supportedBuild: runtime.hello.supportedBuild,
@@ -474,11 +583,11 @@ async function commandWriteCapture(options, dependencies, operation) {
   }
   await runtime.client.evaluateLua(armScript(watches, false));
   await (dependencies.promptAction || promptAction)(
-    `Perform ONE vanilla ${operation.toUpperCase()} for recruit row ${options.recruitRow} now.`);
+    `Perform ONE vanilla ${operation.toUpperCase()} for recruit row ${options.recruitRow} now.`, runtime.client);
   const captureId = `${operation}-write-${options.capture}`;
   const prefix = `REANCHOR_${runtime.session.sessionId.slice(0, 12)}_${captureId.toUpperCase()}`;
   const hits = await collectWatch(runtime.client, prefix);
-  await hydrateTables(runtime.client, stored);
+  await hydrateTables(runtime.client, stored, { requireBoard: false });
   const record = envelope(runtime, { captureId, operation, recruitRow: options.recruitRow,
     teamRow, hits, postconditionVerified: true });
   writeEvidence(`captures/${captureId}.json`, record);
@@ -488,7 +597,80 @@ async function commandWriteCapture(options, dependencies, operation) {
 async function rankedCandidates(operation, runtime, identity) {
   const captures = [1, 2].map((index) => readEvidence(`captures/${operation}-write-${index}.json`, identity));
   const pe = parsePeSections(fs.readFileSync(runtime.executable));
-  return rankRoutineCandidates(captures, { moduleBase: runtime.session.moduleBase, pe });
+  const unwindCandidates = rankRoutineCandidates(captures, { moduleBase: runtime.session.moduleBase, pe });
+  const calls = await directCallCandidates(runtime.client, captures, runtime, pe);
+  const merged = new Map(unwindCandidates.map((candidate) => [candidate.address, candidate]));
+  for (const candidate of calls) {
+    const existing = merged.get(candidate.address);
+    if (!existing || candidate.score > existing.score) merged.set(candidate.address, candidate);
+  }
+  return [...merged.values()].sort((left, right) => right.score - left.score ||
+    (BigInt(left.address) < BigInt(right.address) ? -1 : 1));
+}
+
+function prioritizeExecuteCandidates(operation, candidates) {
+  const manifest = loadManifest(MANIFEST_PATH);
+  const prior = [...manifest.builds].reverse().find((build) => build.support === 'certified' && build.board);
+  const key = operation === 'add' ? 'fullAddRva' : 'fullRemoveRva';
+  if (!prior) return candidates;
+  const target = BigInt(prior.board[key]);
+  const distance = (candidate) => {
+    const value = BigInt(candidate.rva);
+    return value >= target ? value - target : target - value;
+  };
+  return [...candidates].sort((left, right) => {
+    const leftDistance = distance(left);
+    const rightDistance = distance(right);
+    if (leftDistance !== rightDistance) return leftDistance < rightDistance ? -1 : 1;
+    return right.score - left.score;
+  });
+}
+
+function captureStackAddresses(capture, runtime, pe) {
+  const addresses = new Set();
+  for (const hit of capture.hits || []) {
+    for (const address of hit.stackReturnAddresses || []) {
+      const classification = classifyModuleAddress(address, runtime.session.moduleBase, pe);
+      if (classification.insideImage && classification.executable) addresses.add(classification.address);
+    }
+  }
+  return addresses;
+}
+
+async function directCallCandidates(client, captures, runtime, pe) {
+  const perCapture = captures.map((capture) => captureStackAddresses(capture, runtime, pe));
+  const common = [...perCapture[0]].filter((address) => perCapture[1].has(address)).slice(0, 128);
+  if (common.length === 0) return [];
+  const prefix = `REANCHOR_CALLS_${crypto.randomBytes(8).toString('hex').toUpperCase()}`;
+  const values = common.map((address) => luaHex(BigInt(address))).join(',');
+  await client.evaluateLua(`local p=${JSON.stringify(prefix)} local a={${values}} ` +
+    "for i,v in ipairs(a) do local s='' for j=-5,-1 do s=s..string.format('%02X',cfb.read_u8(v+j)) end cfb.log(p..'|'..i..'|'..s) end");
+  const logs = (await client.getLogs({ limit: 256 })).logs;
+  const bytesByIndex = new Map();
+  for (const entry of logs) {
+    if (!entry.message.startsWith(`${prefix}|`)) continue;
+    const [, indexText, bytesHex] = entry.message.split('|');
+    const index = Number(indexText);
+    if (Number.isSafeInteger(index) && /^[0-9A-F]{10}$/.test(bytesHex)) {
+      bytesByIndex.set(index, Buffer.from(bytesHex, 'hex'));
+    }
+  }
+  const targets = new Map();
+  common.forEach((returnAddress, index) => {
+    const bytes = bytesByIndex.get(index + 1);
+    if (!bytes || bytes[0] !== 0xE8) return;
+    const target = BigInt(returnAddress) + BigInt(bytes.readInt32LE(1));
+    const classification = classifyModuleAddress(target, runtime.session.moduleBase, pe);
+    if (!classification.insideImage || !classification.executable) return;
+    targets.set(classification.address, (targets.get(classification.address) || 0) + 1);
+  });
+  return [...targets].map(([address, hitCount]) => ({
+    address,
+    rva: classifyModuleAddress(address, runtime.session.moduleBase, pe).rva,
+    captureCount: 2,
+    hitCount: hitCount * 2,
+    score: 1000 + hitCount * 2,
+  }));
 }
 
 async function commandRank(options, dependencies) {
@@ -507,29 +689,40 @@ async function commandExecuteCapture(options, dependencies, operation, transitio
   const { runtime, identity } = await requirePreflight(options, dependencies);
   const stored = readEvidence('tables.json', identity);
   const live = await hydrateTables(runtime.client, stored);
-  const candidates = await rankedCandidates(operation, runtime, identity);
+  const candidates = prioritizeExecuteCandidates(operation,
+    await rankedCandidates(operation, runtime, identity));
   if (candidates.length < 1) throw new Error(`No executable ${operation} candidate was ranked`);
-  const watches = candidates.slice(0, 4).map((entry) => ({ address: BigInt(runtime.session.moduleBase) + BigInt(entry.rva) }));
+  // Arm one entry at a time. Nearby stack candidates can be very hot shared
+  // routines and overflow the finite research-watch buffer before the UI action.
+  const watches = candidates.slice(0, 1).map((entry) => ({ address: BigInt(runtime.session.moduleBase) + BigInt(entry.rva) }));
   await runtime.client.evaluateLua(armScript(watches, true));
   await (dependencies.promptAction || promptAction)(transition
     ? `Leave and re-enter Recruiting, then perform ONE vanilla ${operation.toUpperCase()} for recruit row ${options.recruitRow}.`
-    : `Perform ONE vanilla ${operation.toUpperCase()} for recruit row ${options.recruitRow} to confirm the full entry.`);
+    : `Perform ONE vanilla ${operation.toUpperCase()} for recruit row ${options.recruitRow} to confirm the full entry.`, runtime.client);
   const captureId = transition ? 'transition' : `${operation}-execute`;
   const prefix = `REANCHOR_${runtime.session.sessionId.slice(0, 12)}_${captureId.toUpperCase()}`;
   const hits = await collectWatch(runtime.client, prefix);
   const expected = { membershipRow: live.board.selected.teamRow, teamRow: options.teamRow,
-    recruitRow: options.recruitRow };
+    recruitRow: options.recruitRow, recruitTableId: live.board.selected.recruitTableId };
   const pe = parsePeSections(fs.readFileSync(runtime.executable));
   const enriched = [];
+  const diagnostics = [];
   for (const hit of hits) {
     try {
       const capture = await enrichExecuteHit(runtime.client, hit, expected, runtime, captureId);
-      if (validateObjectShapes(capture, { moduleBase: runtime.session.moduleBase, pe }).passed) enriched.push(capture);
-    } catch {
-      // Incidental execute candidates are expected; only full entry shapes survive.
+      const validation = validateObjectShapes(capture, { moduleBase: runtime.session.moduleBase, pe });
+      diagnostics.push({ hitIndex: hit.index, entryAddress: hit.rip, validation, capture });
+      if (validation.passed) enriched.push(capture);
+    } catch (error) {
+      diagnostics.push({ hitIndex: hit.index, entryAddress: hit.rip, error: error.message, rawHit: hit });
     }
   }
-  if (enriched.length !== 1) throw new Error(`Expected exactly one full ${operation} entry shape; found ${enriched.length}`);
+  if (enriched.length !== 1) {
+    const diagnostic = envelope(runtime, { captureId, operation, expected, diagnostics });
+    writeEvidence(`captures/${captureId}-diagnostic-${Date.now()}.json`, diagnostic);
+    const summary = diagnostics.map((entry) => entry.validation?.detail || entry.error).join('; ');
+    throw new Error(`Expected exactly one full ${operation} entry shape; found ${enriched.length}: ${summary}`);
+  }
   const record = envelope(runtime, { captureId, operation, objectCapture: enriched[0], rawHitCount: hits.length });
   writeEvidence(`captures/${captureId}.json`, record);
   return record;
@@ -559,7 +752,17 @@ async function commandAnalyzeFinal(options, dependencies) {
       remove: { writeCount: removeWrite.length, executeCount: 1,
         consistent: removeWrite.every((capture) => capture.postconditionVerified) },
     },
-    proposedBoard: { ...vtables, fullAddRva: addEntry.rva, fullRemoveRva: removeEntry.rva },
+    proposedBoard: {
+      ...vtables,
+      fullAddRva: addEntry.rva,
+      fullRemoveRva: removeEntry.rva,
+      recruitTableId: canonical(BigInt(addExecute.recruit.descriptorTableId)),
+      teamTableId: canonical(BigInt(addExecute.team.descriptorTableId)),
+      controllerDescriptorTableId: canonical(BigInt(addExecute.controller.descriptorTableId)),
+      userTargetTableId: canonical(BigInt(tables.userBoard.userTableId)),
+      activePitchTableId: canonical(BigInt(tables.userBoard.activePitchTableId)),
+      membershipTableId: canonical(BigInt(tables.userBoard.membershipTableId)),
+    },
     proof: { pe, fullAddCapture: addExecute, fullRemoveCapture: removeExecute,
       transitionObjectCapture: transition },
   };

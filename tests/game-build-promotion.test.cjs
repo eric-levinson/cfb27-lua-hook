@@ -13,6 +13,9 @@ function manifest() {
     { label: 'july-11-2026', size: 247845776, sha256: OLD_SHA, support: 'certified', board: {
       genericRecordWrapperVtableRva: '0xB093F68', recruitingControllerVtableRva: '0xB0B5BA8',
       fullAddRva: '0x8109060', fullRemoveRva: '0x8166090',
+      recruitTableId: '0x10AD', teamTableId: '0x18BE',
+      controllerDescriptorTableId: '0x138B', userTargetTableId: '0x1048',
+      activePitchTableId: '0x169E', membershipTableId: '0x16D7',
     } },
     { label: 'patch-1-2026-07-16', size: 249801616, sha256: PATCH_SHA,
       support: 'diagnostic', board: null },
@@ -26,13 +29,16 @@ function candidate() {
     session: { pid: 77, sessionId: 'session', moduleBase: '0x140000000', capturedAt: '2026-07-16T12:00:00.000Z' },
     tables: {}, captures: {},
     proposedBoard: { genericRecordWrapperVtableRva: '0xB193F68',
-      recruitingControllerVtableRva: '0xB1B5BA8', fullAddRva: '0x8209060', fullRemoveRva: '0x8266090' },
+      recruitingControllerVtableRva: '0xB1B5BA8', fullAddRva: '0x8209060', fullRemoveRva: '0x8266090',
+      recruitTableId: '0x10B1', teamTableId: '0x18B1',
+      controllerDescriptorTableId: '0x138D', userTargetTableId: '0x104B',
+      activePitchTableId: '0x1691', membershipTableId: '0x16CA' },
     gates: REQUIRED_GATE_NAMES.map((name) => ({ name, passed: true, detail: `${name} passed` })),
     passed: true,
   };
 }
 
-test('certification changes only the exact diagnostic build and four RVAs', () => {
+test('certification changes only the exact diagnostic build and layout', () => {
   const input = manifest();
   const output = certifyManifest(input, candidate());
   assert.deepEqual(input, manifest());

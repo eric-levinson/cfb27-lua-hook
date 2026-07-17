@@ -10,18 +10,16 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <span>
 #include <vector>
 
 namespace cfb27::board_mutation {
 namespace {
 
-constexpr std::uint32_t kRecruitTableId = 4269;
-constexpr std::uint32_t kTeamTableId = 6334;
-constexpr std::uint32_t kControllerDescriptorTableId = 5003;
-constexpr std::uint32_t kUserTargetTableId = 4168;
-constexpr std::uint32_t kActivePitchTableId = 5790;
-constexpr std::uint32_t kMembershipTableId = 5847;
+constexpr std::uint32_t kUserTargetTableRole = 4168;
+constexpr std::uint32_t kActivePitchTableRole = 5790;
+constexpr std::uint32_t kMembershipTableRole = 5847;
 constexpr std::uint32_t kMembershipCapacity = 138;
 constexpr std::uint32_t kBoardSlots = 35;
 constexpr std::uint32_t kReferenceRowMask = 0x1FFFF;
@@ -47,6 +45,20 @@ struct TableView {
   std::uint32_t head{};
   std::uint32_t score{};
 };
+
+struct RuntimeCache {
+  std::uintptr_t module{};
+  std::uint32_t recruit_row{};
+  std::uint32_t team_row{};
+  std::uintptr_t controller{};
+  std::uintptr_t recruit_wrapper{};
+  std::uintptr_t team_wrapper{};
+  TableView targets;
+  TableView pitches;
+  TableView membership;
+};
+
+std::optional<RuntimeCache> g_runtime_cache;
 
 struct BoardItem {
   std::uint32_t slot{};
@@ -74,6 +86,13 @@ bool ReadableProtection(DWORD protection) {
   const DWORD base = protection & 0xFF;
   return base == PAGE_READONLY || base == PAGE_READWRITE ||
          base == PAGE_WRITECOPY || base == PAGE_EXECUTE_READ ||
+         base == PAGE_EXECUTE_READWRITE || base == PAGE_EXECUTE_WRITECOPY;
+}
+
+bool WritableProtection(DWORD protection) {
+  if (protection & (PAGE_GUARD | PAGE_NOACCESS)) return false;
+  const DWORD base = protection & 0xFF;
+  return base == PAGE_READWRITE || base == PAGE_WRITECOPY ||
          base == PAGE_EXECUTE_READWRITE || base == PAGE_EXECUTE_WRITECOPY;
 }
 
@@ -122,7 +141,7 @@ std::vector<Region> PrivateReadableRegions() {
         sizeof(info)) break;
     const auto base = reinterpret_cast<std::uintptr_t>(info.BaseAddress);
     if (info.State == MEM_COMMIT && info.Type == MEM_PRIVATE &&
-        ReadableProtection(info.Protect) && info.RegionSize >= 32) {
+        WritableProtection(info.Protect) && info.RegionSize >= 32) {
       regions.push_back({reinterpret_cast<const std::uint8_t*>(base), info.RegionSize});
     }
     const auto next = base + info.RegionSize;
@@ -135,13 +154,89 @@ std::vector<Region> PrivateReadableRegions() {
 template <typename Callback>
 void FindBytes(const Region& region, std::span<const std::uint8_t> needle,
                Callback callback) {
-  const auto* cursor = region.begin;
-  const auto* end = region.begin + region.size;
-  while (cursor + needle.size() <= end) {
-    const auto* found = std::search(cursor, end, needle.begin(), needle.end());
-    if (found == end) break;
-    callback(reinterpret_cast<std::uintptr_t>(found));
-    cursor = found + 1;
+  constexpr std::size_t kChunkSize = 256 * 1024;
+  const auto process = GetCurrentProcess();
+  std::vector<std::uint8_t> snapshot(kChunkSize + needle.size() - 1);
+  std::size_t carry = 0;
+  std::uintptr_t cursor = reinterpret_cast<std::uintptr_t>(region.begin);
+  const auto end = cursor + region.size;
+  std::uintptr_t last_reported = 0;
+  while (cursor < end) {
+    const auto requested = (std::min)(kChunkSize, static_cast<std::size_t>(end - cursor));
+    SIZE_T copied = 0;
+    if (!ReadProcessMemory(process, reinterpret_cast<const void*>(cursor),
+                           snapshot.data() + carry, requested, &copied) ||
+        copied != requested) {
+      carry = 0;
+      cursor += requested;
+      continue;
+    }
+    const auto available = carry + requested;
+    auto search = snapshot.begin();
+    const auto finish = snapshot.begin() + available;
+    while (search + needle.size() <= finish) {
+      const auto found = std::search(search, finish, needle.begin(), needle.end());
+      if (found == finish) break;
+      const auto address = cursor - carry +
+          static_cast<std::uintptr_t>(found - snapshot.begin());
+      if (address != last_reported) {
+        callback(address);
+        last_reported = address;
+      }
+      search = found + 1;
+    }
+    carry = (std::min)(needle.size() - 1, available);
+    if (carry) std::memmove(snapshot.data(), snapshot.data() + available - carry, carry);
+    cursor += requested;
+  }
+}
+
+template <std::size_t Count, typename Callback>
+void FindPatterns(
+    const Region& region,
+    const std::array<std::span<const std::uint8_t>, Count>& needles,
+    Callback callback) {
+  constexpr std::size_t kChunkSize = 256 * 1024;
+  std::size_t maximum_needle = 0;
+  for (const auto needle : needles) maximum_needle = (std::max)(maximum_needle, needle.size());
+  if (!maximum_needle) return;
+
+  const auto process = GetCurrentProcess();
+  std::vector<std::uint8_t> snapshot(kChunkSize + maximum_needle - 1);
+  std::array<std::uintptr_t, Count> last_reported{};
+  std::size_t carry = 0;
+  std::uintptr_t cursor = reinterpret_cast<std::uintptr_t>(region.begin);
+  const auto end = cursor + region.size;
+  while (cursor < end) {
+    const auto requested = (std::min)(kChunkSize, static_cast<std::size_t>(end - cursor));
+    SIZE_T copied = 0;
+    if (!ReadProcessMemory(process, reinterpret_cast<const void*>(cursor),
+                           snapshot.data() + carry, requested, &copied) ||
+        copied != requested) {
+      carry = 0;
+      cursor += requested;
+      continue;
+    }
+    const auto available = carry + requested;
+    const auto finish = snapshot.begin() + available;
+    for (std::size_t pattern = 0; pattern < Count; ++pattern) {
+      const auto needle = needles[pattern];
+      auto search = snapshot.begin();
+      while (search + needle.size() <= finish) {
+        const auto found = std::search(search, finish, needle.begin(), needle.end());
+        if (found == finish) break;
+        const auto address = cursor - carry +
+            static_cast<std::uintptr_t>(found - snapshot.begin());
+        if (address != last_reported[pattern]) {
+          callback(pattern, address);
+          last_reported[pattern] = address;
+        }
+        search = found + 1;
+      }
+    }
+    carry = (std::min)(maximum_needle - 1, available);
+    if (carry) std::memmove(snapshot.data(), snapshot.data() + available - carry, carry);
+    cursor += requested;
   }
 }
 
@@ -162,7 +257,8 @@ std::array<std::uint8_t, 16> TableSignature(const TableSpec& spec) {
 std::uint32_t ReferenceTable(std::uint32_t value) { return value >> 17; }
 std::uint32_t ReferenceRow(std::uint32_t value) { return value & kReferenceRowMask; }
 
-std::uint32_t ScoreTable(const TableSpec& spec, std::uintptr_t data) {
+std::uint32_t ScoreTable(const TableSpec& spec, std::uintptr_t data,
+                         const game_builds::BoardLayout& layout) {
   if (!ReadableRange(data, static_cast<std::size_t>(spec.capacity) * spec.stride))
     return 0;
   std::uint32_t free_rows = 0;
@@ -172,7 +268,7 @@ std::uint32_t ScoreTable(const TableSpec& spec, std::uintptr_t data) {
     const auto record = data + static_cast<std::uintptr_t>(row) * spec.stride;
     std::uint32_t first{};
     if (!ReadValue(record, first)) return 0;
-    if (spec.id == kMembershipTableId) {
+    if (spec.id == kMembershipTableRole) {
       bool structural = true;
       bool saw_zero = false;
       for (std::uint32_t slot = 0; slot < spec.words; ++slot) {
@@ -183,7 +279,7 @@ std::uint32_t ScoreTable(const TableSpec& spec, std::uintptr_t data) {
           continue;
         }
         const auto table = ReferenceTable(reference);
-        if (saw_zero || (table != kUserTargetTableId && table != 4288)) {
+        if (saw_zero || table == 0) {
           structural = false;
           break;
         }
@@ -199,11 +295,11 @@ std::uint32_t ScoreTable(const TableSpec& spec, std::uintptr_t data) {
       if (word != 0) rest_zero = false;
     }
     if (first == row + 1 && rest_zero) ++free_rows;
-    if (spec.id == kUserTargetTableId) {
+    if (spec.id == kUserTargetTableRole) {
       std::uint32_t recruit{};
       if (!ReadValue(record + 12, recruit)) return 0;
-      if (ReferenceTable(recruit) == kRecruitTableId) ++content_rows;
-    } else if (spec.id == kActivePitchTableId) {
+      if (ReferenceTable(recruit) == layout.recruit_table_id) ++content_rows;
+    } else if (spec.id == kActivePitchTableRole) {
       if (ReferenceTable(first) == 4190) ++content_rows;
     }
   }
@@ -211,13 +307,13 @@ std::uint32_t ScoreTable(const TableSpec& spec, std::uintptr_t data) {
 }
 
 bool LocateTable(const std::vector<Region>& regions, const TableSpec& spec,
-                 TableView& selected) {
+                 const game_builds::BoardLayout& layout, TableView& selected) {
   const auto signature = TableSignature(spec);
   std::vector<TableView> candidates;
   for (const auto& region : regions) {
     FindBytes(region, signature, [&](std::uintptr_t header) {
       const auto data = header + spec.data_offset;
-      const auto score = ScoreTable(spec, data);
+      const auto score = ScoreTable(spec, data, layout);
       std::uint32_t head{};
       if (score && ReadValue(header + 24, head))
         candidates.push_back({&spec, header, data, head, score});
@@ -232,10 +328,72 @@ bool LocateTable(const std::vector<Region>& regions, const TableSpec& spec,
   return true;
 }
 
+bool SelectTable(std::vector<TableView>& candidates, TableView& selected) {
+  if (candidates.empty()) return false;
+  std::sort(candidates.begin(), candidates.end(), [](const auto& left, const auto& right) {
+    return left.score > right.score;
+  });
+  if (candidates.size() > 1 && candidates[0].score == candidates[1].score) return false;
+  selected = candidates[0];
+  return true;
+}
+
+void AddTableCandidate(const TableSpec& spec,
+                       const game_builds::BoardLayout& layout,
+                       std::uintptr_t header,
+                       std::vector<TableView>& candidates) {
+  const auto data = header + spec.data_offset;
+  const auto score = ScoreTable(spec, data, layout);
+  std::uint32_t head{};
+  if (score && ReadValue(header + 24, head))
+    candidates.push_back({&spec, header, data, head, score});
+}
+
 std::uint32_t DescriptorTableId(std::uintptr_t descriptor) {
   std::uint64_t encoded{};
   if (!ReadValue(descriptor + 40, encoded)) return 0;
   return static_cast<std::uint32_t>(encoded >> 32);
+}
+
+bool ValidateController(const game_builds::BoardLayout& layout,
+                        std::uintptr_t module, std::uintptr_t address) {
+  std::uintptr_t vtable{};
+  std::uint64_t membership_row{};
+  std::uintptr_t descriptor{};
+  std::uintptr_t board_store{};
+  return ReadValue(address, vtable) &&
+      vtable == module + layout.recruiting_controller_vtable_rva &&
+      ReadValue(address + 8, membership_row) && membership_row < kMembershipCapacity &&
+      ReadValue(address + 16, descriptor) &&
+      DescriptorTableId(descriptor) == layout.controller_descriptor_table_id &&
+      ReadValue(address + 0x138, board_store) && ReadableRange(board_store, 8);
+}
+
+bool ValidateWrapper(const game_builds::BoardLayout& layout,
+                     std::uintptr_t module, std::uintptr_t address,
+                     std::uint32_t table_id, std::uint32_t row) {
+  std::uintptr_t vtable{};
+  std::uintptr_t descriptor{};
+  std::uint64_t captured_row{};
+  return ReadValue(address, vtable) &&
+      vtable == module + layout.generic_record_wrapper_vtable_rva &&
+      ReadValue(address + 16, descriptor) && DescriptorTableId(descriptor) == table_id &&
+      ReadValue(address + 24, captured_row) && captured_row == row;
+}
+
+bool RefreshTable(TableView& view) {
+  if (!view.spec || !ReadableRange(view.header, 32)) return false;
+  const auto expected = TableSignature(*view.spec);
+  std::array<std::uint8_t, 16> actual{};
+  std::uint32_t head{};
+  if (!ReadValue(view.header, actual) || actual != expected ||
+      !ReadValue(view.header + 24, head) ||
+      !ReadableRange(view.data,
+                     static_cast<std::size_t>(view.spec->capacity) * view.spec->stride)) {
+    return false;
+  }
+  view.head = head;
+  return true;
 }
 
 void FindRuntimeObjects(const game_builds::BoardLayout& layout,
@@ -256,7 +414,7 @@ void FindRuntimeObjects(const game_builds::BoardLayout& layout,
       std::uintptr_t board_store{};
       if (!ReadValue(address + 8, membership_row) || membership_row >= kMembershipCapacity ||
           !ReadValue(address + 16, descriptor) ||
-          DescriptorTableId(descriptor) != kControllerDescriptorTableId ||
+          DescriptorTableId(descriptor) != layout.controller_descriptor_table_id ||
           !ReadValue(address + 0x138, board_store) || !ReadableRange(board_store, 8)) return;
       controllers.push_back(address);
     });
@@ -266,16 +424,74 @@ void FindRuntimeObjects(const game_builds::BoardLayout& layout,
       std::uint64_t row{};
       if (!ReadValue(address + 16, descriptor) || !ReadValue(address + 24, row)) return;
       const auto table_id = DescriptorTableId(descriptor);
-      if (row == recruit_row && table_id == kRecruitTableId)
+      if (row == recruit_row && table_id == layout.recruit_table_id)
         recruit_wrappers.push_back(address);
-      if (row == team_row && table_id == kTeamTableId)
+      if (row == team_row && table_id == layout.team_table_id)
         team_wrappers.push_back(address);
     });
   }
 }
 
+bool DiscoverRuntime(const game_builds::BoardLayout& layout,
+                     const std::vector<Region>& regions, std::uintptr_t module,
+                     std::uint32_t recruit_row, std::uint32_t team_row,
+                     std::vector<std::uintptr_t>& controllers,
+                     std::vector<std::uintptr_t>& recruit_wrappers,
+                     std::vector<std::uintptr_t>& team_wrappers,
+                     TableView& targets, TableView& pitches,
+                     TableView& membership) {
+  const auto wrapper_vtable = module + layout.generic_record_wrapper_vtable_rva;
+  const auto controller_vtable = module + layout.recruiting_controller_vtable_rva;
+  const auto controller_bytes = QwordBytes(controller_vtable);
+  const auto wrapper_bytes = QwordBytes(wrapper_vtable);
+  const auto target_signature = TableSignature(kUserTarget);
+  const auto pitch_signature = TableSignature(kActivePitch);
+  const auto membership_signature = TableSignature(kMembership);
+  const std::array<std::span<const std::uint8_t>, 5> patterns{
+      controller_bytes, wrapper_bytes, target_signature, pitch_signature,
+      membership_signature};
+  std::vector<TableView> target_candidates;
+  std::vector<TableView> pitch_candidates;
+  std::vector<TableView> membership_candidates;
+
+  for (const auto& region : regions) {
+    FindPatterns(region, patterns, [&](std::size_t pattern, std::uintptr_t address) {
+      if (pattern == 0) {
+        if ((address & 7) != 0 ||
+            !ValidateController(layout, module, address)) return;
+        controllers.push_back(address);
+        return;
+      }
+      if (pattern == 1) {
+        if ((address & 7) != 0 || !ReadableRange(address, 32)) return;
+        std::uintptr_t descriptor{};
+        std::uint64_t row{};
+        if (!ReadValue(address + 16, descriptor) || !ReadValue(address + 24, row)) return;
+        const auto table_id = DescriptorTableId(descriptor);
+        if (row == recruit_row && table_id == layout.recruit_table_id)
+          recruit_wrappers.push_back(address);
+        if (row == team_row && table_id == layout.team_table_id)
+          team_wrappers.push_back(address);
+        return;
+      }
+      if (pattern == 2) {
+        AddTableCandidate(kUserTarget, layout, address, target_candidates);
+      } else if (pattern == 3) {
+        AddTableCandidate(kActivePitch, layout, address, pitch_candidates);
+      } else {
+        AddTableCandidate(kMembership, layout, address, membership_candidates);
+      }
+    });
+  }
+  return SelectTable(target_candidates, targets) &&
+      SelectTable(pitch_candidates, pitches) &&
+      SelectTable(membership_candidates, membership);
+}
+
 BoardSnapshot ReadBoard(const TableView& targets, const TableView& pitches,
-                        const TableView& membership, std::uint32_t membership_row) {
+                        const TableView& membership,
+                        const game_builds::BoardLayout& layout,
+                        std::uint32_t membership_row) {
   BoardSnapshot result{.membership_row = membership_row};
   if (membership_row >= membership.spec->capacity) return result;
   const auto row_address = membership.data +
@@ -290,7 +506,7 @@ BoardSnapshot ReadBoard(const TableView& targets, const TableView& pitches,
       continue;
     }
     if (saw_zero) result.compact = false;
-    if (ReferenceTable(reference) != kUserTargetTableId) return result;
+    if (ReferenceTable(reference) != layout.user_target_table_id) return result;
     const auto target_row = ReferenceRow(reference);
     if (target_row >= targets.spec->capacity) return result;
     const auto target_address = targets.data +
@@ -299,10 +515,10 @@ BoardSnapshot ReadBoard(const TableView& targets, const TableView& pitches,
     std::uint32_t pitch_reference{};
     if (!ReadValue(target_address + 12, recruit_reference) ||
         !ReadValue(target_address + 16, pitch_reference) ||
-        ReferenceTable(recruit_reference) != kRecruitTableId) return result;
+        ReferenceTable(recruit_reference) != layout.recruit_table_id) return result;
     std::uint32_t pitch_row = UINT32_MAX;
     if (pitch_reference) {
-      if (ReferenceTable(pitch_reference) != kActivePitchTableId ||
+      if (ReferenceTable(pitch_reference) != layout.active_pitch_table_id ||
           ReferenceRow(pitch_reference) >= pitches.spec->capacity) return result;
       pitch_row = ReferenceRow(pitch_reference);
     }
@@ -338,30 +554,51 @@ Result Invoke(const game_builds::BoardLayout& layout, Operation operation,
     result.status = Status::kRecruitingNotLoaded;
     return result;
   }
-  const auto regions = PrivateReadableRegions();
   std::vector<std::uintptr_t> controllers;
   std::vector<std::uintptr_t> recruit_wrappers;
   std::vector<std::uintptr_t> team_wrappers;
-  FindRuntimeObjects(layout, regions, module, recruit_row, team_row, controllers,
-                     recruit_wrappers, team_wrappers);
-  if (controllers.empty() || recruit_wrappers.empty() || team_wrappers.empty()) {
-    result.status = Status::kRecruitingNotLoaded;
-    return result;
-  }
-  if (controllers.size() != 1 || recruit_wrappers.size() != 1 ||
-      team_wrappers.size() != 1) {
-    result.status = Status::kRuntimeAmbiguous;
-    return result;
-  }
-
   TableView targets;
   TableView pitches;
   TableView membership;
-  if (!LocateTable(regions, kUserTarget, targets) ||
-      !LocateTable(regions, kActivePitch, pitches) ||
-      !LocateTable(regions, kMembership, membership)) {
-    result.status = Status::kTableDiscoveryFailed;
-    return result;
+  const bool cache_valid = g_runtime_cache && g_runtime_cache->module == module &&
+      g_runtime_cache->recruit_row == recruit_row &&
+      g_runtime_cache->team_row == team_row &&
+      ValidateController(layout, module, g_runtime_cache->controller) &&
+      ValidateWrapper(layout, module, g_runtime_cache->recruit_wrapper,
+                      layout.recruit_table_id, recruit_row) &&
+      ValidateWrapper(layout, module, g_runtime_cache->team_wrapper,
+                      layout.team_table_id, team_row) &&
+      RefreshTable(g_runtime_cache->targets) &&
+      RefreshTable(g_runtime_cache->pitches) &&
+      RefreshTable(g_runtime_cache->membership);
+  if (cache_valid) {
+    controllers.push_back(g_runtime_cache->controller);
+    recruit_wrappers.push_back(g_runtime_cache->recruit_wrapper);
+    team_wrappers.push_back(g_runtime_cache->team_wrapper);
+    targets = g_runtime_cache->targets;
+    pitches = g_runtime_cache->pitches;
+    membership = g_runtime_cache->membership;
+  } else {
+    g_runtime_cache.reset();
+    const auto regions = PrivateReadableRegions();
+    const bool tables_found = DiscoverRuntime(
+        layout, regions, module, recruit_row, team_row, controllers,
+        recruit_wrappers, team_wrappers, targets, pitches, membership);
+    if (controllers.empty() || recruit_wrappers.empty() || team_wrappers.empty()) {
+      result.status = Status::kRecruitingNotLoaded;
+      return result;
+    }
+    if (controllers.size() != 1 || recruit_wrappers.size() != 1 ||
+        team_wrappers.size() != 1) {
+      result.status = Status::kRuntimeAmbiguous;
+      return result;
+    }
+    if (!tables_found) {
+      result.status = Status::kTableDiscoveryFailed;
+      return result;
+    }
+    g_runtime_cache = RuntimeCache{module, recruit_row, team_row, controllers[0],
+        recruit_wrappers[0], team_wrappers[0], targets, pitches, membership};
   }
   std::uint64_t membership_row64{};
   if (!ReadValue(controllers[0] + 8, membership_row64) ||
@@ -370,7 +607,7 @@ Result Invoke(const game_builds::BoardLayout& layout, Operation operation,
     return result;
   }
   result.membership_row = static_cast<std::uint32_t>(membership_row64);
-  const auto before = ReadBoard(targets, pitches, membership, result.membership_row);
+  const auto before = ReadBoard(targets, pitches, membership, layout, result.membership_row);
   if (!before.valid) {
     result.status = Status::kBoardStateInvalid;
     return result;
@@ -434,7 +671,7 @@ Result Invoke(const game_builds::BoardLayout& layout, Operation operation,
     result.status = Status::kPostconditionFailed;
     return result;
   }
-  const auto after = ReadBoard(targets, pitches, membership, result.membership_row);
+  const auto after = ReadBoard(targets, pitches, membership, layout, result.membership_row);
   const auto after_matches = Matching(after, recruit_row);
   if (!after.valid) {
     result.status = Status::kPostconditionFailed;

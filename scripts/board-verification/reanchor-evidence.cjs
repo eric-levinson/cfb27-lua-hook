@@ -12,6 +12,12 @@ const BOARD_RVAS = Object.freeze([
   'recruitingControllerVtableRva',
   'fullAddRva',
   'fullRemoveRva',
+  'recruitTableId',
+  'teamTableId',
+  'controllerDescriptorTableId',
+  'userTargetTableId',
+  'activePitchTableId',
+  'membershipTableId',
 ]);
 const REQUIRED_GATE_NAMES = Object.freeze([
   'buildIdentity',
@@ -27,6 +33,7 @@ const REQUIRED_GATE_NAMES = Object.freeze([
 const IMAGE_SCN_MEM_EXECUTE = 0x20000000;
 const IMAGE_SCN_MEM_READ = 0x40000000;
 const PARSED_PE_VALUES = new WeakSet();
+const PE_RUNTIME_FUNCTIONS = new WeakMap();
 let evidenceWriteTestHook = null;
 
 function canonicalSha(value) {
@@ -464,6 +471,40 @@ function parsePeSections(image) {
     sections: Object.freeze(sections),
   });
   PARSED_PE_VALUES.add(result);
+  let runtimeFunctions = new Uint32Array(0);
+  const directoryBase = optionalHeaderOffset + (magic === 0x20B ? 112 : 96);
+  const directoryCountOffset = optionalHeaderOffset + (magic === 0x20B ? 108 : 92);
+  if (directoryCountOffset + 4 <= optionalHeaderOffset + optionalHeaderSize &&
+      image.readUInt32LE(directoryCountOffset) > 3 &&
+      directoryBase + 32 <= optionalHeaderOffset + optionalHeaderSize) {
+    const exceptionRva = image.readUInt32LE(directoryBase + 24);
+    const exceptionSize = image.readUInt32LE(directoryBase + 28);
+    if (exceptionRva !== 0 || exceptionSize !== 0) {
+      if (exceptionRva === 0 || exceptionSize === 0 || exceptionSize % 12 !== 0) {
+        throw new Error('PE exception directory is malformed');
+      }
+      const section = sections.find((candidate) => exceptionRva >= candidate.virtualAddress &&
+        exceptionRva + exceptionSize <= candidate.virtualAddress + candidate.rawSize);
+      if (!section) throw new Error('PE exception directory is not backed by section raw data');
+      const rawOffset = section.rawAddress + exceptionRva - section.virtualAddress;
+      requireBufferRange(image, rawOffset, exceptionSize, 'the PE exception directory');
+      const entries = [];
+      for (let offset = rawOffset; offset < rawOffset + exceptionSize; offset += 12) {
+        const begin = image.readUInt32LE(offset);
+        const end = image.readUInt32LE(offset + 4);
+        if (begin === 0 && end === 0) continue;
+        if (begin >= end || end > sizeOfImage) throw new Error('PE runtime function entry is malformed');
+        entries.push([begin, end]);
+      }
+      entries.sort((left, right) => left[0] - right[0]);
+      runtimeFunctions = new Uint32Array(entries.length * 2);
+      entries.forEach(([begin, end], index) => {
+        runtimeFunctions[index * 2] = begin;
+        runtimeFunctions[index * 2 + 1] = end;
+      });
+    }
+  }
+  PE_RUNTIME_FUNCTIONS.set(result, runtimeFunctions);
   return result;
 }
 
@@ -508,6 +549,24 @@ function captureIdentity(capture) {
   }, 'Capture identity');
 }
 
+function containingRuntimeFunction(address, moduleBase, pe) {
+  const entries = PE_RUNTIME_FUNCTIONS.get(pe);
+  if (!entries || entries.length === 0) return null;
+  const rva = toAddress(address) - toAddress(moduleBase, 'module base');
+  if (rva < 0n || rva > 0xFFFFFFFFn) return null;
+  const target = Number(rva);
+  let low = 0;
+  let high = entries.length / 2;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (entries[middle * 2] <= target) low = middle + 1;
+    else high = middle;
+  }
+  const index = low - 1;
+  if (index < 0 || target >= entries[index * 2 + 1]) return null;
+  return toAddress(moduleBase, 'module base') + BigInt(entries[index * 2]);
+}
+
 function rankRoutineCandidates(captures, { moduleBase, pe }) {
   if (!Array.isArray(captures) || captures.length !== 2) {
     throw new Error('Exactly two captures are required to rank routine candidates');
@@ -522,7 +581,9 @@ function rankRoutineCandidates(captures, { moduleBase, pe }) {
   const captureCounts = captures.map((entry) => {
     const counts = new Map();
     for (const address of captureStackReturns(entry)) {
-      const key = canonicalHex(address);
+      const classification = classifyModuleAddress(address, moduleBase, pe);
+      if (!classification.insideImage || !classification.executable) continue;
+      const key = canonicalHex(containingRuntimeFunction(address, moduleBase, pe) ?? address);
       counts.set(key, (counts.get(key) ?? 0) + 1);
     }
     return counts;
@@ -610,7 +671,8 @@ function validateObjectShapes(capture, { moduleBase, pe }) {
     if (sameAddress(controller.vtableAddress, team.vtableAddress)) {
       return reject('Controller and generic record-wrapper vtables must be distinct');
     }
-    if (![expected.membershipRow, expected.teamRow, expected.recruitRow].every(validRow)) {
+    if (![expected.membershipRow, expected.teamRow, expected.recruitRow].every(validRow) ||
+        !Number.isSafeInteger(expected.recruitTableId) || expected.recruitTableId <= 0) {
       return reject('Expected membership, Team, and Recruit rows must be nonnegative safe integers');
     }
     if (!validRow(controller.membershipRow) || !validRow(controller.boardStore?.membershipRow) ||
@@ -618,8 +680,9 @@ function validateObjectShapes(capture, { moduleBase, pe }) {
       return reject('Captured membership, Team, and Recruit rows must be nonnegative safe integers');
     }
     if (!sameAddress(args.rcx, controller.address)) return reject('RCX does not contain the recruiting controller');
-    if (controller.readable !== true || controller.descriptorTableId !== 5003) {
-      return reject('RCX object is not a readable descriptor-table 5003 recruiting controller');
+    if (controller.readable !== true || !Number.isSafeInteger(controller.descriptorTableId) ||
+        controller.descriptorTableId <= 0) {
+      return reject('RCX object is not a readable recruiting controller descriptor');
     }
     if (controller.membershipRow !== expected.membershipRow || controller.boardStore.offset !== 0x138 ||
         controller.boardStore.readable !== true || controller.boardStore.membershipRow !== expected.membershipRow) {
@@ -633,11 +696,13 @@ function validateObjectShapes(capture, { moduleBase, pe }) {
         !sameAddress(cells.recruit.value, recruit.address)) {
       return reject('R8 is not a readable pointer cell containing the Recruit wrapper');
     }
-    if (team.readable !== true || team.descriptorTableId !== 6334 || team.row !== expected.teamRow ||
+    if (team.readable !== true || !Number.isSafeInteger(team.descriptorTableId) ||
+        team.descriptorTableId <= 0 || team.row !== expected.teamRow ||
         team.field10Readable !== true || team.field18Readable !== true) {
       return reject('Team wrapper descriptor, row identity, or +0x10/+0x18 fields are invalid');
     }
-    if (recruit.readable !== true || recruit.descriptorTableId !== 4269 || recruit.row !== expected.recruitRow ||
+    if (recruit.readable !== true || recruit.descriptorTableId !== expected.recruitTableId ||
+        recruit.row !== expected.recruitRow ||
         recruit.field10Readable !== true || recruit.field18Readable !== true) {
       return reject('Recruit wrapper descriptor, row identity, or +0x10/+0x18 fields are invalid');
     }
@@ -651,6 +716,9 @@ function validateObjectShapes(capture, { moduleBase, pe }) {
       detail: 'Full entry arguments and object shapes matched',
       genericRecordWrapperVtableAddress: canonicalHex(team.vtableAddress),
       recruitingControllerVtableAddress: canonicalHex(controller.vtableAddress),
+      controllerDescriptorTableId: controller.descriptorTableId,
+      teamDescriptorTableId: team.descriptorTableId,
+      recruitDescriptorTableId: recruit.descriptorTableId,
     });
   } catch (error) {
     return reject(`Full entry object shape is malformed: ${error.message}`);
@@ -665,8 +733,11 @@ function deriveVtableRvas(captures, { moduleBase, pe }) {
   const wrapper = validations[0].genericRecordWrapperVtableAddress;
   const controller = validations[0].recruitingControllerVtableAddress;
   if (!validations.every((validation) => validation.genericRecordWrapperVtableAddress === wrapper &&
-      validation.recruitingControllerVtableAddress === controller)) {
-    throw new Error('Vtable addresses were not stable across captures');
+      validation.recruitingControllerVtableAddress === controller &&
+      validation.controllerDescriptorTableId === validations[0].controllerDescriptorTableId &&
+      validation.teamDescriptorTableId === validations[0].teamDescriptorTableId &&
+      validation.recruitDescriptorTableId === validations[0].recruitDescriptorTableId)) {
+    throw new Error('Vtable addresses or descriptor table IDs were not stable across captures');
   }
   return Object.freeze({
     genericRecordWrapperVtableRva: classifyModuleAddress(wrapper, moduleBase, pe).rva,
@@ -801,7 +872,11 @@ function buildCandidateArtifact(input) {
     addRoutine.rva === proposedBoard.fullAddRva && removeRoutine.rva === proposedBoard.fullRemoveRva;
   const addShape = validateObjectShapes(proof.fullAddCapture, { moduleBase, pe: proof.pe });
   const removeShape = validateObjectShapes(proof.fullRemoveCapture, { moduleBase, pe: proof.pe });
-  const argumentShapes = addShape.passed && removeShape.passed;
+  const descriptorIdsMatch = [proof.fullAddCapture, proof.fullRemoveCapture].every((capture) =>
+    BigInt(capture.recruit.descriptorTableId) === BigInt(proposedBoard.recruitTableId) &&
+    BigInt(capture.team.descriptorTableId) === BigInt(proposedBoard.teamTableId) &&
+    BigInt(capture.controller.descriptorTableId) === BigInt(proposedBoard.controllerDescriptorTableId));
+  const argumentShapes = addShape.passed && removeShape.passed && descriptorIdsMatch;
   const allObjectCaptures = [proof.fullAddCapture, proof.fullRemoveCapture, proof.transitionObjectCapture];
   const vtablePeSections = allObjectCaptures.every((entry) =>
     validateCaptureVtables(entry, moduleBase, proof.pe).passed);

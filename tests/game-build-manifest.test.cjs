@@ -43,6 +43,12 @@ function certifiedBuild(overrides = {}) {
       recruitingControllerVtableRva: '0xB0B5BA8',
       fullAddRva: '0x8109060',
       fullRemoveRva: '0x8166090',
+      recruitTableId: '0x10AD',
+      teamTableId: '0x18BE',
+      controllerDescriptorTableId: '0x138B',
+      userTargetTableId: '0x1048',
+      activePitchTableId: '0x169E',
+      membershipTableId: '0x16D7',
     },
     ...overrides,
   };
@@ -84,7 +90,7 @@ test('diagnostic builds cannot carry a board layout', () => {
   })])), /diagnostic.*board/i);
 });
 
-test('certified builds require all four nonzero RVAs', () => {
+test('certified builds require all nonzero layout values', () => {
   const board = certifiedBuild().board;
   for (const key of Object.keys(board)) {
     const missing = { ...board };

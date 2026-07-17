@@ -9,6 +9,12 @@ const BOARD_KEYS = [
   'recruitingControllerVtableRva',
   'fullAddRva',
   'fullRemoveRva',
+  'recruitTableId',
+  'teamTableId',
+  'controllerDescriptorTableId',
+  'userTargetTableId',
+  'activePitchTableId',
+  'membershipTableId',
 ];
 const MAX_UINT64 = 0xFFFFFFFFFFFFFFFFn;
 

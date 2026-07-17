@@ -306,10 +306,17 @@ board layout, require the `boardMutationV1` capability, and must
 be called while the recruiting runtime is loaded, but they do not depend on a
 specific recruiting screen or selected UI row.
 
-The host freshly resolves the recruiting controller and both record wrappers,
-validates compact membership and freelist state before the call, and verifies
-the complete table postcondition afterward. A successful result uses status
-`applied_verified`; an already-satisfied add or remove uses `unchanged`.
+On the first board mutation in a game session, the host resolves the recruiting
+controller, both record wrappers, and required tables in one snapshot pass. It
+caches those addresses only while all object and table signatures continue to
+validate. Later calls normally reuse that cache. The SDK allows up to 120
+seconds for this first discovery when the client uses its default timeout;
+an explicitly configured client timeout remains authoritative.
+
+Every call validates compact membership and freelist state before invoking the
+handler and verifies the complete table postcondition afterward. A successful
+result uses status `applied_verified`; an already-satisfied add or remove uses
+`unchanged`.
 
 ```json
 {"protocol":1,"id":"board-1","command":"addBoard","params":{"recruitRow":3182,"teamRow":92}}

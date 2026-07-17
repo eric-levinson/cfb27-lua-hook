@@ -33,7 +33,10 @@ function setFreeRow(table, data, row) {
 
 function setContentRow(table, data, row) {
   const offset = row * table.stride;
-  if (table.id === 4168) data.writeUInt32LE(encodedRef(4269, 7), offset + 12);
+  if (table.id === 4168) {
+    data.writeUInt32LE(encodedRef(4269, 7), offset + 12);
+    data.writeUInt32LE(encodedRef(5790, 7), offset + 16);
+  }
   if (table.id === 4251) data.writeUInt32LE(encodedRef(5847, 7), offset);
   if (table.id === 5790) data.writeUInt32LE(encodedRef(4190, 7), offset);
   if (table.id === 5847) data.writeUInt32LE(encodedRef(4168, 7), offset);
@@ -46,6 +49,8 @@ function boardFixtures() {
   const userRows = { ...userRowsDefinition, data: tableData(userRowsDefinition) };
   const boardIndex = { ...boardIndexDefinition, data: tableData(boardIndexDefinition) };
   const membership = { ...membershipDefinition, data: tableData(membershipDefinition) };
+  setContentRow(userRowsDefinition, userRows.data, 10);
+  setContentRow(userRowsDefinition, userRows.data, 11);
   return {
     userRows,
     boardIndex,
@@ -149,6 +154,13 @@ test('scoreCandidate recognizes freelist and table-specific content fixtures', (
   }
 });
 
+test('board index scoring accepts a build-specific membership table ID', () => {
+  const table = TABLES.get(4251);
+  const data = tableData(table);
+  data.writeUInt32LE(encodedRef(5834, 7), table.stride);
+  assert.deepEqual(scoreCandidate(table, data), { freeRows: 0, contentRows: 1, score: 8 });
+});
+
 test('selectTableCandidate requires a positive structural winner', () => {
   const table = TABLES.get(4168);
   assert.throws(() => selectTableCandidate(table, [{ score: { score: 0 } }]), /structural validation/i);
@@ -173,6 +185,16 @@ test('findUserBoard discovers one compact user membership row', () => {
   assert.equal(result.selected.teamRow, 3);
   assert.equal(result.selected.firstFreeSlot, 2);
   assert.equal(result.selected.compact, true);
+});
+
+test('findUserBoard infers the Patch 1 membership table ID', () => {
+  const { boardIndex, membership, tables } = boardFixtures();
+  boardIndex.data.writeUInt32LE(encodedRef(5834, 3), 2 * boardIndex.stride);
+  membership.data.writeUInt32LE(encodedRef(4168, 10), 3 * membership.stride);
+
+  const result = findUserBoard(tables);
+  assert.equal(result.selected.boardRow, 2);
+  assert.equal(result.selected.teamRow, 3);
 });
 
 test('findUserBoard rejects a user membership row with an interior hole', () => {

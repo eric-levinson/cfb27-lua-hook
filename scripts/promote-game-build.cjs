@@ -19,6 +19,12 @@ const BOARD_KEYS = [
   'recruitingControllerVtableRva',
   'fullAddRva',
   'fullRemoveRva',
+  'recruitTableId',
+  'teamTableId',
+  'controllerDescriptorTableId',
+  'userTargetTableId',
+  'activePitchTableId',
+  'membershipTableId',
 ];
 
 function exactKeys(value, keys, label) {
