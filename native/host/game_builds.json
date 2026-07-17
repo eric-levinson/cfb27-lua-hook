@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "builds": [
+    {
+      "label": "july-11-2026",
+      "size": 247845776,
+      "sha256": "9E654AD49C4702D8F9FA4E38FD1110ABE657DD38926D4124B30C70E7D29ADFE8",
+      "support": "certified",
+      "board": {
+        "genericRecordWrapperVtableRva": "0xB093F68",
+        "recruitingControllerVtableRva": "0xB0B5BA8",
+        "fullAddRva": "0x8109060",
+        "fullRemoveRva": "0x8166090",
+        "recruitTableId": "0x10AD",
+        "teamTableId": "0x18BE",
+        "controllerDescriptorTableId": "0x138B",
+        "userTargetTableId": "0x1048",
+        "activePitchTableId": "0x169E",
+        "membershipTableId": "0x16D7"
+      }
+    },
+    {
+      "label": "patch-1-2026-07-16",
+      "size": 249801616,
+      "sha256": "A048578530F7ED5967DF38803B63AD9B9F04FC71287F1E151C901A94AB240BFD",
+      "support": "certified",
+      "board": {
+        "genericRecordWrapperVtableRva": "0xB098088",
+        "recruitingControllerVtableRva": "0xB0B9D18",
+        "fullAddRva": "0x810AC70",
+        "fullRemoveRva": "0x8168AA0",
+        "recruitTableId": "0x10B1",
+        "teamTableId": "0x18B1",
+        "controllerDescriptorTableId": "0x138D",
+        "userTargetTableId": "0x104B",
+        "activePitchTableId": "0x1691",
+        "membershipTableId": "0x16CA"
+      }
+    }
+  ]
+}

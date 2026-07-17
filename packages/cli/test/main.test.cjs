@@ -113,13 +113,20 @@ test('run delegates the complete file and eval preserves separate source tokens'
 test('doctor dispatch performs no installation writes', async () => {
   const { io } = memoryIo({ CFB27_GAME_DIR: 'F:\\game', CFB27_MMC_DIR: 'F:\\mmc' });
   let installs = 0;
+  let doctorOptions;
   const sdk = {
-    doctor: async () => ({ checks: [] }),
+    doctor: async (options) => { doctorOptions = options; return { checks: [] }; },
     installHook: async () => { installs += 1; },
     restoreMmcHook: async () => { installs += 1; },
   };
-  assert.equal(await main(['doctor'], { sdk, io }), 0);
+  assert.equal(await main(['doctor', '--artifacts-dir', 'F:\\artifacts'], { sdk, io }), 0);
   assert.equal(installs, 0);
+  assert.deepEqual(doctorOptions, {
+    gameDir: 'F:\\game',
+    mmcDir: 'F:\\mmc',
+    proxyDll: path.resolve('F:\\artifacts', 'cfb27_cryptbase_proxy.dll'),
+    hostDll: path.resolve('F:\\artifacts', 'cfb27_lua_host.dll'),
+  });
 });
 
 test('logs and events dispatch through cursor-aware SDK methods', async () => {

@@ -392,7 +392,13 @@ async function main(argv, {
       if (positionals.length) throw usageError('doctor does not accept positional arguments');
       const gameDir = requireDirectory(options.gameDir || env.CFB27_GAME_DIR, '--game-dir');
       const mmcDir = requireDirectory(options.mmcDir || env.CFB27_MMC_DIR, '--mmc-dir');
-      result = await sdk.doctor({ gameDir, mmcDir });
+      const artifactsDir = options.artifactsDir || env.CFB27_HOOK_ARTIFACTS;
+      const doctorOptions = { gameDir, mmcDir };
+      if (artifactsDir) {
+        doctorOptions.proxyDll = path.resolve(artifactsDir, 'cfb27_cryptbase_proxy.dll');
+        doctorOptions.hostDll = path.resolve(artifactsDir, 'cfb27_lua_host.dll');
+      }
+      result = await sdk.doctor(doctorOptions);
     } else if (command === 'logs') {
       if (positionals.length) throw usageError('logs does not accept positional arguments');
       const game = await sdk.discoverGame();

@@ -293,6 +293,48 @@ bool VerifyLuaWriteU8Source(const std::filesystem::path& path,
   return true;
 }
 
+bool VerifyBuildPolicySource(const std::filesystem::path& path,
+                             std::string& error) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input) {
+    error = "could not open Lua host source";
+    return false;
+  }
+  const std::string source((std::istreambuf_iterator<char>(input)),
+                           std::istreambuf_iterator<char>());
+  const auto delegates = [&](std::string_view signature,
+                             std::string_view policy_call,
+                             std::string_view required_argument) {
+    const auto signature_at = source.find(signature);
+    const auto function_open = source.find('{', signature_at);
+    const auto function_close = function_open == std::string::npos
+        ? std::nullopt : MatchingBrace(source, function_open);
+    if (signature_at == std::string::npos || !function_close) return false;
+    const auto body = source.substr(function_open, *function_close - function_open);
+    return body.find(policy_call) != std::string::npos &&
+           body.find(required_argument) != std::string::npos;
+  };
+  if (!delegates("bool ResearchWatchesAllowed()",
+                 "cfb27::build_policy::ResearchWatchesAllowed(",
+                 "g_game_build.load(std::memory_order_acquire)")) {
+    error = "ResearchWatchesAllowed must delegate to the pure build policy";
+    return false;
+  }
+  if (!delegates("bool WriteEnvironmentAllowed()",
+                 "cfb27::build_policy::WritesAllowed(",
+                 "false, SmokeWritesAllowed()")) {
+    error = "WriteEnvironmentAllowed must delegate without session lockdown";
+    return false;
+  }
+  if (!delegates("bool NativeCallsAllowed()",
+                 "cfb27::build_policy::WritesAllowed(",
+                 "g_session_writes_disabled.load(std::memory_order_acquire)")) {
+    error = "NativeCallsAllowed must delegate with session lockdown";
+    return false;
+  }
+  return true;
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -317,6 +359,10 @@ int wmain(int argc, wchar_t** argv) {
     std::cerr << "LuaWriteU8 source policy RED: " << source_error << '\n';
     return 7;
   }
+  if (!VerifyBuildPolicySource(source_path, source_error)) {
+    std::cerr << "build policy source RED: " << source_error << '\n';
+    return 13;
+  }
   if (!SetEnvironmentVariableW(L"CFB27_SMOKE_ALLOW_WRITES", L"1")) return 3;
   if (!SetEnvironmentVariableW(L"CFB27_SMOKE_FORCE_ROLLBACK_UNVERIFIED", L"1") ||
       !SetEnvironmentVariableW(L"CFB27_SMOKE_HOLD_ROLLBACK", L"1") ||
@@ -340,7 +386,14 @@ int wmain(int argc, wchar_t** argv) {
   if (!Request(pipe, {{"protocol", 1}, {"id", "startup-ready"},
                       {"command", "status"}, {"params", Json::object()}},
                response) || !response.value("ok", false) ||
-      !response["result"].value("ready", false)) return 11;
+      response["result"].size() != 7 ||
+      !response["result"].value("ready", false) ||
+      response["result"].value("supportedBuild", true) ||
+      response["result"].value("writesAllowed", true) ||
+      !response["result"].contains("sessionWritesDisabled") ||
+      !response["result"].contains("scriptsRun") ||
+      !response["result"].contains("ticks") ||
+      !response["result"].contains("lastError")) return 11;
   set_game_ready(FALSE);
   if (!Request(pipe, {{"protocol", 1}, {"id", "startup-not-ready"},
                       {"command", "status"}, {"params", Json::object()}},

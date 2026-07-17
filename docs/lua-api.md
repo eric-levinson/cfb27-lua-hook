@@ -55,7 +55,7 @@ local base = cfb.module_base()
 local byte = cfb.read_u8(base)
 local matches = cfb.aob_scan("4D 5A ?? ??", 8)
 
--- Writes require the supported build, offline safety gates, an exact expected
+-- Writes require a certified build, offline safety gates, an exact expected
 -- byte, writable committed memory, and successful readback.
 local changed = cfb.write_u8(address, expected, replacement)
 
@@ -90,7 +90,8 @@ API.
 
 `cfb.call` accepts any committed executable address in the current process,
 zero to eight integer or pointer arguments, and returns the function's 64-bit
-integer result. It is enabled only for the supported offline game build. Calls
+integer result. It is enabled only for an exact registry-matched, certified
+offline game build. Calls
 are serialized and execute synchronously on the host worker that evaluates the
 Lua buffer; the primitive does not move work onto a game-owned UI thread.
 Floating-point/vector arguments, structure returns, and alternate ABI shapes
@@ -108,8 +109,12 @@ count. Each hit includes the integer registers, up to 256 stack qwords, and up
 to eight safely readable qwords at each of `rbx`, `rsi`, `rdi`, `rcx`, `rdx`,
 `r8`, and `r9` in fields such as `rcx_memory`. An unreadable pointer produces
 an empty or partial array. `cfb.unwatch()` restores saved debug-register state.
-These functions are current-process research tools; always collect and disarm
-before continuing normal play.
+These functions, including hit collection and clearing, are enabled only for
+an exact registry-matched diagnostic or certified build while no real
+anticheat is present. They are current-process research tools; always collect
+and disarm before continuing normal play. Diagnostic status grants no native-
+call or write authority. A `.frtk` profile or its runtime evidence cannot grant
+or elevate research, native-call, or write authority.
 
 Supported callback names are `game_ready` and `tick`. The host runs `tick`
 callbacks approximately every 100 ms. The event protocol coalesces observable

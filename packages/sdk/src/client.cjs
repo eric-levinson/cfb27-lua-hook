@@ -814,7 +814,9 @@ function validateTelemetryRegistration(result, types) {
   return result;
 }
 
-function createClient({ pid, pipeName, timeoutMs = 20000 } = {}) {
+function createClient(options = {}) {
+  const { pid, pipeName, timeoutMs = 20000 } = options;
+  const boardMutationTimeoutMs = options.timeoutMs === undefined ? 120000 : timeoutMs;
   if (!pipeName && (!Number.isInteger(pid) || pid <= 0)) {
     throw new Cfb27HookError('INVALID_REQUEST', 'createClient requires a positive PID or pipe name');
   }
@@ -824,6 +826,7 @@ function createClient({ pid, pipeName, timeoutMs = 20000 } = {}) {
   function request(command, params = {}, {
     hostErrorValidator,
     successResponseValidator,
+    requestTimeoutMs = timeoutMs,
   } = {}) {
     if (typeof command !== 'string' || !command || !params || typeof params !== 'object') {
       return Promise.reject(new Cfb27HookError('INVALID_REQUEST', 'Command and params are invalid'));
@@ -837,10 +840,10 @@ function createClient({ pid, pipeName, timeoutMs = 20000 } = {}) {
       let commandSent = false;
       let settled = false;
       const timer = setTimeout(() => {
-        finish(new Cfb27HookError('PIPE_TIMEOUT', `Host did not respond within ${timeoutMs} ms`, {
+        finish(new Cfb27HookError('PIPE_TIMEOUT', `Host did not respond within ${requestTimeoutMs} ms`, {
           pipeName: resolvedPipeName,
         }));
-      }, timeoutMs);
+      }, requestTimeoutMs);
 
       function finish(error, result) {
         if (settled) return;
@@ -1036,12 +1039,16 @@ function createClient({ pid, pipeName, timeoutMs = 20000 } = {}) {
     async addBoard(options = {}) {
       const params = cloneBoardMutationOptions(options);
       await requireBoardMutationCapability();
-      return validateBoardMutationResult(await request('addBoard', params), params, 'add');
+      return validateBoardMutationResult(await request('addBoard', params, {
+        requestTimeoutMs: boardMutationTimeoutMs,
+      }), params, 'add');
     },
     async removeBoard(options = {}) {
       const params = cloneBoardMutationOptions(options);
       await requireBoardMutationCapability();
-      return validateBoardMutationResult(await request('removeBoard', params), params, 'remove');
+      return validateBoardMutationResult(await request('removeBoard', params, {
+        requestTimeoutMs: boardMutationTimeoutMs,
+      }), params, 'remove');
     },
     getLogs({ limit = 100 } = {}) {
       return request('logs', { limit });
