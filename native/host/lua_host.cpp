@@ -6,6 +6,7 @@
 #include "memory_transaction.h"
 #include "native_call.h"
 #include "board_mutation.h"
+#include "build_policy.h"
 #include "game_builds.h"
 #include "frtk_catalog.h"
 #include "frtk_lua_api.h"
@@ -49,8 +50,6 @@ namespace {
 constexpr wchar_t kPipePrefix[] = L"\\\\.\\pipe\\CFB27LuaHost.";
 constexpr wchar_t kV1PipePrefix[] = L"\\\\.\\pipe\\CFB27LuaHost.v1.";
 constexpr char kHostVersion[] = "0.2.0-dev.2";
-constexpr std::uintmax_t kSupportedExecutableSize = 247845776;
-constexpr char kSupportedExecutableSha256[] = "9E654AD49C4702D8F9FA4E38FD1110ABE657DD38926D4124B30C70E7D29ADFE8";
 constexpr DWORD kTickMilliseconds = 100;
 
 struct Callback {
@@ -72,7 +71,7 @@ struct LogEntry {
 
 std::atomic<bool> g_running{true};
 std::atomic<bool> g_ready{false};
-std::atomic<bool> g_supported_build{false};
+std::atomic<const cfb27::game_builds::Build*> g_game_build{nullptr};
 std::atomic<bool> g_session_writes_disabled{false};
 std::atomic<std::uint64_t> g_scripts_run{0};
 std::atomic<std::uint64_t> g_ticks{0};
@@ -143,12 +142,6 @@ void Log(std::string_view message) {
   }
 }
 
-bool EndsWithInsensitive(std::wstring value, const wchar_t* suffix) {
-  const std::wstring expected(suffix);
-  if (value.size() < expected.size()) return false;
-  return _wcsicmp(value.c_str() + value.size() - expected.size(), expected.c_str()) == 0;
-}
-
 std::string Sha256File(const std::filesystem::path& path) {
   BCRYPT_ALG_HANDLE algorithm{};
   BCRYPT_HASH_HANDLE hash{};
@@ -186,18 +179,23 @@ std::string Sha256File(const std::filesystem::path& path) {
   return encoded.str();
 }
 
-bool VerifySupportedBuild() {
+const cfb27::game_builds::Build* ResolveGameBuild() {
   wchar_t executable[MAX_PATH]{};
-  if (!GetModuleFileNameW(nullptr, executable, MAX_PATH) ||
-      !EndsWithInsensitive(executable, L"CollegeFB27.exe")) return false;
+  if (!GetModuleFileNameW(nullptr, executable, MAX_PATH)) return nullptr;
   WIN32_FILE_ATTRIBUTE_DATA data{};
-  if (!GetFileAttributesExW(executable, GetFileExInfoStandard, &data)) return false;
+  if (!GetFileAttributesExW(executable, GetFileExInfoStandard, &data)) return nullptr;
   const auto size = (static_cast<std::uintmax_t>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
-  return size == kSupportedExecutableSize && Sha256File(executable) == kSupportedExecutableSha256;
+  return cfb27::game_builds::FindBuild(size, Sha256File(executable));
 }
 
-bool SupportedBuild() {
-  return g_supported_build.load(std::memory_order_acquire);
+bool CertifiedBuild() {
+  return cfb27::game_builds::IsCertified(
+      g_game_build.load(std::memory_order_acquire));
+}
+
+bool DiagnosticOrCertifiedBuild() {
+  return cfb27::game_builds::IsDiagnosticOrCertified(
+      g_game_build.load(std::memory_order_acquire));
 }
 
 bool EnvironmentIsOne(const wchar_t* name) {
@@ -263,12 +261,26 @@ bool RealAnticheatIsRunning() {
 }
 
 bool WriteEnvironmentAllowed() {
-  return (SupportedBuild() || SmokeWritesAllowed()) && !RealAnticheatIsRunning();
+  return (CertifiedBuild() || SmokeWritesAllowed()) &&
+         !RealAnticheatIsRunning();
+}
+
+bool ResearchWatchesAllowed() {
+  return DiagnosticOrCertifiedBuild() && !RealAnticheatIsRunning();
 }
 
 bool NativeCallsAllowed() {
   return !g_session_writes_disabled.load(std::memory_order_acquire) &&
          WriteEnvironmentAllowed();
+}
+
+const char* WriteBuildDenialText() {
+  const auto* build = g_game_build.load(std::memory_order_acquire);
+  if (!build) return "UNKNOWN_BUILD: executable identity is not registered";
+  if (!cfb27::game_builds::IsCertified(build)) {
+    return "DIAGNOSTIC_BUILD_WRITE_BLOCKED: executable identity is diagnostic only";
+  }
+  return "Write environment is not allowed";
 }
 
 class ProcessDiscoveryBackend final : public cfb27::frtk::DiscoveryBackend {
@@ -281,7 +293,7 @@ class ProcessDiscoveryBackend final : public cfb27::frtk::DiscoveryBackend {
       std::size_t max_matches,
       const cfb27::frtk::DescriptorMatchFilter& accept_match,
       const cfb27::frtk::DiscoveryDeadline& deadline) override {
-    if (!SupportedBuild()) {
+    if (!CertifiedBuild()) {
       return {.complete = true, .code = "DESCRIPTOR_SCAN_UNSUPPORTED"};
     }
     cfb27::frtk::RowFingerprint fingerprint;
@@ -525,10 +537,10 @@ int LuaWriteU8(lua_State* state) {
     std::lock_guard write_lock(g_host_write_mutex);
     if (g_session_writes_disabled.load(std::memory_order_acquire)) {
       error = "session writes are disabled";
-    } else if (!SupportedBuild() && !SmokeWritesAllowed()) {
-      error = "unsupported College Football 27 build";
-    } else if (RealAnticheatIsRunning()) {
-      error = "writes are disabled while EA anticheat is running";
+    } else if (!WriteEnvironmentAllowed()) {
+      error = RealAnticheatIsRunning()
+          ? "writes are disabled while EA anticheat is running"
+          : WriteBuildDenialText();
     } else if (expected < 0 || expected > 255 || value < 0 || value > 255) {
       error = "byte values must be between 0 and 255";
     } else if (!IsAccessible(address, 1, true)) {
@@ -554,7 +566,7 @@ int LuaNativeCall(lua_State* state) {
     return luaL_error(state, "cfb.call requires a target and zero to eight arguments");
   }
   if (!NativeCallsAllowed()) {
-    return luaL_error(state, "native calls require the supported offline game build");
+    return luaL_error(state, "%s", WriteBuildDenialText());
   }
 
   const auto target = static_cast<std::uintptr_t>(luaL_checkinteger(state, 1));
@@ -585,8 +597,9 @@ int LuaNativeCall(lua_State* state) {
 }
 
 int LuaArmWatch(lua_State* state, cfb27::research_watch::Kind kind) {
-  if (!NativeCallsAllowed()) {
-    return luaL_error(state, "research watches require the supported offline game build");
+  if (!ResearchWatchesAllowed()) {
+    return luaL_error(state,
+                      "RESEARCH_WATCH_NOT_ALLOWED: exact diagnostic or certified offline identity required");
   }
   const auto address = static_cast<std::uintptr_t>(luaL_checkinteger(state, 1));
   const auto length = kind == cfb27::research_watch::Kind::kExecute
@@ -627,6 +640,10 @@ void PushPointerSnapshot(
 }
 
 int LuaWatchHits(lua_State* state) {
+  if (!ResearchWatchesAllowed()) {
+    return luaL_error(state,
+                      "RESEARCH_WATCH_NOT_ALLOWED: exact diagnostic or certified offline identity required");
+  }
   const bool clear = lua_toboolean(state, 1) != 0;
   const auto snapshot = cfb27::research_watch::Collect(clear);
   lua_createtable(state, static_cast<int>(snapshot.hits.size()), 1);
@@ -668,6 +685,10 @@ int LuaWatchHits(lua_State* state) {
 }
 
 int LuaUnwatch(lua_State* state) {
+  if (!ResearchWatchesAllowed()) {
+    return luaL_error(state,
+                      "RESEARCH_WATCH_NOT_ALLOWED: exact diagnostic or certified offline identity required");
+  }
   lua_pushinteger(state,
                   static_cast<lua_Integer>(cfb27::research_watch::Disarm()));
   return 1;
@@ -1070,8 +1091,8 @@ void RunAutorun() {
 std::string StatusJson() {
   std::ostringstream out;
   out << "{\"ok\":true,\"ready\":" << (g_ready.load() ? "true" : "false")
-      << ",\"supportedBuild\":" << (SupportedBuild() ? "true" : "false")
-      << ",\"writesAllowed\":" << ((SupportedBuild() && !RealAnticheatIsRunning()) ? "true" : "false")
+      << ",\"supportedBuild\":" << (CertifiedBuild() ? "true" : "false")
+      << ",\"writesAllowed\":" << (NativeCallsAllowed() ? "true" : "false")
       << ",\"scriptsRun\":" << g_scripts_run.load()
       << ",\"ticks\":" << g_ticks.load()
       << ",\"lastError\":\"" << JsonEscape(g_last_error) << "\"}";
@@ -1396,7 +1417,7 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
     return ErrorResponse(id, "INVALID_REQUEST", "Request params must be an object");
   }
 
-  const bool supported = SupportedBuild();
+  const bool supported = CertifiedBuild();
   const bool session_writes_disabled =
       g_session_writes_disabled.load(std::memory_order_acquire);
   const bool writes_allowed = !session_writes_disabled && WriteEnvironmentAllowed();
@@ -1448,7 +1469,7 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
     }
     if (!NativeCallsAllowed()) {
       return ErrorResponse(id, "UNSUPPORTED_BUILD",
-                           "Native calls require the supported offline game build");
+                           WriteBuildDenialText());
     }
 
     const auto canonical_target = CanonicalAddress(params["address"].get<std::string>());
@@ -1519,10 +1540,9 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
     }
     if (!NativeCallsAllowed()) {
       return ErrorResponse(id, "UNSUPPORTED_BUILD",
-                           "Board mutations require the supported offline game build");
+                           WriteBuildDenialText());
     }
-    const auto* board_build = cfb27::game_builds::FindBuild(
-        kSupportedExecutableSize, kSupportedExecutableSha256);
+    const auto* board_build = g_game_build.load(std::memory_order_acquire);
     if (!cfb27::game_builds::IsCertified(board_build) || !board_build->board) {
       return ErrorResponse(id, "UNSUPPORTED_BUILD",
                            "Board mutations require a certified board layout");
@@ -1583,9 +1603,12 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
     if (!parsed.ok()) {
       return ErrorResponse(id, "FRTK_PROFILE_INVALID", "FrTk profile is invalid");
     }
-    if ((!supported && !(SmokeWritesAllowed() &&
-          parsed.bundle->build_identity == "synthetic-protocol-smoke")) ||
-        (supported && parsed.bundle->build_identity != kSupportedExecutableSha256)) {
+    const auto* matched_build = g_game_build.load(std::memory_order_acquire);
+    const bool synthetic_smoke = SmokeWritesAllowed() &&
+        parsed.bundle->build_identity == "synthetic-protocol-smoke";
+    const bool certified_profile = cfb27::game_builds::IsCertified(matched_build) &&
+        parsed.bundle->build_identity == matched_build->executable_sha256;
+    if (!synthetic_smoke && !certified_profile) {
       return ErrorResponse(id, "UNSUPPORTED_BUILD",
                            "FrTk profile does not match this executable build");
     }
@@ -1794,12 +1817,12 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
     if (g_session_writes_disabled.load(std::memory_order_acquire))
       return ErrorResponse(id, "SESSION_WRITES_DISABLED",
                            "Writes are disabled for the remainder of this host session");
-    if (!SupportedBuild() && !SmokeWritesAllowed())
-      return ErrorResponse(id, "UNSUPPORTED_BUILD",
-                           "Memory writes require the exact supported build");
-    if (RealAnticheatIsRunning())
-      return ErrorResponse(id, "MEMORY_ACCESS_DENIED",
-                           "Writes are disabled while EA anticheat is running");
+    if (!WriteEnvironmentAllowed()) {
+      if (RealAnticheatIsRunning())
+        return ErrorResponse(id, "MEMORY_ACCESS_DENIED",
+                             "Writes are disabled while EA anticheat is running");
+      return ErrorResponse(id, "UNSUPPORTED_BUILD", WriteBuildDenialText());
+    }
 
     struct ChangeGroup {
       std::uint32_t unique_id{};
@@ -1899,13 +1922,11 @@ cfb27::protocol::Json HandleV1Request(const cfb27::protocol::Json& request) {
       return ErrorResponse(id, "SESSION_WRITES_DISABLED",
                            "Writes are disabled for the remainder of this host session");
     }
-    if (!SupportedBuild() && !SmokeWritesAllowed()) {
-      return ErrorResponse(id, "UNSUPPORTED_BUILD",
-                           "Memory writes require the exact supported build");
-    }
-    if (RealAnticheatIsRunning()) {
-      return ErrorResponse(id, "MEMORY_ACCESS_DENIED",
-                           "Writes are disabled while EA anticheat is running");
+    if (!WriteEnvironmentAllowed()) {
+      if (RealAnticheatIsRunning())
+        return ErrorResponse(id, "MEMORY_ACCESS_DENIED",
+                             "Writes are disabled while EA anticheat is running");
+      return ErrorResponse(id, "UNSUPPORTED_BUILD", WriteBuildDenialText());
     }
     if (!HasOnlyKeys(params, {"transactionId", "operations"}) ||
         !params.contains("transactionId") || !params["transactionId"].is_string() ||
@@ -2286,7 +2307,7 @@ DWORD WINAPI Start(void* module_value) {
   GetModuleFileNameW(module, path, MAX_PATH);
   g_host_directory = std::filesystem::path(path).parent_path();
   g_log_path = g_host_directory / L"cfb27_lua_host.log";
-  g_supported_build.store(VerifySupportedBuild(), std::memory_order_release);
+  g_game_build.store(ResolveGameBuild(), std::memory_order_release);
   g_lua = luaL_newstate();
   if (!g_lua) { g_last_error = "could not create Lua state"; return 1; }
   luaL_openlibs(g_lua);

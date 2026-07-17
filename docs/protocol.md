@@ -68,6 +68,12 @@ writes as `memoryWriteTransaction`, and structured event registration as
 unverifiable rollback has permanently disabled writes for the current host
 session.
 
+`hello.supportedBuild` and `status.supportedBuild` are `true` only for an exact
+registry-matched certified executable identity. Research watches use a separate
+gate: they require an exact diagnostic or certified identity and no real
+anticheat. Native calls and every write path require certification. These
+existing `hello` and `status` result shapes gain no additional policy keys.
+
 The FrTk families are advertised as `frtkProfileV1`, `frtkCatalogV1`,
 `frtkRecordReadV1`, and `frtkFieldTransactionV1`. Public table selectors always
 use `uniqueId`; logical names are display text and current-build table IDs stay
@@ -79,6 +85,10 @@ Profile and layout identity are validated together against the running build.
 Discovery advances generation on every attempt and installs no partial catalog
 when a required table is unresolved. Inspection returns sanitized identity,
 capacity, authority, generation, and bounded evidence only.
+
+A `.frtk` bundle and all evidence derived from it are data-validation inputs,
+not runtime credentials. They cannot certify an executable or grant research,
+native-call, or write authority.
 
 Typed reads accept 1–64 record selectors. Each result has fixed keys
 `uniqueId`, `row`, and `values`; `values` is an ordered array of fixed-shape
@@ -274,10 +284,11 @@ eight values. The host uses the Windows x64 integer/pointer ABI and returns the
 ```
 
 The target must be a committed executable address in the current process, and
-the host must recognize the supported offline game build. Calls are serialized
-and run synchronously on the named-pipe request worker; this command does not
-schedule onto a game-owned UI thread. The primitive supports integer and
-pointer arguments only—no floating-point/vector arguments, structures, or
+the host must match a certified offline game-build identity. A diagnostic
+identity can use research watches but cannot call native code. Calls are
+serialized and run synchronously on the named-pipe request worker; this command
+does not schedule onto a game-owned UI thread. The primitive supports integer
+and pointer arguments only—no floating-point/vector arguments, structures, or
 alternate calling conventions. `NATIVE_CALL_TARGET_INVALID` rejects a
 non-executable target. `NATIVE_CALL_EXCEPTION` reports a structured-exception
 code, but cannot roll back native side effects that occurred before the fault.
@@ -288,9 +299,10 @@ The SDK method is `client.nativeCall({ address, arguments })` and negotiates the
 ## Recruiting board mutations
 
 `addBoard { recruitRow, teamRow }` and `removeBoard { recruitRow, teamRow }`
-invoke the current supported build's verified full recruiting handlers. The
+invoke the current certified build's verified full recruiting handlers. The
 rows identify the requested Recruit record and the active Team record; no team
-is hardcoded. Both commands require the `boardMutationV1` capability and must
+is hardcoded. Both commands require a matched certified registry entry with a
+board layout, require the `boardMutationV1` capability, and must
 be called while the recruiting runtime is loaded, but they do not depend on a
 specific recruiting screen or selected UI row.
 

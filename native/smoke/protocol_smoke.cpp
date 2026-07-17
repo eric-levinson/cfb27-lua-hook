@@ -432,7 +432,12 @@ int wmain(int argc, wchar_t** argv) {
   Json response;
   if (!Request(pipe, {{"protocol", 1}, {"id", "hello-1"},
                       {"command", "hello"}, {"params", Json::object()}}, response, true)) return 3;
-  if (!response.value("ok", false) || response["result"].value("protocolVersion", 0) != 1) return 4;
+  if (!response.value("ok", false) || response["result"].size() != 5 ||
+      response["result"].value("protocolVersion", 0) != 1 ||
+      !response["result"].contains("hostVersion") ||
+      response["result"].value("supportedBuild", true) ||
+      !response["result"].value("writesAllowed", false) ||
+      !response["result"].contains("capabilities")) return 4;
   const auto capabilities = response["result"]["capabilities"];
   if (std::find(capabilities.begin(), capabilities.end(), "evaluate") == capabilities.end()) return 5;
   if (std::find(capabilities.begin(), capabilities.end(), "telemetry") == capabilities.end()) return 51;
@@ -477,7 +482,9 @@ int wmain(int argc, wchar_t** argv) {
   if (!Request(pipe, {{"protocol", 1}, {"id", "research-watch-lua"},
                       {"command", "evaluate"},
                       {"params", {{"source", watch_lua}}}},
-               response, false) || !response.value("ok", false)) return 144;
+               response, false) || !IsError(response, "SCRIPT_ERROR") ||
+      response["error"].value("message", "").find(
+          "RESEARCH_WATCH_NOT_ALLOWED") == std::string::npos) return 144;
   if (!Request(pipe, {{"protocol", 1}, {"id", "native-call-invalid"},
                       {"command", "nativeCall"},
                       {"params", {{"address", "0x1"},
@@ -790,7 +797,14 @@ int wmain(int argc, wchar_t** argv) {
 
   if (!Request(pipe, {{"protocol", 1}, {"id", "status-1"},
                       {"command", "status"}, {"params", Json::object()}}, response, false)) return 14;
-  if (!response.value("ok", false) || !response["result"].contains("ready")) return 15;
+  if (!response.value("ok", false) || response["result"].size() != 7 ||
+      !response["result"].contains("ready") ||
+      response["result"].value("supportedBuild", true) ||
+      !response["result"].value("writesAllowed", false) ||
+      !response["result"].contains("sessionWritesDisabled") ||
+      !response["result"].contains("scriptsRun") ||
+      !response["result"].contains("ticks") ||
+      !response["result"].contains("lastError")) return 15;
 
   const Json write_params{
       {"transactionId", "smoke.apply-1"},

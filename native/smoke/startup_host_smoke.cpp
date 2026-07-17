@@ -340,7 +340,14 @@ int wmain(int argc, wchar_t** argv) {
   if (!Request(pipe, {{"protocol", 1}, {"id", "startup-ready"},
                       {"command", "status"}, {"params", Json::object()}},
                response) || !response.value("ok", false) ||
-      !response["result"].value("ready", false)) return 11;
+      response["result"].size() != 7 ||
+      !response["result"].value("ready", false) ||
+      response["result"].value("supportedBuild", true) ||
+      response["result"].value("writesAllowed", true) ||
+      !response["result"].contains("sessionWritesDisabled") ||
+      !response["result"].contains("scriptsRun") ||
+      !response["result"].contains("ticks") ||
+      !response["result"].contains("lastError")) return 11;
   set_game_ready(FALSE);
   if (!Request(pipe, {{"protocol", 1}, {"id", "startup-not-ready"},
                       {"command", "status"}, {"params", Json::object()}},
